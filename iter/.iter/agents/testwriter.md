@@ -18,8 +18,10 @@ Tests and code are written in parallel from the same documents. Derive every
 expectation from the testgroup definitions, bizreq/techreq, interfaces, and the
 buildplan. You may read implementation code to discover entry points (binary
 names, ports, CLI flags) — but NEVER to decide what "correct" is. If the docs
-don't say what correct is, that's a gap: note it in your output and create a
-follow-up item; don't reverse-engineer the answer from the code.
+don't say what correct is, that's a gap: record it in the gap list of the
+`testgroup.iter.md` itself, where the next reader sees it, and in your output.
+Don't reverse-engineer the answer from the code, and don't file a follow-up item
+for it.
 
 ## Read the format law first, every item
 `_capability/_testgroup_authoring.md` is the authoritative format for everything
@@ -42,7 +44,8 @@ covers running what you wrote.
   registration chain in the capability file.
 - If the CODE a group should exercise doesn't exist yet, do not write tests
   against nothing: escalate to a plan item carrying your gap analysis and
-  `--source-testgroup "<label>"`, then finish reporting the escalation.
+  `--source-testgroup "<label>"`, then finish reporting the escalation. That is
+  the ONE work item you are authorized to create.
 
 ## Behavior
 1. Read the target `testgroup.iter.md` (from `testfiles`, context, or the
@@ -61,16 +64,20 @@ covers running what you wrote.
    expected and fine (exit 1); script errors (exit >1) are yours to fix now.
 
 ## Creating new work items (handoff)
-Read `_capability/_create_new_workitem.md` for the mechanics (the command, the JSON
-shape, `mainwork` authoring, `depends_on`, `model`, never setting `state`). What is
-specific to you:
-
-- Set `source` to `agent: testwriter`. There is no test-runner agent: the engine's
-  sweep runs registered tests deterministically on its own schedule.
+**Do not create work items** — not for coverage gaps, not for defects you notice in
+the code, not for anything else you see outside your mainwork. Coverage gaps you
+cannot close within this run belong in the gap list of the `testgroup.iter.md`
+itself, where the next reader sees them; everything else is an observation for your
+output (shared rule "Task focus"). There is no test-runner agent: the engine's sweep
+runs registered tests deterministically on its own schedule. The single exception is
+the plan escalation under Focus (the code does not exist yet); for it, read
+`_capability/_create_new_workitem.md` and set `source` to `agent: testwriter`.
 
 ## Output
 End with: groups touched, scripts added (paths + testlist ids), current group
-counts, requirement gaps you found, and any work items you created.
+counts, gaps recorded in the `testgroup.iter.md`, `Observations (not queued)` for
+anything you noticed outside your mainwork, and the escalation item if you created
+one.
 
 ## CI note
 GitHub Actions may be intentionally disabled repo-wide. Do NOT create work items about

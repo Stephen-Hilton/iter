@@ -18,9 +18,23 @@ pub struct RunOut {
     pub subtype: String,
     pub num_turns: u64,
     pub cost_usd: f64,
+    /// uncached input tokens only (what the stream's `usage.input_tokens` reports)
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// prompt tokens served from the cache — nearly all of an agent's context
+    /// cost lives here, not in `input_tokens` (fixed 2026-09-08: the spend row
+    /// used to record ~200 input tokens for a 130-turn session)
+    pub cache_read_tokens: u64,
+    /// prompt tokens written into the cache
+    pub cache_create_tokens: u64,
+    /// the claude session this run used (for session continuation)
+    pub session_id: String,
 }
+
+/// Agents whose items get the "agentmemory" turn (decided 2026-09-08): the
+/// ones that work inside a codepath.  Plan/usecase/ingest lock plan dirs; a
+/// briefing there helps nobody.
+pub const AGENTMEMORY_AGENTS: &[&str] = &["code", "refactor", "testwriter", "deploy"];
 
 /// Stop requests the engine tick has seen for items this engine is running;
 /// the wait loop kills the session the moment its workid appears.
@@ -33,7 +47,7 @@ thread_local! {
 
 impl RunOut {
     fn plain(text: String) -> Self {
-        Self { text, subtype: "success".into(), num_turns: 0, cost_usd: 0.0, input_tokens: 0, output_tokens: 0 }
+        Self { text, subtype: "success".into(), ..Default::default() }
     }
 }
 
@@ -47,7 +61,46 @@ struct GateCtx {
     topdir: String,
 }
 
+/// Run one claimed item, then — session continuation (decided 2026-09-08) —
+/// keep the same claude session for up to `session_chain_max` queued
+/// neighbours: same lockdirs, same usecase, dependencies satisfied, and the
+/// best of everything queued on that scope.  Each item is still its own
+/// claim, gate, spend row and close.
 pub fn execute(api: &Api, engine_name: &str, project: &Project, topdir: &str, item: WorkItem, account: &str) {
+    let mut item = item;
+    let mut prev: Option<crate::prompt::ChainPrev> = None;
+    let max = project.session_chain_max;
+    loop {
+        let (complete, sid) = execute_one(api, engine_name, project, topdir, &item, account, prev.as_ref());
+        let position = prev.as_ref().map(|p| p.position).unwrap_or(1);
+        if !complete || item.agent == "exec" || sid.is_empty() || max <= 1 || position >= max {
+            break;
+        }
+        match claim_chain_candidate(api, engine_name, project, &item) {
+            Some(next) => {
+                println!(
+                    "[engine] chain: {} '{}' -> {} '{}' (same session, {} of {})",
+                    short(&item.id), item.name, short(&next.id), next.name, position + 1, max
+                );
+                prev = Some(crate::prompt::ChainPrev { sid, prev_id: item.id.clone(), prev_name: item.name.clone(), position: position + 1, max });
+                item = next;
+            }
+            None => break,
+        }
+    }
+}
+
+/// (closed complete?, session id) for one item.
+fn execute_one(
+    api: &Api,
+    engine_name: &str,
+    project: &Project,
+    topdir: &str,
+    item: &WorkItem,
+    account: &str,
+    chain: Option<&crate::prompt::ChainPrev>,
+) -> (bool, String) {
+    let item = item.clone();
     CURRENT_WORKID.with(|w| *w.borrow_mut() = item.id.clone());
     let details = fetch_details(api, project, &item);
 
@@ -56,12 +109,13 @@ pub fn execute(api: &Api, engine_name: &str, project: &Project, topdir: &str, it
         println!("[engine] {} '{}': close-gate widget answered accept — closing without a run",
             short(&item.id), item.name);
         let out = RunOut::plain("closed complete by a human via the close-gate widget (accept)".into());
-        close(api, engine_name, project, item, Ok(out), None);
-        return;
+        close(api, engine_name, project, item, Ok(out), None, None);
+        return (true, String::new());
     }
 
     let head_before = git_head(topdir);
-    let result = run_all(api, project, topdir, &item, account, &details);
+    let result = run_all(api, project, topdir, &item, account, &details, chain);
+    let sid = result.as_ref().map(|o| o.session_id.clone()).unwrap_or_default();
     // `iter ask` / `iter reject` move the item to question/parked mid-run; the
     // close must keep that state (and skip the gate) instead of completing it
     if item.agent != "exec" {
@@ -70,7 +124,7 @@ pub fn execute(api: &Api, engine_name: &str, project: &Project, topdir: &str, it
             if st == "question" || st == "parked" {
                 println!("[engine] {} '{}': agent moved it to {} during the run — keeping that", short(&item.id), item.name, st);
                 close_keep_state(api, project, item, result, st);
-                return;
+                return (false, sid);
             }
         }
     }
@@ -87,7 +141,77 @@ pub fn execute(api: &Api, engine_name: &str, project: &Project, topdir: &str, it
             topdir: topdir.to_string(),
         })
     };
-    close(api, engine_name, project, item, result, ctx);
+    let complete = close(api, engine_name, project, item, result, ctx, chain.map(|c| c.prev_id.as_str()));
+    (complete, sid)
+}
+
+/// The queued neighbour a just-completed item's session may take on next
+/// (session continuation): same lockdirs, same usecase tags, dependencies
+/// satisfied, and the best (priority, age) of EVERY queued item overlapping
+/// that scope — so chaining never lets a lineage jump a more urgent one.
+/// Claims it (queued -> in-progress + central locks) exactly like a dispatch;
+/// None when nothing fits or the claim/lock race is lost.
+fn claim_chain_candidate(api: &Api, engine_name: &str, project: &Project, prev: &WorkItem) -> Option<WorkItem> {
+    let rows = project_items(api, project);
+    let items: Vec<WorkItem> = rows.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect();
+    let by_id: std::collections::HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
+    let kids = iter_core::children_index(&items);
+    let now = now_utc();
+    let mut prev_dirs = prev.lockdirs.clone();
+    prev_dirs.sort();
+    if prev_dirs.is_empty() {
+        return None;
+    }
+    let prev_uc = iter_core::usecase_tags(&prev.tags);
+    let runnable = |i: &WorkItem| -> bool {
+        i.state == "queued"
+            && i.id != prev.id
+            && i.agent != "exec"
+            && !i.needs_approval
+            && !i.stop_requested
+            && (i.retry_after.is_empty() || i.retry_after <= now)
+            && iter_core::dependency_status(i, &by_id, &kids) == iter_core::DepStatus::Satisfied
+    };
+    let overlaps = |i: &WorkItem| i.lockdirs.iter().any(|d| prev_dirs.iter().any(|p| iter_core::paths_overlap(d, p)));
+    let mut competitors: Vec<&WorkItem> = items.iter().filter(|i| runnable(i) && overlaps(i)).collect();
+    competitors.sort_by_key(|i| (i.priority, i.ts.receive.clone()));
+    let best = competitors.first().copied()?;
+    let mut dirs = best.lockdirs.clone();
+    dirs.sort();
+    if dirs != prev_dirs || iter_core::usecase_tags(&best.tags) != prev_uc {
+        return None; // the next thing due on this scope is not a neighbour: leave it to dispatch
+    }
+    // claim (mirrors engine::start_item)
+    let mut claimed = serde_json::to_value(best).ok()?;
+    claimed["state"] = json!("in-progress");
+    claimed["run_now"] = json!(false);
+    claimed["retry_after"] = json!("");
+    claimed["blockedby_locks"] = json!([]);
+    claimed["tags"] = json!(best.tags.iter().filter(|t| !t.text.starts_with(iter_core::BLOCKED_TAG_PREFIX))
+        .map(|t| json!({"text": t.text, "color": t.color})).collect::<Vec<_>>());
+    claimed["engine"] = json!(engine_name);
+    claimed["attempt"] = json!(best.attempt + 1);
+    claimed["ts"]["start"] = json!(now_utc());
+    let resp = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, best.id, best.version), &claimed).ok()?;
+    let claimed_item: WorkItem = serde_json::from_value(resp).ok()?;
+    let mut acquired: Vec<String> = Vec::new();
+    for d in &claimed_item.lockdirs {
+        let res = api.post(
+            &format!("/api/projects/{}/locks/acquire", project.name),
+            &json!({"path": d, "kind": "lock", "engine": engine_name, "workid": claimed_item.id, "ttl_sec": 3900}),
+        );
+        if res.is_err() {
+            for p in &acquired {
+                let _ = api.post(&format!("/api/projects/{}/locks/release", project.name), &json!({"path": p, "workid": claimed_item.id}));
+            }
+            let mut back = serde_json::to_value(&claimed_item).ok()?;
+            back["state"] = json!("queued");
+            let _ = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, claimed_item.id, claimed_item.version), &back);
+            return None;
+        }
+        acquired.push(d.clone());
+    }
+    Some(claimed_item)
 }
 
 fn short(id: &str) -> &str {
@@ -110,6 +234,13 @@ fn request_text(details: &[Value], item: &WorkItem) -> String {
         .unwrap_or_else(|| item.name.clone())
 }
 
+fn project_items(api: &Api, project: &Project) -> Vec<Value> {
+    api.get(&format!("/api/projects/{}/workitems", project.name))
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+
 fn agent_config(api: &Api, project: &Project, item: &WorkItem) -> (Value, Value) {
     let agent_def = api.get(&format!("/api/agents/{}", item.agent)).unwrap_or(Value::Null);
     let overrides = project.agents.get(&item.agent).cloned().unwrap_or(Value::Null);
@@ -123,6 +254,7 @@ fn run_all(
     item: &WorkItem,
     account: &str,
     details: &[Value],
+    chain: Option<&crate::prompt::ChainPrev>,
 ) -> Result<RunOut, String> {
     let is_repo = std::path::Path::new(topdir).join(".git").exists();
     let has_remote = is_repo
@@ -153,7 +285,7 @@ fn run_all(
         }
         RunOut::plain(run_shell(topdir, &item.exec_shell, agent_timeout(project, item, &Value::Null))?)
     } else {
-        run_claude(api, project, topdir, item, account, details)?
+        run_claude(api, project, topdir, item, account, details, chain)?
     };
 
     // git postwork is engine-enforced: changes are ALWAYS committed (and
@@ -229,6 +361,7 @@ fn run_claude(
     item: &WorkItem,
     account: &str,
     details: &[Value],
+    chain: Option<&crate::prompt::ChainPrev>,
 ) -> Result<RunOut, String> {
     let agent_def = api
         .get(&format!("/api/agents/{}", item.agent))
@@ -271,7 +404,7 @@ fn run_claude(
         .and_then(|d| d.get("value").and_then(|v| v.as_str()).map(String::from))
         .unwrap_or_default();
 
-    let (spin, context_files, warnings) = crate::prompt::spinup(&crate::prompt::SpinupInput {
+    let spin_input = crate::prompt::SpinupInput {
         agent_body: &promptbody,
         tooling: &tooling,
         head: &head,
@@ -283,7 +416,12 @@ fn run_claude(
         createdby_agent: &createdby_agent,
         last_response_tail: &last_response,
         close_gate_paragraph: &format!("\n\n{}", gate::WORKER_CLOSE_GATE_PROMPT),
-    });
+    };
+    // a chained item joins an existing session: only the per-item part is sent
+    let (spin, context_files, warnings) = match chain {
+        Some(prev) => crate::prompt::chain_spinup(&spin_input, prev),
+        None => crate::prompt::spinup(&spin_input),
+    };
     for w in &warnings {
         eprintln!("[engine] {} context: {w}", short(&item.id));
     }
@@ -303,7 +441,13 @@ fn run_claude(
         }
     }
     let mut main = crate::prompt::mainwork_prompt(&request, answered.map(|(_, q, a)| (q, a)));
-    let feedback = gate::feedback_section(details);
+    // what earlier attempts already filed (never on attempt 1; one list read)
+    let created = if item.attempt > 1 || item.gate_bounces > 0 {
+        gate::children_of(&project_items(api, project), &item.id)
+    } else {
+        Vec::new()
+    };
+    let feedback = gate::feedback_section(details, &created);
     if !feedback.is_empty() {
         main.push_str("\n\n");
         main.push_str(&feedback);
@@ -321,6 +465,11 @@ fn run_claude(
         if let Some(body) = tooling.prepost.get(step) {
             turns.push((format!("postwork:{step}"), body.clone()));
         }
+    }
+    // agent memory (decided 2026-09-08): the codepath's briefing for the next
+    // agent, refreshed by every codepath-working agent before the self-check
+    if AGENTMEMORY_AGENTS.contains(&item.agent.as_str()) && !item.lockdirs.is_empty() && codepath.is_dir() {
+        turns.push(("agentmemory".into(), crate::prompt::agentmemory_prompt(&codepath)));
     }
     turns.push(("selfcheck".into(), crate::prompt::selfcheck_prompt(&promptbody, &tooling.shared)));
 
@@ -347,12 +496,13 @@ fn run_claude(
         envs.push(("PATH".into(), format!("{}:{}", dir.display(), path)));
     }
     let extra: Vec<String> = flags.split_whitespace().map(String::from).collect();
-    let mut session = Session { sid: String::new(), cwd: codepath.to_string_lossy().into_owned(), model, extra, envs, timeout, account: account.to_string() };
+    let mut session = Session { sid: chain.map(|c| c.sid.clone()).unwrap_or_default(), cwd: codepath.to_string_lossy().into_owned(), model, extra, envs, timeout, account: account.to_string() };
     if !std::path::Path::new(&session.cwd).is_dir() {
         session.cwd = topdir.to_string();
     }
     let mut last = RunOut::default();
     let (mut usd, mut tin, mut tout, mut nturns) = (0.0f64, 0u64, 0u64, 0u64);
+    let (mut tcr, mut tcc) = (0u64, 0u64);
     let total = turns.len();
     for (n, (label, prompt)) in turns.into_iter().enumerate() {
         let text = if n == 0 { format!("{spin}\n\n# Step: {label}\n{prompt}") } else { format!("# Step: {label}\n{prompt}") };
@@ -361,6 +511,8 @@ fn run_claude(
         usd += out.cost_usd;
         tin += out.input_tokens;
         tout += out.output_tokens;
+        tcr += out.cache_read_tokens;
+        tcc += out.cache_create_tokens;
         nturns += out.num_turns.max(1);
         // a cut-off turn ends the run: the gate sees the subtype and holds the item
         let cut = out.subtype != "success";
@@ -374,7 +526,10 @@ fn run_claude(
     last.cost_usd = usd;
     last.input_tokens = tin;
     last.output_tokens = tout;
+    last.cache_read_tokens = tcr;
+    last.cache_create_tokens = tcc;
     last.num_turns = nturns;
+    last.session_id = session.sid.clone();
     Ok(last)
 }
 
@@ -601,9 +756,12 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
     if let Ok(out) = &result {
         if out.cost_usd > 0.0 || out.input_tokens > 0 {
             let _ = api.post(&details_path, &json!({"key": "spend", "valuetype": "json", "value": {"usd": out.cost_usd,
-                "input_tokens": out.input_tokens, "output_tokens": out.output_tokens, "turns": out.num_turns, "agent": "explain"}}));
+                "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
+                "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
+                "turns": out.num_turns, "agent": "explain"}}));
             let _ = api.post(&format!("/api/projects/{}/spend", project.name),
-                &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens, "workid": item.id}));
+                &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
+                    "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": item.id}));
         }
     }
     if let Err(e) = api.delete(&format!("/api/projects/{}/workitems/{}/explain", project.name, item.id)) {
@@ -655,6 +813,9 @@ fn parse_claude_json(raw: &str) -> RunOut {
                 cost_usd: v.get("total_cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0),
                 input_tokens: v.get("usage").and_then(|u| u.get("input_tokens")).and_then(|n| n.as_u64()).unwrap_or(0),
                 output_tokens: v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|n| n.as_u64()).unwrap_or(0),
+                cache_read_tokens: v.get("usage").and_then(|u| u.get("cache_read_input_tokens")).and_then(|n| n.as_u64()).unwrap_or(0),
+                cache_create_tokens: v.get("usage").and_then(|u| u.get("cache_creation_input_tokens")).and_then(|n| n.as_u64()).unwrap_or(0),
+                session_id: v.get("session_id").and_then(|s| s.as_str()).unwrap_or("").to_string(),
             };
         }
     }
@@ -730,6 +891,9 @@ fn wait_with_timeout(mut cmd: Command, timeout_sec: u64) -> Result<String, Strin
 /// The gate's decision for a successful agent run.
 enum GateOutcome {
     Pass,
+    /// the deterministic half passed and the verifier could not run twice:
+    /// close on the worker's evidence, with a "verify" row saying so
+    PassUnverified { reason: String },
     /// held back: source ("deterministic" | "verifier"), open list, reason;
     /// `to_human` forces the question state regardless of bounce budget
     Hold { source: &'static str, open: Vec<String>, reason: String, to_human: bool },
@@ -746,15 +910,10 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
     } else {
         String::new()
     };
-    let children = if ctx.gate.requires_children {
-        api.get(&format!("/api/projects/{}/workitems", project.name))
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .map(|a| a.iter().filter(|w| w.get("createdby").and_then(|c| c.as_str()) == Some(item.id.as_str())).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // always counted (2026-09-07): the verifier reads this line as engine
+    // fact, and a 0 printed for an item whose gate never asked for children
+    // contradicted a worker that had really filed three
+    let children = gate::children_of(&project_items(api, project), &item.id).len();
     let ev = Evidence {
         result_subtype: out.subtype.clone(),
         num_turns: out.num_turns,
@@ -805,12 +964,28 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
         "--max-turns".to_string(),
         ctx.gate.verify_max_turns.max(1).to_string(),
     ];
-    let verdict = match spawn_claude(project, &ctx.topdir, &ctx.account, &prompt, ctx.gate.verify.trim(), &extra, 600) {
-        Ok(raw) => gate::parse_verdict(&parse_claude_stream(&ctx.account, &raw).1.text),
-        Err(e) => Verdict::Unclear { reason: format!("verifier session failed: {}", gate::clip(&e, 500)) },
-    };
+    // a verifier that could not run is not a verdict about the work
+    // (2026-09-07): try once more, then close on the worker's evidence with
+    // the verify row marked "unavailable" — never the human queue
+    let mut verdict = Verdict::Unavailable { reason: String::new() };
+    for try_n in 1..=2 {
+        match spawn_claude(project, &ctx.topdir, &ctx.account, &prompt, ctx.gate.verify.trim(), &extra, 600) {
+            Ok(raw) => {
+                verdict = gate::parse_verdict(&parse_claude_stream(&ctx.account, &raw).1.text);
+                break;
+            }
+            Err(e) => {
+                eprintln!("[engine] {} '{}': verifier session failed (try {try_n}/2): {}", short(&item.id), item.name, gate::clip(&e, 300));
+                verdict = Verdict::Unavailable { reason: format!("verifier session failed twice: {}", gate::clip(&e, 500)) };
+                if try_n == 1 {
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+            }
+        }
+    }
     match verdict {
         Verdict::Complete => (GateOutcome::Pass, ev),
+        Verdict::Unavailable { reason } => (GateOutcome::PassUnverified { reason: format!("verifier unavailable: {reason}") }, ev),
         Verdict::Incomplete { open, reason } => (
             GateOutcome::Hold { source: "verifier", open, reason: format!("verifier: {reason}"), to_human: false },
             ev,
@@ -837,7 +1012,8 @@ fn close_keep_state(api: &Api, project: &Project, item: WorkItem, result: Result
     println!("[engine] done {} '{}' -> {} (set by the agent)", short(&item.id), item.name, state);
 }
 
-fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, result: Result<RunOut, String>, ctx: Option<GateCtx>) {
+/// Returns true when the item closed COMPLETE (the only outcome a session may chain from).
+fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, result: Result<RunOut, String>, ctx: Option<GateCtx>, chained_from: Option<&str>) -> bool {
     // detail rows are APPENDED (iter_data allocates the order atomically)
     let details_path = format!("/api/projects/{}/workitems/{}/details", project.name, item.id);
     let put_detail = |key: &str, valuetype: &str, value: Value| {
@@ -856,9 +1032,12 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
     if let Ok(out) = &result {
         if out.cost_usd > 0.0 || out.input_tokens > 0 {
             put_detail("spend", "json", json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
-                "turns": out.num_turns, "agent": item.agent, "attempt": item.attempt}));
+                "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
+                "turns": out.num_turns, "agent": item.agent, "attempt": item.attempt,
+                "chained_from": chained_from.unwrap_or("")}));
             let _ = api.post(&format!("/api/projects/{}/spend", project.name),
-                &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens, "workid": item.id}));
+                &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
+                    "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": item.id}));
         }
     }
     let stopped = matches!(&result, Err(e) if e == STOPPED_BY_USER);
@@ -872,6 +1051,13 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
     let mut gate_hold: Option<(String, bool)> = None; // (short reason, to_question)
     if let (Ok(out), Some(ctx)) = (&result, &ctx) {
         let (outcome, ev) = run_gate(api, project, &item, out, ctx);
+        if let GateOutcome::PassUnverified { reason } = &outcome {
+            put_detail("verify", "json", gate::verify_row(item.gate_bounces, "verifier", "unavailable", &[], reason, &ev));
+            println!(
+                "[engine] close gate: verifier could not run for {} '{}' — closing on the worker's evidence ({})",
+                short(&item.id), item.name, gate::clip(reason, 200)
+            );
+        }
         if let GateOutcome::Hold { source, open, reason, to_human } = outcome {
             let bounce = item.gate_bounces + 1;
             let to_question = to_human || item.gate_bounces >= ctx.gate.max_bounces;
@@ -964,6 +1150,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
             (None, false) => "failed/retry",
         }
     );
+    !stopped && gate_hold.is_none() && ok
 }
 
 #[cfg(test)]
@@ -995,11 +1182,15 @@ mod tests {
             "\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.25,\"resetsAt\":99999999999},",
             "\"seven_day\":{\"utilization\":0.5,\"resetsAt\":99999999999}}}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sid-1\",\"num_turns\":2,",
-            "\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":10,\"output_tokens\":3},\"result\":\"done\"}\n"
+            "\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":10,\"output_tokens\":3,",
+            "\"cache_read_input_tokens\":5000,\"cache_creation_input_tokens\":700},\"result\":\"done\"}\n"
         );
         let (sid, out) = parse_claude_stream("Acct", raw);
         assert_eq!(sid, "sid-1");
         assert_eq!((out.text.as_str(), out.subtype.as_str(), out.num_turns, out.input_tokens), ("done", "success", 2, 10));
+        // the cached prompt tokens are the real context cost; the stream keeps
+        // them out of `input_tokens`, so the spend row must carry them apart
+        assert_eq!((out.cache_read_tokens, out.cache_create_tokens), (5000, 700));
         let u = crate::usage::read_usage("Acct").expect("snapshot written from the stream");
         assert!((u.five_hour_pct - 25.0).abs() < 1e-9 && (u.seven_day_pct - 50.0).abs() < 1e-9);
         assert_eq!(u.source, "stream");

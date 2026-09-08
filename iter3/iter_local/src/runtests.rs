@@ -42,7 +42,10 @@ pub struct TestRunResult {
     pub exit_code: i32,
     pub pass: u64,
     pub total: u64,
-    pub log_path: PathBuf,
+    /// the full run log (header + stdout + stderr) — kept in memory and
+    /// reported to the work item, never written under the tree (2026-09-08:
+    /// `<test_dir>/runs/` is gone)
+    pub log: String,
     /// Human-readable note for `error` outcomes (timeout, spawn failure, …).
     pub detail: String,
 }
@@ -125,20 +128,16 @@ pub fn run_group(
     }
     let full_run = filter.is_none();
 
-    let runs_dir = test_dir.join("runs");
-    std::fs::create_dir_all(&runs_dir).map_err(|e| format!("cannot create {}: {}", runs_dir.display(), e))?;
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let budget = Duration::from_secs(timeout_min.max(1) * 60);
     let started = Instant::now();
 
     let mut runs = Vec::new();
     for entry in entries {
-        let log_path = runs_dir.join(format!("{}-{}.log", stamp, sanitize(&entry.id)));
         let remaining = budget.saturating_sub(started.elapsed());
         let script = test_dir.join(&entry.shell);
         let run = if remaining.is_zero() {
             let detail = format!("not run: group budget ({} min) exhausted", timeout_min);
-            write_log(&log_path, &entry.shell, -1, "", "", &detail);
+            let log = log_body(&entry.shell, -1, "", "", &detail);
             TestRunResult {
                 id: entry.id,
                 name: entry.name,
@@ -147,12 +146,12 @@ pub fn run_group(
                 exit_code: -1,
                 pass: 0,
                 total: 1,
-                log_path,
+                log,
                 detail,
             }
         } else if !script.is_file() {
             let detail = format!("script not found: {}", script.display());
-            write_log(&log_path, &entry.shell, -1, "", "", &detail);
+            let log = log_body(&entry.shell, -1, "", "", &detail);
             TestRunResult {
                 id: entry.id,
                 name: entry.name,
@@ -161,7 +160,7 @@ pub fn run_group(
                 exit_code: -1,
                 pass: 0,
                 total: 1,
-                log_path,
+                log,
                 detail,
             }
         } else {
@@ -171,7 +170,7 @@ pub fn run_group(
             } else {
                 String::new()
             };
-            write_log(&log_path, &entry.shell, exit_code, &stdout, &stderr, &detail);
+            let log = log_body(&entry.shell, exit_code, &stdout, &stderr, &detail);
             let outcome = match exit_code {
                 0 => Outcome::Green,
                 1 => Outcome::Red,
@@ -191,7 +190,7 @@ pub fn run_group(
                 exit_code,
                 pass,
                 total,
-                log_path,
+                log,
                 detail,
             }
         };
@@ -226,9 +225,18 @@ pub fn run_group(
 /// `bash <script>` in `cwd` with a hard deadline. The script leads its own process
 /// group so a timeout kill takes its whole tree. Returns (exit code, stdout,
 /// stderr, timed_out); spawn failures surface as exit -1 with the error on stderr.
+/// `{topdir}/.iter/tests` — shared test programs (decided 2026-09-08), found
+/// by walking up from the test dir to the first ancestor holding `.iter/`.
+pub fn shared_tests_dir(from: &Path) -> Option<PathBuf> {
+    from.ancestors().find(|d| d.join(".iter").is_dir()).map(|d| d.join(".iter").join("tests"))
+}
+
 fn run_script(script: &Path, cwd: &Path, timeout: Duration) -> (i32, String, String, bool) {
     let mut cmd = Command::new("bash");
     cmd.arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(shared) = shared_tests_dir(cwd) {
+        cmd.env("ITER_TESTS_SHARED", shared);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -283,7 +291,7 @@ fn parse_iter_result(stdout: &str) -> Option<(u64, u64)> {
 
 /// Verbatim capture for the runs/ history: everything the diagnosing agent (or the
 /// UI's run browser) needs from one script execution.
-fn write_log(path: &Path, shell: &str, exit_code: i32, stdout: &str, stderr: &str, detail: &str) {
+fn log_body(shell: &str, exit_code: i32, stdout: &str, stderr: &str, detail: &str) -> String {
     let mut body = format!(
         "# iterapp test run\n# script: {}\n# time: {}\n# exit: {}\n",
         shell,
@@ -297,13 +305,71 @@ fn write_log(path: &Path, shell: &str, exit_code: i32, stdout: &str, stderr: &st
     body.push_str(stdout);
     body.push_str("\n--- stderr ---\n");
     body.push_str(stderr);
-    if let Err(e) = std::fs::write(path, body) {
-        eprintln!("warning: cannot write run log {}: {}", path.display(), e);
-    }
+    body
 }
 
-fn sanitize(id: &str) -> String {
-    id.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+/// Per-script cap inside a Log Detail row and the row's total cap: enough for
+/// a follow-up agent to diagnose, small enough not to flood the store.
+pub const LOG_DETAIL_PER_TEST_BYTES: usize = 8 * 1024;
+pub const LOG_DETAIL_TOTAL_BYTES: usize = 64 * 1024;
+
+/// "Log Header" (decided 2026-09-08): the deterministic, body-free summary of
+/// one run — appended to the work item on EVERY run. `tg_rel` is the testgroup
+/// file relative to the project top.
+pub fn log_header(run: &GroupRunResult, tg_rel: &str, when: &str) -> String {
+    let mut s = format!(
+        "Test run {when} — testgroup \"{}\" in {tg_rel}\nresult: {}  pass {}/{}{}\n",
+        run.label,
+        run.outcome.as_str().to_uppercase(),
+        run.pass,
+        run.total,
+        if run.full_run { "" } else { "  (filtered run; the group's recorded result is not updated)" }
+    );
+    for t in &run.runs {
+        s.push_str(&format!(
+            "- {:<5} {} ({}) [{}] {}/{}{}\n",
+            match t.outcome {
+                Outcome::Green => "pass",
+                Outcome::Red => "FAIL",
+                Outcome::Error => "ERROR",
+            },
+            t.id,
+            t.name,
+            t.shell,
+            t.pass,
+            t.total,
+            if t.detail.is_empty() { String::new() } else { format!(" — {}", t.detail) }
+        ));
+    }
+    s
+}
+
+/// "Log Detail" (decided 2026-09-08): only when the run is non-green — the
+/// failing and erroring scripts' logs (tail-capped per script and overall) for
+/// the follow-up agent.  Empty when everything passed.
+pub fn log_detail(run: &GroupRunResult) -> String {
+    let mut s = String::new();
+    for t in run.runs.iter().filter(|t| t.outcome != Outcome::Green) {
+        let log = tail_bytes(&t.log, LOG_DETAIL_PER_TEST_BYTES);
+        let block = format!("## {} ({}) [{}] exit {}\n{}\n\n", t.id, t.name, t.shell, t.exit_code, log.trim_end());
+        if s.len() + block.len() > LOG_DETAIL_TOTAL_BYTES {
+            s.push_str(&format!("## … {} more failing script(s) omitted (row cap {} KB)\n", run.runs.iter().filter(|x| x.outcome != Outcome::Green).count(), LOG_DETAIL_TOTAL_BYTES / 1024));
+            break;
+        }
+        s.push_str(&block);
+    }
+    s
+}
+
+fn tail_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("… (first {} bytes omitted)\n{}", start, &text[start..])
 }
 
 #[cfg(test)]
@@ -357,8 +423,8 @@ mod tests {
         assert_eq!(groups[0].result, "error");
         assert_eq!(groups[0].counts, "4/6");
         assert!(!groups[0].lastrun.is_empty());
-        assert!(run.runs[0].log_path.is_file());
-        let log = std::fs::read_to_string(&run.runs[0].log_path).unwrap();
+        assert!(!run.test_dir.join("runs").exists(), "no runs/ directory is written any more");
+        let log = run.runs[0].log.clone();
         assert!(log.contains("ITER_RESULT"));
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -24,6 +24,18 @@ pub enum Verdict {
     Complete,
     Incomplete { open: Vec<String>, reason: String },
     Unclear { reason: String },
+    /// the verifier process could not run (spawn failure, non-zero exit,
+    /// timeout) twice in a row — a tooling failure, not a verdict about the
+    /// work (2026-09-07: it used to park the item as a human question)
+    Unavailable { reason: String },
+}
+
+/// The workitems whose `createdby` is `id` — one list read serves both the
+/// evidence count (always taken, 2026-09-07: it used to be 0 unless the gate
+/// required children, and the verifier read that 0 as engine fact) and the
+/// re-run's "already created" section.
+pub fn children_of(items: &[Value], id: &str) -> Vec<Value> {
+    items.iter().filter(|w| w.get("createdby").and_then(|c| c.as_str()) == Some(id)).cloned().collect()
 }
 
 /// What the engine measured around the run; shown to the verifier and kept
@@ -237,9 +249,33 @@ pub fn open_reviews(details: &[Value]) -> usize {
 }
 
 /// The section appended to a re-run's prompt after a bounce (or after a
-/// human answered "continue"): verdict, open list, guidance, last message.
-/// Empty when there is nothing to carry forward.
-pub fn feedback_section(details: &[Value]) -> String {
+/// human answered "continue"): verdict, open list, guidance, last message —
+/// plus, whenever this item has already created workitems (any earlier
+/// attempt: a bounce, a failed run, a requeue), the list of them with one
+/// instruction: do not file these again (2026-09-07: attempt 3 of a pdy-dev
+/// item re-filed the defect attempt 2 had filed, and two agents ran against
+/// the same file).  Empty when there is nothing to carry forward.
+pub fn feedback_section(details: &[Value], created: &[Value]) -> String {
+    let mut s = feedback_from_gate(details);
+    if !created.is_empty() {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str("# Work items this item has already created\n\
+An earlier attempt of this workitem filed the items below (their `createdby` is this item's id). \
+Do NOT file these again; reference them by id, and file only what is still missing.\n");
+        for c in created {
+            let id = c.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+            let state = c.get("state").and_then(|x| x.as_str()).unwrap_or("?");
+            let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let agent = c.get("agent").and_then(|x| x.as_str()).unwrap_or("");
+            s.push_str(&format!("- {id} [{state}] ({agent}) {name}\n"));
+        }
+    }
+    s
+}
+
+fn feedback_from_gate(details: &[Value]) -> String {
     let last_verify = details
         .iter()
         .filter(|d| d.get("key").and_then(|k| k.as_str()) == Some("verify"))
@@ -324,9 +360,37 @@ mod tests {
         w["fields"][0]["value"] = json!("continue");
         w["fields"][1]["value"] = json!("look in docs/");
         let details = vec![row(0, "request", json!("r")), row(1, "response", json!("r1")), row(2, "question", w)];
-        let fb = feedback_section(&details);
+        let fb = feedback_section(&details, &[]);
         assert!(fb.contains("look in docs/") && fb.contains("r1"));
-        assert!(feedback_section(&[row(0, "request", json!("r"))]).is_empty());
+        assert!(feedback_section(&[row(0, "request", json!("r"))], &[]).is_empty());
+    }
+
+    /// Defect 1 (pdy-dev 2026-09-07): the count is always taken, so an item
+    /// with one child never tells the verifier "created by this item: 0";
+    /// defect 2: the re-run prompt lists what the item already filed, even
+    /// when there was no bounce (a failed attempt may have filed items too).
+    #[test]
+    fn children_are_counted_and_listed_for_the_retry() {
+        let items = vec![
+            json!({"id": "child-1", "createdby": "me", "state": "queued", "agent": "code", "name": "secrets-store disk guard"}),
+            json!({"id": "other", "createdby": "someone", "state": "queued", "agent": "code", "name": "x"}),
+        ];
+        let kids = children_of(&items, "me");
+        assert_eq!(kids.len(), 1);
+        let ev = Evidence { children: kids.len(), ..Default::default() };
+        let text = ev.describe();
+        assert!(text.contains("workitems created by this item: 1"), "{text}");
+        assert!(!text.contains("created by this item: 0"));
+        let fb = feedback_section(&[row(0, "request", json!("r"))], &kids);
+        assert!(fb.contains("Work items this item has already created"));
+        assert!(fb.contains("child-1 [queued] (code) secrets-store disk guard"));
+        assert!(fb.contains("Do NOT file these again"));
+        assert!(!fb.contains("Close-gate feedback"), "no bounce happened, so no gate feedback header");
+        // with a bounce, both sections appear in order
+        let details = vec![row(0, "request", json!("r")), row(1, "response", json!("r1")),
+            row(2, "verify", json!({"bounce": 1, "reason": "waiting on review", "open": ["file the items"]}))];
+        let fb = feedback_section(&details, &kids);
+        assert!(fb.find("Close-gate feedback").unwrap() < fb.find("already created").unwrap());
     }
 
     #[test]

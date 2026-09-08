@@ -1,104 +1,69 @@
-# iterapp / iterloop
+# iter
 
-Iterloop is an AI coding harness: a Rust engine that loops over a file-based queue of
-work items and delegates each to a purpose-built headless Claude Code agent. Agents,
-pre/post work steps, and source instructions are all markdown files — adding a file adds
-a capability. Full specification: [`src/features/iterloop.md`](src/features/iterloop.md).
+**iter** is a long-running AI build harness. A central queue of work items is worked, around the clock, by purpose-built headless Claude Code agents that an engine spawns on whatever machine has the checkout. Agents plan, write code, write tests, deploy, and file follow-up work for each other; humans steer through a web UI: they file requests, answer questions, rule on decisions, and watch usecases move toward done.
 
-## Deploy = copy one file
+The current generation is **V3** (`iter3/`): a central API on DynamoDB, one or more engines per project, and a thin web UI. Specification and decision log: [`src/features/iter.v3.md`](src/features/iter.v3.md). The earlier V2 engine (`src/`, file-based queue, single binary) is kept for reference; new work goes to V3.
 
-`iter` is a single self-contained binary — the iterloop engine, the iterapp webapp,
-and the `.iter/` template all ship inside it. Drop it into any project directory and
-start it; missing `.iter/` folders and files are created on the spot (existing files
-are never overwritten):
+## How it works
 
-```bash
-cargo build --release
-cp target/release/iter ~/dev/myproject/
-cd ~/dev/myproject && ./iter start
-#   initialized 21 missing .iter file(s) in .
-#     iterapp webapp:  http://localhost:9889/
-#                      http://myproject.localhost:9889/
-```
+1. A **project** is a git checkout with an `.iter/` folder and a head file (`main.iter.md`). Its structure is declared by `*.iter.md` node files: code nodes (C4 objects), requirements, interface contracts, usecases and testgroups, linked by explicit `children` entries (the "structureV2" DAG).
+2. **Work items** live centrally. Each names an agent type, a codepath (its lock scope), a priority, dependencies, and a request. Items are born `queued`, run `in-progress`, and close `complete`, or land in `question` when a human decision is needed.
+3. An **engine** polls the queue, claims the best runnable item (dependencies satisfied, no lock overlap, usage caps), acquires central locks for its codepath, and runs one `claude -p` session with the agent's prompt, the shared rules, the project context and the item's request. Every run is committed and pushed. A **close gate** verifies the result before the item may complete.
+4. Agents hand work to each other with the `iter` CLI (`iter add`, `iter ask`, `iter reject`, `iter doc`, `iter runtests`, `iter critreview` …), which the engine puts on their PATH.
+5. **Test-driven**: every code node, usecase and interface declares testgroups; `iter runtests` is the only acceptance criterion, and a scheduled Test Loop keeps everything honest.
 
-`iter start` runs the engine loop AND the webapp server, printing the URL to copy or
-open. The port is deterministic (hashed from the project path into 9700–9899, so the
-same project always gets the same port; `--port N` to pin one), and the hostname slug
-comes from `url_slug` in `.iter/projects.json`, defaulting to the directory name.
-Use `iter run` for the engine alone, headless.
-
-The binary is per-platform (build on the OS/arch you deploy to), and agent
-execution shells out to `claude` (plus `git`/`gh` for those prepostwork steps) —
-those must be on PATH; everything else is in the one file.
-
-## Quickstart
-
-```bash
-cargo build
-
-# initialize a target project (embedded template; --from <dir> to use your own)
-./target/debug/iter init ~/dev/myproject
-
-# add a work item
-./target/debug/iter add --project ~/dev/myproject \
-  --type code --title "add auth middleware" \
-  --mainwork "Implement ... acceptance criteria ..." --codepath "./api" --priority 6
-
-# run the engine (Ctrl-C, or `iter stop` from another shell)
-./target/debug/iter run --project ~/dev/myproject
-
-# inspect
-./target/debug/iter status --project ~/dev/myproject
-./target/debug/iter stop   --project ~/dev/myproject --wait   # drain, then stop
-```
-
-`run --once` executes a single tick; `run --until-idle` exits when the queue drains —
-both useful for scripting and demos.
-
-## Try it on the bundled sample
-
-`sampleV1/` is a small but complete reference project — **Sample Ledger**, a POSIX-shell
-money log — scaffolded by the current engine and exercising every surface: seven C4
-objects across all four levels (project / context / container / component), two interface
-contracts, two use-cases, thirteen testgroups with ninety real assertions, a seeded queue
-(user items, sweep-born items, a dependency gate) and a "Test Loop" schedule template.
-Copy it somewhere and point the engine at it:
-
-```bash
-cp -R sampleV1 /tmp/demo
-./target/release/iter run --project /tmp/demo --until-idle
-```
-
-Or read it without running anything:
-
-```bash
-./target/release/iter markers   --project sampleV1   # the C4 scan, as JSON
-./target/release/iter validate  --project sampleV1   # every *.iter.md, role-aware
-./target/release/iter testsweep --project sampleV1   # run the declared testgroups
-./target/release/iter status    --project sampleV1   # the seeded queue
-```
-
-## Fake runner (no tokens)
-
-Set `ITER_CLAUDE_BIN` to any executable that prints
-`{"session_id":"...","result":"..."}` and the engine runs the full loop — locking,
-lifecycle, handoff — without calling Claude. The integration tests in `tests/e2e.rs`
-use this; see `setup_project` there for a reference stub.
+Priorities are 0–99, lower = sooner, and belong to a *lineage*: everything an item creates inherits its number, so a usecase runs as one block ordered inside by dependencies. Every item under a usecase carries a `usecase:<name>` tag and the UI reports "N of M complete" per usecase.
 
 ## Layout
 
-- `src/*.rs` — the engine (config, agents, workitems, locks, context, runner, scheduler, CLI)
-- `src/.iter/` — the shipped template: agent definitions, prepostwork steps, source
-  instructions, engine config
-- `src/features/iterloop.md` — the specification and build plan
-- `sampleV1/` — the reference target project used by tests and demos
-- `tests/e2e.rs` — end-to-end tests against the real binary with the fake runner
+| path | what |
+|---|---|
+| `iter3/iter_core` | shared types: work items, projects, engines, agents and tooling, tags, priority bands, the dependency gate, lock shapes, question widgets |
+| `iter3/iter_data` | the central API (axum): storage trait with `sqlite` and `dynamodb` backends, JWT auth and roles, versioned writes, central locks, spend accounting, migrations; also serves the web UI; runs locally or as a Lambda |
+| `iter3/iter_engine` | the engine binary and the agent-facing `iter` CLI: tick loop, account ladder and usage caps, prompt assembly, session continuation, close gate, spend rows |
+| `iter3/iter_local` | project-local logic the engine and CLI share: testgroup parsing and the deterministic test runner, `*.iter.md` validation, marker scan |
+| `iter3/webui/` | the thin static client |
+| `iter3/e2e.sh` | the end-to-end suite (sqlite or dynamodb) with a fake `claude` |
+| `src/.iter/agents/` | the agent prompts, shared rules and capabilities (the source for the central tooling records) |
+| `src/features/` | specifications: `iter.v3.md` is the live one |
+| `sampleV3/` | a small sample project |
+| `src/`, `sampleV1/`, `tests/` | the V2 engine, kept for reference |
+
+## Run it
+
+Local, zero config (sqlite):
+
+```bash
+iter3/deploy.sh sqlite        # builds release binaries into iter3/bin, starts iter_data on :8300
+open http://127.0.0.1:8300/   # admin / ITER_ADMIN_PASSWORD from .env
+```
+
+Production (DynamoDB behind a Lambda + API Gateway; AWS creds, `ITER_ADMIN_PASSWORD` and `ITER_JWT_SECRET` in the repo `.env`):
+
+```bash
+pip3 install cargo-lambda     # once
+iter3/deploy_lambda.sh        # build, create/update the function, smoke-test /health
+```
+
+An engine on any machine that holds a project checkout:
+
+```bash
+# <project>/.iter/config.json names the data URL and engine; <project>/.iter/.env holds
+# ITER_ENGINE_TOKEN plus one setup-token per Claude account
+cd ~/dev/myproject && ~/dev/iter/iter3/bin/iter_engine --config .iter/config.json
+```
+
+Then assign the project to the engine in the web UI (engine gear → projects served). Ubuntu notes: [`iter3/UBUNTU.md`](iter3/UBUNTU.md). Detailed V3 operations: [`iter3/README.md`](iter3/README.md).
+
+## Tests
+
+```bash
+cargo test --workspace        # unit tests
+iter3/e2e.sh sqlite           # the full loop with a fake claude: locks, dependencies, close gate, stop, drain, usage caps
+```
 
 ## Notes
 
-- Agents create handoff work items with `"$ITER_BIN" add --project "$ITER_PROJECT" …`;
-  the engine injects both env vars into every agent session (the executable's absolute
-  path and the project root), so nothing needs to be on PATH.
-- The template agent files ship with `--dangerously-skip-permissions` for sandboxed
-  demos. Remove it (and rely on your repo's own `.claude/` permission settings) before
-  pointing iterloop at production code.
+- Agent prompts ship with `--dangerously-skip-permissions` for autonomous runs; the agents' write fence is the item's codepath and the engine's locks, not Claude's permission prompts.
+- Every prompt, capability and prepost step is a markdown file; central copies live in the `agent_tooling` records so every engine assembles the same prompt.
+- This repository was named `iterapp` until 2026-09-08.

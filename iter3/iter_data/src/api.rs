@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
-use iter_core::{LockRow, Project, WebuiUser, WorkItem, now_utc, widget};
+use iter_core::{LockRow, Project, WebuiUser, WorkItem, check_lockshape, lockshape_for, now_utc, widget, pick_unused_priority, usecase_tags, PRIO_BAND_HUMAN, PRIO_BAND_MAINT, PRIO_BAND_USECASE, PRIO_MAX, USECASE_TAG_COLOR, USECASE_TAG_PREFIX};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -152,6 +152,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/engines/{name}/test", post(engine_test))
         // workitems
         .route("/api/projects/{name}/workitems", get(workitems_list).post(workitem_create))
+        .route("/api/projects/{name}/migrate_priority", post(project_migrate_priority))
+        .route("/api/projects/{name}/realign_priority", post(project_realign_priority))
         .route(
             "/api/projects/{name}/workitems/{id}",
             get(workitem_get).put(workitem_put).delete(workitem_delete),
@@ -532,6 +534,10 @@ struct SpendReq {
     #[serde(default)]
     output_tokens: u64,
     #[serde(default)]
+    cache_read_tokens: u64,
+    #[serde(default)]
+    cache_create_tokens: u64,
+    #[serde(default)]
     workid: String,
 }
 
@@ -546,6 +552,8 @@ async fn spend_add(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
     row["usd"] = json!(row.get("usd").and_then(|v| v.as_f64()).unwrap_or(0.0) + req.usd);
     row["input_tokens"] = json!(body_u64(&row, "input_tokens") + req.input_tokens);
     row["output_tokens"] = json!(body_u64(&row, "output_tokens") + req.output_tokens);
+    row["cache_read_tokens"] = json!(body_u64(&row, "cache_read_tokens") + req.cache_read_tokens);
+    row["cache_create_tokens"] = json!(body_u64(&row, "cache_create_tokens") + req.cache_create_tokens);
     row["runs"] = json!(body_u64(&row, "runs") + 1);
     row["last_workid"] = json!(req.workid);
     row["updated"] = json!(now_utc());
@@ -730,6 +738,171 @@ async fn workitems_list(
     Ok(Json(Value::Array(rows)))
 }
 
+/// Priority + usecase placement of a NEW item (decided 2026-09-08), before the
+/// row is parsed:
+/// - a `usecase` string field becomes the engine-owned tag `usecase:<name>`;
+/// - a child (createdby = an existing item) inherits its creator's priority
+///   EXACTLY and every `usecase:` tag; a differing requested priority is
+///   ignored and reported in `warnings`;
+/// - a root that names no priority takes the lowest number in its band that
+///   no open item uses: usecase band when it carries a usecase tag or IS the
+///   usecase agent, the human band for a human requester, else maintenance.
+async fn place_new_item(st: &Arc<AppState>, project: &str, body: &mut Value) -> Result<Vec<String>, ApiError> {
+    let mut warnings = Vec::new();
+    // usecase field -> tag
+    let uc = body.get("usecase").and_then(|u| u.as_str()).map(|u| u.trim().to_string()).unwrap_or_default();
+    if let Some(o) = body.as_object_mut() {
+        o.remove("usecase");
+    }
+    let mut tags: Vec<Value> = body.get("tags").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+    let has_tag = |tags: &[Value], text: &str| tags.iter().any(|t| t.get("text").and_then(|x| x.as_str()) == Some(text));
+    if !uc.is_empty() {
+        let text = if uc.starts_with(USECASE_TAG_PREFIX) { uc.clone() } else { format!("{USECASE_TAG_PREFIX}{uc}") };
+        if !has_tag(&tags, &text) {
+            tags.push(json!({"text": text, "color": USECASE_TAG_COLOR}));
+        }
+    }
+    let requested = body.get("priority").and_then(|p| p.as_i64());
+    let createdby = body_str(body, "createdby");
+    let parent = if createdby.len() >= 32 { st.store.get("workitem", project, &createdby).await? } else { None };
+    if let Some(parent) = parent {
+        // inherit usecase tags
+        let ptags: Vec<iter_core::Tag> = parent.get("tags").and_then(|t| serde_json::from_value(t.clone()).ok()).unwrap_or_default();
+        for text in usecase_tags(&ptags) {
+            if !has_tag(&tags, &text) {
+                tags.push(json!({"text": text, "color": USECASE_TAG_COLOR}));
+            }
+        }
+        // inherit priority exactly
+        let pprio = parent.get("priority").and_then(|p| p.as_i64()).unwrap_or(PRIO_BAND_HUMAN.0);
+        if let Some(r) = requested {
+            if r != pprio {
+                warnings.push(format!("priority inherited from the creating item (P{pprio}); the requested P{r} was ignored — children carry their lineage's number"));
+            }
+        }
+        body["priority"] = json!(pprio);
+    } else if requested.is_none() {
+        let is_usecase = body_str(body, "agent") == "usecase" || tags.iter().any(|t| t.get("text").and_then(|x| x.as_str()).map(|x| x.starts_with(USECASE_TAG_PREFIX)).unwrap_or(false));
+        let human = !body_str(body, "requestedby").starts_with("agent");
+        let band = if is_usecase { PRIO_BAND_USECASE } else if human { PRIO_BAND_HUMAN } else { PRIO_BAND_MAINT };
+        let used: Vec<i64> = st
+            .store
+            .query("workitem", project)
+            .await?
+            .iter()
+            .filter(|r| !is_closed(&body_str(r, "state")) && body_str(r, "state") != "scheduled")
+            .filter_map(|r| r.get("priority").and_then(|p| p.as_i64()))
+            .collect();
+        body["priority"] = json!(pick_unused_priority(band, &used));
+    } else if let Some(r) = requested {
+        body["priority"] = json!(r.clamp(0, PRIO_MAX));
+    }
+    body["tags"] = json!(tags);
+    Ok(warnings)
+}
+
+/// One-time 0–10 -> 0–99 migration (decided 2026-09-08): every workitem's
+/// priority ×10 (P0 stays P0, capped at 99), closed items included (they are
+/// otherwise immutable), then `priority_scale: 100` on the project so a
+/// second call is a no-op.  Admin only.
+async fn project_migrate_priority(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    user.require_admin()?;
+    let mut project = st.store.get("project", &name, NOSK).await?.ok_or_else(notfound)?;
+    if project.get("priority_scale").and_then(|v| v.as_u64()) == Some(100) {
+        return Ok(Json(json!({"migrated": 0, "already": true})));
+    }
+    let rows = st.store.query("workitem", &name).await?;
+    let mut migrated = 0u64;
+    for mut row in rows {
+        let id = body_str(&row, "id");
+        let p = row.get("priority").and_then(|v| v.as_i64()).unwrap_or(5);
+        row["priority"] = json!((p * 10).clamp(0, PRIO_MAX));
+        row["version"] = json!(body_u64(&row, "version") + 1);
+        st.store.put("workitem", &name, &id, &row).await?;
+        migrated += 1;
+    }
+    project["priority_scale"] = json!(100);
+    st.store.put("project", &name, NOSK, &project).await?;
+    st.store.bump_seq(&name, "workitem").await?;
+    st.store.bump_seq(&name, "project").await?;
+    Ok(Json(json!({"migrated": migrated, "already": false})))
+}
+
+/// Band of a priority number (see iter_core PRIO_BAND_*).
+fn band_of(p: i64) -> (i64, i64) {
+    if p <= iter_core::PRIO_BAND_DO_NOW.1 { iter_core::PRIO_BAND_DO_NOW }
+    else if p <= PRIO_BAND_USECASE.1 { PRIO_BAND_USECASE }
+    else if p <= PRIO_BAND_HUMAN.1 { PRIO_BAND_HUMAN }
+    else { PRIO_BAND_MAINT }
+}
+
+/// Lineage realignment (Stephen, 2026-09-08): every LIVE lineage (a root plus
+/// everything it created, transitively, with at least one open item) gets ONE
+/// number — the root's own when no earlier lineage took it, else the next
+/// unused number in the root's band — and every item in the lineage, open or
+/// closed, is set to it.  Lineages that are entirely closed, and schedule
+/// templates, are left alone.  Admin only; idempotent (a second run finds
+/// every live lineage already distinct).
+async fn project_realign_priority(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    user.require_admin()?;
+    let rows = st.store.query("workitem", &name).await?;
+    let by_id: HashMap<String, Value> = rows.iter().map(|r| (body_str(r, "id"), r.clone())).collect();
+    let mut kids: HashMap<String, Vec<String>> = HashMap::new();
+    for r in &rows {
+        let cb = body_str(r, "createdby");
+        if by_id.contains_key(&cb) {
+            kids.entry(cb).or_default().push(body_str(r, "id"));
+        }
+    }
+    let is_open = |r: &Value| { let s = body_str(r, "state"); !is_closed(&s) && s != "scheduled" };
+    let mut roots: Vec<&Value> = rows
+        .iter()
+        .filter(|r| !by_id.contains_key(&body_str(r, "createdby")) && body_str(r, "state") != "scheduled")
+        .collect();
+    roots.sort_by_key(|r| (r.get("priority").and_then(|p| p.as_i64()).unwrap_or(0), r.get("ts").and_then(|t| t.get("receive")).and_then(|x| x.as_str()).unwrap_or("").to_string()));
+    let mut used: Vec<i64> = Vec::new();
+    let mut report: Vec<Value> = Vec::new();
+    let mut written = 0u64;
+    for root in roots {
+        // the lineage
+        let root_id = body_str(root, "id");
+        let mut lineage: Vec<String> = vec![root_id.clone()];
+        let mut stack = vec![root_id.clone()];
+        while let Some(x) = stack.pop() {
+            for c in kids.get(&x).cloned().unwrap_or_default() {
+                if !lineage.contains(&c) {
+                    lineage.push(c.clone());
+                    stack.push(c);
+                }
+            }
+        }
+        if !lineage.iter().any(|id| by_id.get(id).map(is_open).unwrap_or(false)) {
+            continue; // history: leave as is
+        }
+        let from = root.get("priority").and_then(|p| p.as_i64()).unwrap_or(PRIO_BAND_HUMAN.0);
+        let to = if used.contains(&from) { pick_unused_priority(band_of(from), &used) } else { from };
+        used.push(to);
+        let mut changed = 0u64;
+        for id in &lineage {
+            let Some(r) = by_id.get(id) else { continue };
+            if body_str(r, "state") == "scheduled" || r.get("priority").and_then(|p| p.as_i64()) == Some(to) {
+                continue;
+            }
+            let mut row = r.clone();
+            row["priority"] = json!(to);
+            row["version"] = json!(body_u64(&row, "version") + 1);
+            st.store.put("workitem", &name, id, &row).await?;
+            changed += 1;
+            written += 1;
+        }
+        report.push(json!({"root": root_id, "name": body_str(root, "name"), "from": from, "to": to, "items": lineage.len(), "changed": changed}));
+    }
+    if written > 0 {
+        st.store.bump_seq(&name, "workitem").await?;
+    }
+    Ok(Json(json!({"lineages": report.len(), "written": written, "report": report})))
+}
+
 fn normalize_new_item(project: &str, mut body: Value) -> Result<(String, Value), ApiError> {
     body["project"] = json!(project);
     if body_str(&body, "id").is_empty() {
@@ -750,6 +923,66 @@ fn normalize_new_item(project: &str, mut body: Value) -> Result<(String, Value),
     Ok((parsed.id, body))
 }
 
+/// The test dir name the engine hands agents (ITER_TEST_DIR); `{test_dir}`
+/// in a lock-shape pattern resolves to it.
+const TEST_DIR: &str = "tests";
+
+/// Lock shape (decided 2026-09-07): an item's lockdirs must fit its agent's
+/// declared shape (agent record `lockshape`, project override merged key by
+/// key).  Refusals are a 400 naming the rule and the overlap count; warnings
+/// come back to the writer in the response's `warnings` array.  Checked on
+/// create and on any PUT that changes `lockdirs`, never on other edits.
+async fn lockshape_findings(
+    st: &Arc<AppState>,
+    project: &str,
+    body: &Value,
+) -> Result<Vec<String>, ApiError> {
+    let agent = body_str(body, "agent");
+    if agent.is_empty() || agent == "exec" {
+        return Ok(vec![]);
+    }
+    let Some(def) = st.store.get("agent", &agent, NOSK).await? else { return Ok(vec![]) };
+    let ovr = st
+        .store
+        .get("project", project, NOSK)
+        .await?
+        .and_then(|p| p.get("agents").and_then(|a| a.get(&agent)).cloned())
+        .unwrap_or(Value::Null);
+    let Some(shape) = lockshape_for(&def, &ovr) else { return Ok(vec![]) };
+    let lockdirs: Vec<String> = body
+        .get("lockdirs")
+        .and_then(|l| l.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let me = body_str(body, "id");
+    let others: Vec<(String, Vec<String>)> = st
+        .store
+        .query("workitem", project)
+        .await?
+        .iter()
+        .filter(|r| body_str(r, "id") != me && !is_closed(&body_str(r, "state")) && body_str(r, "state") != "scheduled")
+        .map(|r| {
+            (
+                body_str(r, "id"),
+                r.get("lockdirs").and_then(|l| l.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let findings = check_lockshape(&agent, &shape, &lockdirs, &others, TEST_DIR);
+    let refused: Vec<String> = findings.iter().filter(|f| f.refuse).map(|f| f.msg.clone()).collect();
+    if !refused.is_empty() {
+        return Err(bad(refused.join("; ")));
+    }
+    Ok(findings.into_iter().map(|f| f.msg).collect())
+}
+
+fn with_warnings(mut body: Value, warnings: Vec<String>) -> Value {
+    if !warnings.is_empty() {
+        body["warnings"] = json!(warnings);
+    }
+    body
+}
+
 async fn workitem_create(
     user: AuthUser,
     State(st): Ctx,
@@ -767,10 +1000,13 @@ async fn workitem_create(
             "schedules are users-only: the engine/agent path may not create scheduled items".into(),
         ));
     }
+    let mut body = body;
+    let mut warnings = place_new_item(&st, &name, &mut body).await?;
     let (id, body) = normalize_new_item(&name, body)?;
+    warnings.extend(lockshape_findings(&st, &name, &body).await?);
     st.store.put_versioned("workitem", &name, &id, &body, 0).await?;
     st.store.bump_seq(&name, "workitem").await?;
-    Ok(Json(body))
+    Ok(Json(with_warnings(body, warnings)))
 }
 
 async fn workitem_get(
@@ -800,8 +1036,9 @@ async fn workitem_put(
     // closed items are immutable (decided 2026-09-03): append a "doc" detail
     // row, or POST .../reopen — never edit the record in place.  The one
     // exception is "tags", so finished work can still be organized.
-    if let Some(current) = st.store.get("workitem", &name, &id).await? {
-        if is_closed(&body_str(&current, "state")) && !tags_only_change(&current, &body) {
+    let current = st.store.get("workitem", &name, &id).await?;
+    if let Some(current) = &current {
+        if is_closed(&body_str(current, "state")) && !tags_only_change(current, &body) {
             return Err(closed_err());
         }
     }
@@ -813,9 +1050,16 @@ async fn workitem_put(
     if !iter_core::STATES.contains(&parsed.state.as_str()) {
         return Err(bad(format!("unknown state '{}'", parsed.state)));
     }
+    // lock shape: only when the lockdirs (or the agent) actually change, so a
+    // rule added later never refuses an unrelated edit of an existing item
+    let lockdirs_changed = current
+        .as_ref()
+        .map(|c| c.get("lockdirs") != body.get("lockdirs") || body_str(c, "agent") != body_str(&body, "agent"))
+        .unwrap_or(true);
+    let warnings = if lockdirs_changed { lockshape_findings(&st, &name, &body).await? } else { vec![] };
     st.store.put_versioned("workitem", &name, &id, &body, expect).await?;
     st.store.bump_seq(&name, "workitem").await?;
-    Ok(Json(body))
+    Ok(Json(with_warnings(body, warnings)))
 }
 
 async fn workitem_delete(

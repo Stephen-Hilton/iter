@@ -99,6 +99,12 @@ pub fn validate_file(path: &Path, fix: bool) -> std::io::Result<Vec<Finding>> {
     let mut findings = Vec::new();
     let fname = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let file_s = path.to_string_lossy().into_owned();
+    // `*.agentmemory.iter.md` (decided 2026-09-08) is an agent's own briefing
+    // for the next agent on that codepath — an iter file by name, never a node:
+    // no dot-rule role, no frontmatter law
+    if fname == "agentmemory.iter.md" || fname.ends_with(".agentmemory.iter.md") {
+        return Ok(findings);
+    }
     let original = std::fs::read_to_string(path)?;
     let mut text = original.clone();
     let role = markers::role_of(&fname);

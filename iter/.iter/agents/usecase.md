@@ -34,7 +34,7 @@ To reject, run:
     "$ITER_BIN" reject --project "$ITER_PROJECT" --reason "<why it was rejected, and what change would make it acceptable>"
 
 then summarize the rejection in your output and stop working. The engine moves
-this item to `todo` for the user to re-evaluate — your reason and output are
+this item to `parked` for the user to re-evaluate — your reason and output are
 what they'll see, so make both specific. Do NOT mark rejected work complete and
 do NOT grind out a use-case you believe is invalid.
 (`_capability/_reject_invalid_work.md` has the full rule.)
@@ -54,8 +54,10 @@ do NOT grind out a use-case you believe is invalid.
 
    The usecase file gets frontmatter (`name`, `description`, and `children:`
    with the REQUIRED `codenodes:` link list plus a `testgroups:` link) and a
-   plain-language narrative body — describe, don't state; no jargon; simple
-   enough for a non-technical reader. NO code node file: use-cases are global
+   plain-language narrative body written to the shared rule "Writing for the
+   human who answers" — say the thing rather than naming it, no jargon, every
+   acronym expanded where it first appears, simple enough for a non-technical
+   reader. NO code node file: use-cases are global
    objects linked ACROSS code nodes, never nodes in the code hierarchy.
    **Declare its tests too**: link `testgroups:
    ["{thisfiledir}/$ITER_TEST_DIR/*.testgroup.iter.md"]` in children and
@@ -84,13 +86,14 @@ do NOT grind out a use-case you believe is invalid.
    review or run fully automated follows the request's automation mode, never
    your instruction):
 
-       "$ITER_BIN" add --project "$ITER_PROJECT" --type plan --priority 3 \
+       "$ITER_BIN" add --project "$ITER_PROJECT" --type plan --usecase "<short-name>" \
          --title "plan: build out C4 objects for usecase <name>" \
          --mainwork "<the use-case, the full list of missing objects, and the reqs constraints that shaped it>"
 
    Set `source` to `agent: usecase` when using `--file`. The item's mechanics
-   and `mainwork` authoring are in `_capability/_create_new_workitem.md`. In the
-   plan mainwork,
+   and `mainwork` authoring are in `_capability/_create_new_workitem.md`: plain
+   sentences first (where, what, why), one-line bullets next, agent-only detail
+   last. In the plan mainwork,
    instruct that each built node gets linked back into the use-case file via
    `"$ITER_BIN" usecase --file <usecase file> --add "<code file path>"` AND
    re-entered into the Test Loop via `"$ITER_BIN" teststate --include "<ref>"`
@@ -109,8 +112,12 @@ do NOT grind out a use-case you believe is invalid.
    design. Report the blocked object in your output so the user decides. Never
    `--omit`/`--block`/`--clear` anything: your job is only to include this
    use-case's dependencies. Full gate semantics: `_capability/_teststate.md`.
-7. Priorities are lower-is-sooner (P0 most urgent, default 5); the plan item at
-   P3 runs ahead of default work without preempting urgent fixes.
+7. Priority: pass NO `--priority`. The plan item is the FIRST item of this
+   usecase's lineage, so the engine gives it the lowest unused number in the
+   usecase band (10–39) and everything the plan spawns inherits that number
+   exactly — one number per usecase, ordered inside by dependencies. Pass
+   `--usecase "<short-name>"` so the whole lineage carries the `usecase:<name>`
+   tag the webui reports progress by.
 
 ## Focus
 - Lock scope = the use-cases directory (`$ITER_USECASE_DIR`), nothing more. You

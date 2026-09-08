@@ -62,6 +62,183 @@ pub struct AgentDef {
     /// completion contract the engine enforces at close (spec: Close Gate)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closegate: Option<CloseGate>,
+    /// which lockdirs an item of this agent type may carry (spec: Lock Shape,
+    /// 2026-09-07); absent = anything goes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockshape: Option<LockShape>,
+}
+
+/// Per-agent lock shape (decided 2026-09-07, after a pdy-dev plan item locked
+/// three top-level areas for an hour): what an item of this agent type may
+/// lock, checked by iter_data on create and on every PUT that changes
+/// `lockdirs`, and by `iter add` before it posts.  Overridable per project
+/// via `project.agents[agent].lockshape`, key by key (see `lockshape_for`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LockShape {
+    /// every lockdir must equal or sit under one of these; `*` matches one
+    /// path segment, `**` any number, `{test_dir}` the project's test dir
+    /// name.  Empty = any path.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// what a lockdir outside `allow` does: "refuse" (default) | "warn"
+    #[serde(default)]
+    pub outside: String,
+    /// warn when a lockdir overlaps more than this many OTHER open items
+    /// (0 = off).  With `outside: refuse` the overlap count is quoted in the
+    /// refusal so the reader sees the cost.
+    #[serde(default)]
+    pub max_overlap: u32,
+    /// this agent writes nothing: any lockdir is refused
+    #[serde(default)]
+    pub none: bool,
+}
+
+impl LockShape {
+    pub fn refuses_outside(&self) -> bool {
+        self.outside.trim() != "warn"
+    }
+}
+
+/// Resolve the effective lock shape: the agent record's, then the project's
+/// per-agent override merged key by key.  None when neither says anything.
+pub fn lockshape_for(agent_def: &serde_json::Value, project_override: &serde_json::Value) -> Option<LockShape> {
+    let mut merged = agent_def.get("lockshape").cloned().unwrap_or(serde_json::Value::Null);
+    if !merged.is_object() {
+        merged = serde_json::Value::Null;
+    }
+    if let Some(ovr) = project_override.get("lockshape").and_then(|v| v.as_object()) {
+        if !merged.is_object() {
+            merged = serde_json::json!({});
+        }
+        for (k, v) in ovr {
+            merged[k] = v.clone();
+        }
+    }
+    if !merged.is_object() {
+        return None;
+    }
+    serde_json::from_value(merged).ok()
+}
+
+/// One finding of `check_lockshape`: a refusal (the write must not happen)
+/// or a warning (it may, but the reader should know).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LockFinding {
+    pub refuse: bool,
+    pub msg: String,
+}
+
+/// Does `lockdir` equal or sit under `pattern`?  Segment-wise: `*` matches
+/// one segment, `**` any run of segments (including none); `{test_dir}` is
+/// replaced by the project's test dir name before matching.  Both sides are
+/// compared after trimming trailing slashes.
+pub fn lock_pattern_matches(pattern: &str, lockdir: &str, test_dir: &str) -> bool {
+    let pattern = pattern.replace("{test_dir}", test_dir);
+    let pat: Vec<&str> = pattern.trim_end_matches('/').split('/').filter(|s| !s.is_empty() || pattern.starts_with('/')).collect();
+    let dir: Vec<&str> = lockdir.trim_end_matches('/').split('/').filter(|s| !s.is_empty() || lockdir.starts_with('/')).collect();
+    fn go(pat: &[&str], dir: &[&str]) -> bool {
+        match pat.first() {
+            // pattern exhausted: the lockdir may go deeper (equal-or-under)
+            None => true,
+            Some(&"**") => (0..=dir.len()).any(|k| go(&pat[1..], &dir[k..])),
+            Some(p) => match dir.first() {
+                Some(d) if *p == "*" || p == d => go(&pat[1..], &dir[1..]),
+                _ => false,
+            },
+        }
+    }
+    go(&pat, &dir)
+}
+
+/// How many of `others` (id, lockdirs) have a lockdir overlapping `lockdir`.
+pub fn overlap_count(lockdir: &str, others: &[(String, Vec<String>)]) -> usize {
+    others.iter().filter(|(_, dirs)| dirs.iter().any(|d| paths_overlap(d, lockdir))).count()
+}
+
+/// Check an item's lockdirs against its agent's lock shape.  `others` are
+/// the project's OTHER open items (id, lockdirs) — never the item itself.
+pub fn check_lockshape(
+    agent: &str,
+    shape: &LockShape,
+    lockdirs: &[String],
+    others: &[(String, Vec<String>)],
+    test_dir: &str,
+) -> Vec<LockFinding> {
+    let mut out = Vec::new();
+    if shape.none {
+        for d in lockdirs {
+            out.push(LockFinding {
+                refuse: true,
+                msg: format!("refused: codepath {d} — the {agent} agent writes nothing and takes no lock (lockshape.none)"),
+            });
+        }
+        return out;
+    }
+    for d in lockdirs {
+        let overlaps = overlap_count(d, others);
+        let outside = !shape.allow.is_empty() && !shape.allow.iter().any(|p| lock_pattern_matches(p, d, test_dir));
+        if outside {
+            let allowed = shape.allow.join(", ");
+            let cost = if overlaps > 0 { format!(" and overlaps {overlaps} open item(s)") } else { String::new() };
+            out.push(LockFinding {
+                refuse: shape.refuses_outside(),
+                msg: format!(
+                    "{}: codepath {d} is outside the {agent} agent's lock shape{cost}; a {agent} item locks the directory it writes ({allowed}), not the tree it reads",
+                    if shape.refuses_outside() { "refused" } else { "warning" }
+                ),
+            });
+            continue;
+        }
+        if shape.max_overlap > 0 && overlaps > shape.max_overlap as usize {
+            out.push(LockFinding {
+                refuse: false,
+                msg: format!("warning: codepath {d} overlaps {overlaps} open item(s) (lockshape.max_overlap {}); they all wait while this item runs — narrow it if the work does not own the whole tree", shape.max_overlap),
+            });
+        }
+    }
+    out
+}
+
+/// Tag text prefix the engine uses for the one synthesized "why is this
+/// queued item not running" tag (spec: lock waits are visible, 2026-09-07).
+/// The engine owns every tag starting with it; humans' tags are untouched.
+pub const BLOCKED_TAG_PREFIX: &str = "blocked by: ";
+pub const BLOCKED_TAG_COLOR: &str = "#c47a1f";
+
+/// Usecase membership (decided 2026-09-08): an item born under a usecase
+/// carries `usecase:<name>`; children inherit it at birth, all the way down.
+/// Engine-owned prefix like the blocked tag — the webui groups by it.
+pub const USECASE_TAG_PREFIX: &str = "usecase:";
+pub const USECASE_TAG_COLOR: &str = "#3b6fb6";
+
+/// Priority is 0–99, LOWER = sooner (widened from 0–10 on 2026-09-08; the
+/// migration multiplied existing numbers by 10, P0 stayed P0).  Bands:
+///   0–9   do now
+///   10–39 usecases — ONE number per usecase, inherited by everything under it
+///   40–49 human default (new human-filed roots)
+///   50–99 maintenance, schedules, agent-filed roots with no lineage
+/// A root item that names no priority takes the lowest number in its band
+/// that no OPEN item uses, so two lineages never compete on one number.
+pub const PRIO_BAND_DO_NOW: (i64, i64) = (0, 9);
+pub const PRIO_BAND_USECASE: (i64, i64) = (10, 39);
+pub const PRIO_BAND_HUMAN: (i64, i64) = (40, 49);
+pub const PRIO_BAND_MAINT: (i64, i64) = (50, 99);
+pub const PRIO_MAX: i64 = 99;
+
+/// Lowest number in `[lo, hi]` absent from `used`; `lo` when the band is full.
+pub fn pick_unused_priority(band: (i64, i64), used: &[i64]) -> i64 {
+    (band.0..=band.1).find(|p| !used.contains(p)).unwrap_or(band.0)
+}
+
+/// The `usecase:` tags on an item (text only, deduped, in order).
+pub fn usecase_tags(tags: &[Tag]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        if t.text.starts_with(USECASE_TAG_PREFIX) && !out.contains(&t.text) {
+            out.push(t.text.clone());
+        }
+    }
+    out
 }
 
 /// Per-agent close gate (decided 2026-09-03): what must be true before an
@@ -178,7 +355,21 @@ pub struct Project {
     /// the markers of every ancestor directory up to topdir)
     #[serde(default = "default_context")]
     pub default_context: Vec<String>,
+    /// decided 2026-09-08: a non-green testgroup run files a `code` item to
+    /// investigate and fix (a group's own `auto_fix` flag overrides per group)
+    #[serde(default)]
+    pub fix_on_test_failure: bool,
+    /// decided 2026-09-08: how many queued neighbours (same lockdirs, same
+    /// usecase) one claude session may take on after its item closes complete;
+    /// 0 or 1 = never chain
+    #[serde(default = "default_session_chain_max")]
+    pub session_chain_max: u32,
+    /// 100 once the 0–99 priority migration ran on this project (absent =
+    /// still on the 0–10 scale); read by the migration endpoint only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_scale: Option<u32>,
 }
+fn default_session_chain_max() -> u32 { 3 }
 fn default_mainfile() -> String { "{topdir}/main.iter.md".into() }
 fn default_context() -> Vec<String> { vec!["{marker}".into(), "{ancestor_markers}".into()] }
 
@@ -303,7 +494,8 @@ pub struct WorkItem {
     /// for agent == "exec": the shell command to run
     #[serde(default)]
     pub exec_shell: String,
-    /// lower = sooner; P0 most urgent; default 5
+    /// 0–99, lower = sooner; P0 most urgent; default 40 (see PRIO_BAND_*);
+    /// children inherit the creator's number exactly
     #[serde(default = "default_priority")]
     pub priority: i64,
     #[serde(default)]
@@ -319,6 +511,14 @@ pub struct WorkItem {
     /// transitively) closed complete; shallow = the blocker alone
     #[serde(default)]
     pub blockedby_shallow: bool,
+    /// engine-owned (2026-09-07): the running items whose central lock rows
+    /// overlap this queued item's lockdirs — a dependency the engine knows
+    /// about, written so the webui nests the waiter under the holder.  Set
+    /// while the wait lasts, cleared the tick after the lock goes; never
+    /// part of `dependency_status` (a lock ends with the holder's RUN, long
+    /// before the deep rule would release it)
+    #[serde(default)]
+    pub blockedby_locks: Vec<String>,
     #[serde(default)]
     pub attempt: u32,
     /// close-gate bounces so far (spec: Close Gate); reset by a human requeue
@@ -380,7 +580,7 @@ pub struct WorkItem {
     pub explain_engine: String,
 }
 fn default_queued() -> String { "queued".into() }
-fn default_priority() -> i64 { 5 }
+fn default_priority() -> i64 { PRIO_BAND_HUMAN.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkItemDetail {
@@ -632,6 +832,66 @@ mod tests {
         assert_eq!(retry_delay_sec(&p, 1), 10);
         assert_eq!(retry_delay_sec(&p, 2), 20);
         assert_eq!(retry_delay_sec(&p, 4), 80);
+    }
+
+    #[test]
+    fn lock_patterns_match_equal_or_under_with_globs() {
+        assert!(lock_pattern_matches("{topdir}/devops/plan", "{topdir}/devops/plan/", "tests"));
+        assert!(lock_pattern_matches("{topdir}/devops/plan", "{topdir}/devops/plan/corridor", "tests"));
+        assert!(!lock_pattern_matches("{topdir}/devops/plan", "{topdir}/devops", "tests"), "an ancestor is not under the pattern");
+        assert!(!lock_pattern_matches("{topdir}/devops/plan", "{topdir}/devops/planner", "tests"));
+        assert!(lock_pattern_matches("{topdir}/devops/deploy/*", "{topdir}/devops/deploy/corridor", "tests"));
+        assert!(!lock_pattern_matches("{topdir}/devops/deploy/*", "{topdir}/devops/deploy", "tests"));
+        assert!(lock_pattern_matches("{topdir}/**/{test_dir}", "{topdir}/core/repos/x/tests", "tests"));
+    }
+
+    #[test]
+    fn unused_priority_is_lowest_free_in_band() {
+        assert_eq!(pick_unused_priority(PRIO_BAND_USECASE, &[]), 10);
+        assert_eq!(pick_unused_priority(PRIO_BAND_USECASE, &[10, 11, 13]), 12);
+        assert_eq!(pick_unused_priority(PRIO_BAND_HUMAN, &(40..=49).collect::<Vec<_>>()), 40);
+        let tags = vec![
+            Tag { text: "usecase:signup".into(), color: "".into() },
+            Tag { text: "other".into(), color: "".into() },
+            Tag { text: "usecase:signup".into(), color: "".into() },
+        ];
+        assert_eq!(usecase_tags(&tags), vec!["usecase:signup".to_string()]);
+        assert!(lock_pattern_matches("{topdir}/**/{test_dir}", "{topdir}/core/repos/x/tests/unit", "tests"));
+        assert!(!lock_pattern_matches("{topdir}/**/{test_dir}", "{topdir}/core/repos/x", "tests"));
+    }
+
+    #[test]
+    fn lockshape_refuses_outside_warns_on_overlap_and_merges_overrides() {
+        let others: Vec<(String, Vec<String>)> = (0..11)
+            .map(|n| (format!("i{n}"), vec![format!("{{topdir}}/devops/thing{n}/")]))
+            .collect();
+        let plan = LockShape { allow: vec!["{topdir}/devops/plan".into()], outside: "".into(), max_overlap: 0, none: false };
+        let f = check_lockshape("plan", &plan, &["{topdir}/devops".to_string()], &others, "tests");
+        assert_eq!(f.len(), 1);
+        assert!(f[0].refuse);
+        assert!(f[0].msg.contains("refused: codepath {topdir}/devops") && f[0].msg.contains("overlaps 11 open item(s)") && f[0].msg.contains("devops/plan"), "{}", f[0].msg);
+        assert!(check_lockshape("plan", &plan, &["{topdir}/devops/plan/x".to_string()], &others, "tests").is_empty());
+        // code: anything goes, but a wide lock warns with the count
+        let code = LockShape { allow: vec![], outside: "".into(), max_overlap: 3, none: false };
+        let f = check_lockshape("code", &code, &["{topdir}/devops".to_string()], &others, "tests");
+        assert_eq!(f.len(), 1);
+        assert!(!f[0].refuse && f[0].msg.contains("overlaps 11 open item(s)"));
+        assert!(check_lockshape("code", &code, &["{topdir}/devops/thing1/".to_string()], &others, "tests").is_empty());
+        // warn-only shape
+        let soft = LockShape { allow: vec!["{topdir}/a".into()], outside: "warn".into(), max_overlap: 0, none: false };
+        assert!(!check_lockshape("x", &soft, &["{topdir}/b".to_string()], &[], "tests")[0].refuse);
+        // explain: no lock at all
+        let none = LockShape { none: true, ..Default::default() };
+        assert!(check_lockshape("explain", &none, &["{topdir}/x".to_string()], &[], "tests")[0].refuse);
+        assert!(check_lockshape("explain", &none, &[], &[], "tests").is_empty());
+        // merge: agent default + project override key by key; absent everywhere -> None
+        let def = serde_json::json!({"lockshape": {"allow": ["{topdir}/devops/plan"]}});
+        let ovr = serde_json::json!({"lockshape": {"outside": "warn"}});
+        let s = lockshape_for(&def, &ovr).unwrap();
+        assert_eq!(s.allow, vec!["{topdir}/devops/plan".to_string()]);
+        assert!(!s.refuses_outside());
+        assert!(lockshape_for(&serde_json::json!({}), &serde_json::Value::Null).is_none());
+        assert!(lockshape_for(&serde_json::json!({}), &ovr).is_some(), "a project override alone defines a shape");
     }
 
     #[test]

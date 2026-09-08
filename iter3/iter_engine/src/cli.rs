@@ -43,7 +43,8 @@ enum Verb {
         /// lock scope (repeatable); absolute, {topdir}-relative or repo-relative
         #[arg(long)]
         codepath: Vec<String>,
-        /// lower = sooner, P0 most urgent, default 5
+        /// 0–99, lower = sooner. Items created inside an agent INHERIT the creating
+        /// item's number and ignore this; a root with no number gets an unused one in its band
         #[arg(long)]
         priority: Option<i64>,
         /// this item waits for the named item (id or unique suffix) AND everything it created (repeatable)
@@ -64,6 +65,10 @@ enum Verb {
         /// tag (repeatable): text or text:#hex
         #[arg(long)]
         tag: Vec<String>,
+        /// the usecase this item serves — becomes the engine-owned tag `usecase:<name>`,
+        /// inherited by everything the item creates (children inherit it automatically)
+        #[arg(long)]
+        usecase: Option<String>,
         /// accepted for V2 compatibility; ignored
         #[arg(long, hide = true)]
         risk: Option<i64>,
@@ -315,8 +320,8 @@ pub fn run(args: CliArgs) {
     }
     let e = env(&args);
     match args.verb {
-        Verb::Add { file, item_type, title, mainwork, codepath, priority, depends_on, depends_on_shallow, context, model, question, tag, .. } => {
-            add(&e, file, item_type, title, mainwork, codepath, priority, depends_on, depends_on_shallow, context, model, question, tag)
+        Verb::Add { file, item_type, title, mainwork, codepath, priority, depends_on, depends_on_shallow, context, model, question, tag, usecase, .. } => {
+            add(&e, file, item_type, title, mainwork, codepath, priority, depends_on, depends_on_shallow, context, model, question, tag, usecase)
         }
         Verb::Ask { question, file } => ask(&e, read_arg_or_file(question, file)),
         Verb::Reject { reason } => reject(&e, &reason),
@@ -372,6 +377,90 @@ mod local {
 
     /// Record a claim row on the calling item when inside a run (no-op from a shell).
     /// A false --broken claim also parks the item (stale), like `iter reject`.
+    /// Detail rows for a run + the optional fix item (decided 2026-09-08).
+    /// Silent outside an engine-run work item (no ITER_DATA_URL/ITER_WORKID).
+    fn report_run(topdir: &Path, tg_file: &Path, tg_rel: &str, run: &rt::GroupRunResult, header: &str, broken_claim: bool, group_auto_fix: bool) {
+        let (Ok(url), Ok(token), Ok(project), Ok(workid)) = (
+            std::env::var("ITER_DATA_URL"),
+            std::env::var("ITER_ENGINE_TOKEN"),
+            std::env::var("ITER_PROJECT"),
+            std::env::var("ITER_WORKID"),
+        ) else {
+            return;
+        };
+        if url.is_empty() || token.is_empty() || project.is_empty() || workid.is_empty() {
+            return;
+        }
+        let api = Api::new(&url, &token);
+        let details = format!("/api/projects/{project}/workitems/{workid}/details");
+        let _ = api.post(&details, &json!({"key": "log_header", "valuetype": "text", "value": header}));
+        if run.outcome == rt::Outcome::Green {
+            return;
+        }
+        let detail = rt::log_detail(run);
+        if !detail.is_empty() {
+            let _ = api.post(&details, &json!({"key": "log_detail", "valuetype": "text", "value": detail}));
+        }
+        // fix items: only from full runs that are NOT an agent iterating on its
+        // own code (a code/testwriter session sees red on purpose), and never
+        // from a --broken claim (the red IS the expected reproduction)
+        let agent = std::env::var("ITER_AGENT").unwrap_or_default();
+        let iterating_agent = !agent.is_empty() && agent != "exec";
+        if !run.full_run || broken_claim || iterating_agent {
+            return;
+        }
+        let project_row: serde_json::Value = api.get(&format!("/api/projects/{project}")).unwrap_or(json!({}));
+        let enabled = group_auto_fix || project_row.get("fix_on_test_failure").and_then(|b| b.as_bool()).unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let title = format!("Tests non-green: testgroup \"{}\" {}/{} in {}", run.label, run.pass, run.total, tg_rel);
+        let items: Vec<serde_json::Value> = api.get(&format!("/api/projects/{project}/workitems")).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let open_dup = items.iter().any(|i| {
+            let st = i.get("state").and_then(|s| s.as_str()).unwrap_or("");
+            i.get("name").and_then(|n| n.as_str()) == Some(title.as_str()) && !matches!(st, "complete" | "failed" | "rejected" | "cancelled")
+        });
+        if open_dup {
+            println!("fix item already open for this testgroup — not filing another");
+            return;
+        }
+        // the object under test: the parent of the nearest `tests` ancestor
+        let object_dir = tg_file
+            .ancestors()
+            .find(|d| d.file_name().map(|n| n == "tests").unwrap_or(false))
+            .and_then(|t| t.parent())
+            .unwrap_or_else(|| tg_file.parent().unwrap_or(topdir))
+            .to_path_buf();
+        let object_rel = object_dir.strip_prefix(topdir).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let lockdir = if object_rel.is_empty() { "{topdir}".to_string() } else { format!("{{topdir}}/{object_rel}") };
+        let failing: Vec<String> = run.runs.iter().filter(|t| t.outcome != rt::Outcome::Green).map(|t| format!("{} ({})", t.id, t.name)).collect();
+        let object = if object_rel.is_empty() { "the project".to_string() } else { object_rel.clone() };
+        let request = format!(
+            "The tests for {object} are not green: testgroup \"{label}\" in {tg_rel} finished {pass} of {total} passing on {when}. \
+             This project files a fix item on every non-green run (fix_on_test_failure), so this item exists to find out why and put it right.\n\n\
+             - Failing or erroring scripts: {failing}\n\
+             - The full run summary is the \"log_header\" row and the failing scripts' output is the \"log_detail\" row on work item {workid}.\n\
+             - Start by reproducing: `\"$ITER_BIN\" runtests --project \"$ITER_PROJECT\" --group \"{label}\" --broken`. If the group is green now the item is stale and the command parks it.\n\
+             - Then fix the CODE the tests describe. If a test itself is wrong, say so explicitly in your output and fix the test instead.\n\
+             - Finish with `--fixed` on the same group; the close gate needs an upheld --fixed claim.\n",
+            label = run.label, pass = run.pass, total = run.total, when = iter_core::now_utc(), failing = failing.join(", "),
+        );
+        let requestedby = if agent.is_empty() { "user".to_string() } else { format!("agent:{agent}") };
+        let body = json!({
+            "name": title, "agent": "code", "state": "queued",
+            "lockdirs": [lockdir], "blockedby": [], "context": [], "model": "", "tags": [],
+            "createdby": workid, "requestedby": requestedby, "prework": [], "postwork": [],
+        });
+        match api.post(&format!("/api/projects/{project}/workitems"), &body) {
+            Ok(created) => {
+                let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let _ = api.put(&format!("/api/projects/{project}/workitems/{id}/details/0"), &json!({"key": "request", "valuetype": "text", "value": request}));
+                println!("filed fix item {} (code, P{}) for testgroup \"{}\"", &id[..8.min(id.len())], created.get("priority").and_then(|p| p.as_i64()).unwrap_or(0), run.label);
+            }
+            Err(e) => eprintln!("could not file the fix item: {e}"),
+        }
+    }
+
     fn record_claim(claim: &str, group: &str, run: &rt::GroupRunResult, upheld: bool, park_reason: Option<&str>) {
         let (Ok(url), Ok(token), Ok(project), Ok(workid)) = (
             std::env::var("ITER_DATA_URL"),
@@ -410,7 +499,7 @@ mod local {
             eprintln!("error: claims are group-level; --test narrows only neutral runs");
             return 2;
         }
-        let (tg_file, _) = match rt::locate_group(topdir, group) {
+        let (tg_file, group_def) = match rt::locate_group(topdir, group) {
             Ok(found) => found,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -424,18 +513,14 @@ mod local {
                 return 2;
             }
         };
-        for t in &run.runs {
-            println!(
-                "{}  {} ({}) [{}] — {}/{} — log: {}{}",
-                match t.outcome {
-                    rt::Outcome::Green => "PASS ",
-                    rt::Outcome::Red => "FAIL ",
-                    rt::Outcome::Error => "ERROR",
-                },
-                t.id, t.name, t.shell, t.pass, t.total, t.log_path.display(),
-                if t.detail.is_empty() { String::new() } else { format!(" — {}", t.detail) },
-            );
-        }
+        // Log Header on every run, Log Detail only when non-green, both on the
+        // running work item (decided 2026-09-08: run logs live centrally, not
+        // under the tree); a non-green FULL run may file a fix item
+        let when = iter_core::now_utc();
+        let tg_rel = tg_file.strip_prefix(topdir).unwrap_or(&tg_file).to_string_lossy().into_owned();
+        let header = rt::log_header(&run, &tg_rel, &when);
+        print!("{header}");
+        report_run(topdir, &tg_file, &tg_rel, &run, &header, broken, group_def.auto_fix);
         let pct = if run.total > 0 { run.pass * 100 / run.total } else { 0 };
         println!(
             "tests {}/{} {}% — testgroup \"{}\" {}{}",
@@ -670,6 +755,7 @@ fn add(
     model: Option<String>,
     question: Option<String>,
     tag: Vec<String>,
+    usecase: Option<String>,
 ) {
     let s = |v: &Value, keys: &[&str]| -> String {
         keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from)).unwrap_or_default()
@@ -721,7 +807,10 @@ fn add(
         .or_else(|| { let q = s(&f, &["question"]); if q.is_empty() { None } else { Some(read_arg_or_file(Some(q), None)) } })
         .filter(|q| !q.trim().is_empty());
     let model = model.clone().unwrap_or_else(|| s(&f, &["model"]));
-    let prio = priority.or_else(|| f.get("priority").and_then(|p| p.as_i64())).unwrap_or(5);
+    // decided 2026-09-08: no default here — iter_data inherits the creating
+    // item's priority (and usecase tags) or places a root in its band
+    let prio: Option<i64> = priority.or_else(|| f.get("priority").and_then(|p| p.as_i64()));
+    let usecase = usecase.clone().or_else(|| { let u = s(&f, &["usecase"]); if u.is_empty() { None } else { Some(u) } });
     let mut tags: Vec<Value> = tag
         .iter()
         .map(|t| match t.rsplit_once(':') {
@@ -747,11 +836,26 @@ fn add(
     let body = json!({
         "name": name.trim(), "agent": agent, "state": state, "priority": prio,
         "lockdirs": lockdirs, "blockedby": blockedby, "blockedby_shallow": shallow,
-        "context": ctx, "model": model, "tags": tags,
+        "context": ctx, "model": model, "tags": tags, "usecase": usecase,
         "createdby": if e.workid.is_empty() { requestedby.clone() } else { e.workid.clone() },
         "requestedby": requestedby, "prework": [], "postwork": [],
     });
-    let created = e.api.post(&format!("/api/projects/{}/workitems", e.project), &body).unwrap_or_else(|err| die(format!("create failed: {err}")));
+    // lock scope sanity the server cannot see: a codepath that is a strict
+    // ancestor of several code nodes locks an AREA, not the directory one
+    // item writes (2026-09-07: a plan item locked devops, core/repos and
+    // infra/repos for an hour)
+    for w in area_warnings(&e.topdir, &lockdirs) {
+        eprintln!("iter add: warning: {w}");
+    }
+    // iter_data enforces the agent's lock shape: a refusal is a 400 naming the
+    // rule and the overlap count; warnings ride back on the created record
+    let created = e.api.post(&format!("/api/projects/{}/workitems", e.project), &body).unwrap_or_else(|err| {
+        let msg = serde_json::from_str::<Value>(&err.body).ok().and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from)).unwrap_or_else(|| err.to_string());
+        die(format!("create {}", if msg.starts_with("refused") { msg } else { format!("failed: {msg}") }))
+    });
+    for w in created.get("warnings").and_then(|w| w.as_array()).into_iter().flatten().filter_map(|w| w.as_str()) {
+        eprintln!("iter add: {w}");
+    }
     let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
     let _ = e.api.put(
         &format!("/api/projects/{}/workitems/{}/details/0", e.project, id),
@@ -764,6 +868,39 @@ fn add(
         );
     }
     println!("added {} ({}) state={} agent={}", id, &id[id.len().saturating_sub(12)..], body["state"].as_str().unwrap_or(""), body["agent"].as_str().unwrap_or(""));
+}
+
+/// Warn for every lockdir that is a strict ancestor of two or more code
+/// nodes' source directories (the structureV2 scan): that is an area lock.
+/// Silent outside a checkout (no topdir) or when the scan finds nothing.
+fn area_warnings(topdir: &str, lockdirs: &[String]) -> Vec<String> {
+    if topdir.trim().is_empty() || !std::path::Path::new(topdir).is_dir() {
+        return vec![];
+    }
+    let (_, scan) = iter_local::markers::scan_project(std::path::Path::new(topdir));
+    let top = topdir.trim_end_matches('/');
+    let mut out = Vec::new();
+    for d in lockdirs {
+        let abs = d.replace("{topdir}", top);
+        let abs = abs.trim_end_matches('/');
+        let mut covered: Vec<&str> = Vec::new();
+        for n in &scan.nodes {
+            for cd in &n.codedirs {
+                let cd = cd.trim_end_matches('/');
+                if cd != abs && cd.starts_with(abs) && cd.as_bytes().get(abs.len()) == Some(&b'/') && !covered.contains(&n.name.as_str()) {
+                    covered.push(n.name.as_str());
+                }
+            }
+        }
+        if covered.len() >= 2 {
+            out.push(format!(
+                "codepath {d} is an area covering {} code nodes ({}); every item under it waits while this one runs — lock the directory the work writes",
+                covered.len(),
+                covered.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    out
 }
 
 fn calling_item(e: &Env) -> Value {

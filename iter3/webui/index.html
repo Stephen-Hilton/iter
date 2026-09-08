@@ -215,6 +215,7 @@ a{color:var(--accent)}
   </div>
   <div id="counts">
     <div id="chips" style="display:flex;gap:8px;align-items:center"></div>
+    <div id="ucchips" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" title="usecase progress: complete / total items carrying the usecase tag — click to filter"></div>
     <div class="tools">
       <button id="newitem">+ New workitem</button>
       <label class="kv">sort
@@ -283,6 +284,9 @@ let token=null,me=null,myRole="",project=null,itemsCache=[],agentsCache=[],dlgDi
 const filters=new Set();   // additive state filters from the pinned counts bar
 const STATES=["in-progress","queued","question","parked","paused","failed","complete","scheduled"];
 const CLOSED=new Set(["complete","failed"]); // immutable except appended "doc" rows + reopen
+const UC_PREFIX="usecase:", UC_COLOR="#3b6fb6", PRIO_DEFAULT=40; // priority 0–99 (decided 2026-09-08)
+let ucFilter=""; // one usecase name, or ""
+const ucOf=i=>(i.tags||[]).filter(t=>t&&t.text&&t.text.startsWith(UC_PREFIX)).map(t=>t.text.slice(UC_PREFIX.length));
 const OPEN_TARGETS=["queued","parked","paused","question"];
 const TAG_PALETTE=["#4da3ff","#39c47f","#e0b341","#b878e6","#e07a52","#4dd0c4","#e05252","#9fd3e8"];
 
@@ -338,8 +342,26 @@ function tagFg(hex){
 }
 /* a lockdir at the repo root drains every other agent before this item can start */
 function fullTreeLock(i){return (i.lockdirs||[]).some(d=>String(d).replace(/\/+$/,"")==="{topdir}");}
+/* a wide lock (2026-09-07): a lockdir that is a strict ancestor of other OPEN items'
+   lockdirs locks an area, not the directory one item writes — they all wait while it
+   runs.  Returns the number of other open items it covers (0/1 = nothing to say). */
+const norm=d=>String(d||"").replace(/\/+$/,"");
+function isStrictAncestor(a,b){a=norm(a);b=norm(b);return a!==b&&b.startsWith(a+"/");}
+function wideLockCount(i){
+  if(CLOSED.has(i.state))return 0;
+  const mine=(i.lockdirs||[]).map(norm).filter(Boolean);
+  if(!mine.length)return 0;
+  let n=0;
+  for(const o of itemsCache){
+    if(o.id===i.id||CLOSED.has(o.state)||o.state==="scheduled")continue;
+    if((o.lockdirs||[]).some(d=>mine.some(m=>isStrictAncestor(m,d))))n++;
+  }
+  return n;
+}
 function tagsHtml(i){
   const tags=(i.tags||[]).filter(t=>t&&t.text);
+  const wide=fullTreeLock(i)?0:wideLockCount(i);
+  if(wide>=2)tags.unshift({text:`wide lock (${wide} items)`,color:"#e05252"});
   if(fullTreeLock(i)&&!CLOSED.has(i.state))tags.unshift({text:"full tree lock",color:"#e05252"});
   if(!tags.length)return "";
   return `<span class="tags">${tags.map(t=>{const c=tagColor(t);return `<span class="tag" style="background:${esc(c)};color:${tagFg(c)}">${esc(t.text)}</span>`;}).join("")}</span>`;
@@ -527,6 +549,13 @@ function renderCounts(){
     if(!k)filters.clear();else if(filters.has(k))filters.delete(k);else filters.add(k);
     renderCounts();renderItems();
   });
+  /* usecase progress (decided 2026-09-08): N of M items carrying usecase:<name> are complete */
+  const uc={};
+  itemsCache.forEach(i=>ucOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
+  const names=Object.keys(uc).sort((a,b)=>(uc[a].prio-uc[b].prio)||a.localeCompare(b));
+  if(ucFilter&&!uc[ucFilter])ucFilter="";
+  $("#ucchips").innerHTML=names.map(n=>`<div class="count ${ucFilter===n?"active":""}" data-uc="${esc(n)}" style="border-left:3px solid ${UC_COLOR}"><b>${uc[n].done}/${uc[n].total}</b><span>P${uc[n].prio} ${esc(n)}</span></div>`).join("");
+  document.querySelectorAll("#ucchips .count").forEach(c=>c.onclick=()=>{ucFilter=(ucFilter===c.dataset.uc)?"":c.dataset.uc;renderCounts();renderItems();});
 }
 
 /* ---- run order: only what can run, plus whatever a runnable item is stuck behind ---- */
@@ -565,15 +594,22 @@ function runGroup(i,byId){
   return 8;                                                  // complete
 }
 /* tree parent = the item this one is actually WAITING ON (deep gate): the open
-   blocker, or the open descendant of a complete blocker.  An unblocked item is
-   a root; an item is never shown under the item that created it. */
+   blocker, or the open descendant of a complete blocker — or, for a queued item
+   whose lockdirs overlap a running item's lock, that lock holder (the engine
+   records it in blockedby_locks, 2026-09-07).  An unblocked item is a root; an
+   item is never shown under the item that created it. */
 let parentCache={};
+function lockHolderOf(i,byId){
+  if(i.state!=="queued")return null;
+  const h=(i.blockedby_locks||[]).find(x=>byId[x]&&byId[x].state==="in-progress");
+  return h||null;
+}
 function parentOf(i,ids){
   if(CLOSED.has(i.state)||i.state==="in-progress")return null; // not waiting on anything
   if(parentCache[i.id]===undefined){
     const byId={};itemsCache.forEach(x=>{byId[x.id]=x;});
     const ds=depStatus(i,byId);
-    parentCache[i.id]=ds.waiting||ds.failed||null;
+    parentCache[i.id]=ds.waiting||ds.failed||lockHolderOf(i,byId)||null;
   }
   const p=parentCache[i.id];
   return (p&&p!==i.id&&ids.has(p))?p:null;
@@ -597,7 +633,7 @@ function runView(items){
 }
 const stateOrder={"in-progress":0,"queued":1,"question":2,"paused":3,"parked":4,"scheduled":5,"failed":6,"complete":7};
 function comparator(mode,byId){
-  const prio=(a,b)=>(a.priority??5)-(b.priority??5)||(a.ts?.receive||"").localeCompare(b.ts?.receive||"");
+  const prio=(a,b)=>(a.priority??PRIO_DEFAULT)-(b.priority??PRIO_DEFAULT)||(a.ts?.receive||"").localeCompare(b.ts?.receive||"");
   switch(mode){
     case "state":     return (a,b)=>(stateOrder[a.state]??9)-(stateOrder[b.state]??9)||prio(a,b);
     case "priority":  return prio;
@@ -617,7 +653,7 @@ function tileHtml(i,depth){
   <div class="tile" data-depth="${depth}" style="--d:${depth};margin-left:${depth*22}px" data-id="${esc(i.id)}">
     <div class="left">
       <span class="state ${esc(i.state)}">${esc(i.state)}</span>
-      <span class="prio">P${esc(i.priority??5)}</span>
+      <span class="prio">P${esc(i.priority??PRIO_DEFAULT)}</span>
       <span class="nm">${esc(i.name)}</span>
       <span class="agent">${esc(i.agent||"")}</span>${att}
     </div>
@@ -635,12 +671,13 @@ function renderItems(){
   const byId={};itemsCache.forEach(i=>{byId[i.id]=i;});
   const cmp=comparator(mode,byId);
   let shown,html="";
+  const base=ucFilter?itemsCache.filter(i=>ucOf(i).includes(ucFilter)):itemsCache;
   if(mode==="runorder"&&filters.size===0){
-    shown=runView(itemsCache);
-    $("#viewnote").textContent=`run order: ${shown.length} of ${itemsCache.length} — runnable items and what they are stuck behind`;
+    shown=runView(base);
+    $("#viewnote").textContent=`run order: ${shown.length} of ${base.length} — runnable items and what they are stuck behind${ucFilter?` · usecase ${ucFilter}`:""}`;
   }else{
-    shown=itemsCache.filter(i=>filters.size===0||filters.has(i.state));
-    $("#viewnote").textContent=filters.size?`${shown.length} shown (${[...filters].join(" + ")})`:"";
+    shown=base.filter(i=>filters.size===0||filters.has(i.state));
+    $("#viewnote").textContent=(filters.size||ucFilter)?`${shown.length} shown (${[...filters,...(ucFilter?["usecase "+ucFilter]:[])].join(" + ")})`:"";
   }
   /* every view nests: an item sits under what it is waiting on, as deep as the chain goes */
   {
@@ -757,7 +794,7 @@ async function createItem(body,request){
   return created;
 }
 function cloneBody(i,over={}){
-  return {name:i.name,agent:i.agent,exec_shell:i.exec_shell||"",priority:i.priority??5,lockdirs:i.lockdirs||[],
+  return {name:i.name,agent:i.agent,exec_shell:i.exec_shell||"",priority:i.priority??PRIO_DEFAULT,lockdirs:i.lockdirs||[],
     blockedby:i.blockedby||[],tags:i.tags||[],prework:i.prework||[],postwork:i.postwork||[],context:i.context||[],model:i.model||"",
     requestedby:me||"",createdby:me||"",state:"queued",...over};
 }
@@ -830,13 +867,14 @@ function openForm(mode,src){
       <div class="frow"><label>name</label><input id="f-name" value="${esc(i.name||"")}" placeholder="short label, < 150 chars"></div>
       <div class="frow"><label>agent</label><select id="f-agent">${agentNames.map(a=>`<option ${a===(i.agent||"code")?"selected":""}>${esc(a)}</option>`).join("")}</select></div>
       <div class="frow" id="f-exec-row" ${ (i.agent||"code")==="exec"?"":"hidden"}><label>exec shell</label><textarea id="f-exec" rows="2">${esc(i.exec_shell||"")}</textarea></div>
-      <div class="frow"><label>priority</label><input id="f-prio" type="number" min="0" max="10" value="${esc(i.priority??5)}" style="width:90px"> <span class="kv">lower = sooner; P0 most urgent; default 5</span></div>
+      <div class="frow"><label>priority</label><input id="f-prio" type="number" min="0" max="99" value="${esc(i.priority??"")}" placeholder="auto" style="width:90px"> <span class="kv">0–99, lower = sooner · 0–9 do now · 10–39 usecases (one number each) · 40–49 human · 50+ maintenance · blank = auto: a root takes the lowest unused number in its band, a child inherits its creator's</span></div>
       <div class="frow"><label>state on save</label><select id="f-state">${stateOpts.map(s=>`<option ${s===curState?"selected":""}>${s}</option>`).join("")}</select></div>
       <div class="frow"><label>lockdirs</label><textarea id="f-lock" rows="2" placeholder="one per line, e.g. {topdir}/core/repos/x/">${esc(lines(i.lockdirs))}</textarea></div>
       <div class="frow"><label>blocked by</label><textarea id="f-dep" rows="2" placeholder="workitem ids, one per line">${esc(lines(i.blockedby))}</textarea></div>
       <div class="frow"><label>context files</label><textarea id="f-ctx" rows="2" placeholder="one per line; {topdir}/…, {codepath}/…, {marker}, {ancestor_markers}, globs — blank = project default">${esc(lines(i.context))}</textarea></div>
       <div class="frow"><label>model</label><input id="f-model" value="${esc(i.model||"")}" placeholder="blank = agent default (opus | sonnet | haiku | fable)" style="width:260px"></div>
       <div class="frow"><label>tags</label><input id="f-tags" value="${esc(tagsText)}" placeholder="comma separated; optional color: name:#hex"></div>
+      <div class="frow"><label>usecase</label><input id="f-uc" value="${esc(ucOf(i)[0]||"")}" placeholder="usecase name → tag usecase:<name>, inherited by every item this one creates" style="width:320px"></div>
       <div class="frow"><label>request</label><textarea id="f-req" rows="16" placeholder="the full request text the agent receives">${esc(i._request??"")}</textarea></div>
       <div style="text-align:right;margin-top:10px"><span class="err" id="f-err" style="margin-right:12px"></span><button id="f-save">${mode==="edit"?"Save":"Create"}</button></div>
     </div>`;
@@ -849,8 +887,12 @@ function openForm(mode,src){
     const val=s=>form.querySelector(s).value;
     const list=s=>val(s).split("\n").map(x=>x.trim()).filter(Boolean);
     const tags=val("#f-tags").split(",").map(x=>x.trim()).filter(Boolean).map(x=>{const m=x.match(/^(.*?):(#[0-9a-fA-F]{3,8})$/);return m?{text:m[1].trim(),color:m[2]}:{text:x,color:""};});
-    const body={name:val("#f-name").trim(),agent:val("#f-agent"),exec_shell:val("#f-exec"),priority:parseInt(val("#f-prio")||"5",10),
-      state:val("#f-state"),lockdirs:list("#f-lock"),blockedby:list("#f-dep"),tags,context:list("#f-ctx"),model:val("#f-model").trim()};
+    const ucName=val("#f-uc").trim().replace(/^usecase:/,"");
+    const keptTags=tags.filter(t=>!t.text.startsWith(UC_PREFIX)||(ucName&&t.text===UC_PREFIX+ucName));
+    if(ucName&&!keptTags.some(t=>t.text===UC_PREFIX+ucName))keptTags.push({text:UC_PREFIX+ucName,color:UC_COLOR});
+    const prioRaw=val("#f-prio").trim();
+    const body={name:val("#f-name").trim(),agent:val("#f-agent"),exec_shell:val("#f-exec"),...(prioRaw===""?{}:{priority:Math.max(0,Math.min(99,parseInt(prioRaw,10)))}),
+      state:val("#f-state"),lockdirs:list("#f-lock"),blockedby:list("#f-dep"),tags:keptTags,context:list("#f-ctx"),model:val("#f-model").trim()};
     if(!body.name){err.textContent="name is required";return;}
     try{
       if(mode==="edit"){
@@ -882,6 +924,7 @@ function fieldRow(f,rec){
   else if(f.type==="textarea")ctl=`<textarea id="${id}" rows="${f.rows||4}" style="font-family:inherit">${esc(v??"")}</textarea>`;
   else if(f.type==="json")ctl=`<textarea id="${id}" rows="${f.rows||4}">${esc(v==null?(f.empty??""):JSON.stringify(v,null,2))}</textarea>`;
   else if(f.type==="select")ctl=`<select id="${id}">${f.options.map(o=>`<option ${o===v?"selected":""}>${esc(o)}</option>`).join("")}</select>`;
+  else if(f.type==="bool")ctl=`<select id="${id}"><option ${v?"":"selected"}>false</option><option ${v?"selected":""}>true</option></select>`;
   else if(f.type==="number")ctl=`<input id="${id}" type="number" step="any" value="${esc(v??"")}" style="width:160px">`;
   else if(f.type==="password")ctl=`<input id="${id}" type="password" autocomplete="new-password" placeholder="leave blank to keep">`;
   else ctl=`<input id="${id}" value="${esc(v??"")}">`;
@@ -898,6 +941,7 @@ function readFields(fields,out){
       if(f.type==="json"){ if(raw.trim()==="")out[f.key]=(f.emptyValue!==undefined?f.emptyValue:null); else out[f.key]=JSON.parse(raw); }
       else if(f.type==="number"){ if(raw.trim()==="")out[f.key]=(f.nullable?null:0); else{const n=Number(raw);if(Number.isNaN(n))throw new Error("not a number");out[f.key]=n;} }
       else if(f.type==="password"){ if(raw)out[f.key]=raw; }
+      else if(f.type==="bool"){ out[f.key]=(raw==="true"); }
       else out[f.key]=raw;
     }catch(e){el.classList.add("fieldbad");throw new Error(`${f.label||f.key}: ${e.message}`);}
   }
@@ -931,7 +975,10 @@ const PROJECT_FIELDS=[
   {key:"default_context",label:"default context",type:"json",rows:2,help:'context patterns a work item inherits when it names none: ["{marker}","{ancestor_markers}"]'},
   {key:"maxagents",label:"max agents",type:"json",rows:4,help:'usage%-gated cap, evaluated against the higher of 5h/7d usage: {"&gt;95%":0,"&gt;90%":1,"else":4}'},
   {key:"maxdailycost",label:"max daily cost ($)",type:"number",nullable:true,help:"blank = unlimited · 0 = spend nothing (kill switch)"},
-  {key:"agents",label:"agent overrides",type:"json",rows:6,help:'per-agent overrides keyed by agent name: {"code":{"max":2,"model":"opus","timeoutsec":3600,"closegate":{"verify":"haiku","requires_commit":true}}}'},
+  {key:"fix_on_test_failure",label:"fix on test failure",type:"bool",help:"a non-green FULL testgroup run (Test Loop, exec item, or a human's run) files a code item to investigate and fix; a group's own auto_fix flag turns it on per group; agent sessions iterating on their own code never file one"},
+  {key:"session_chain_max",label:"session chain max",type:"number",help:"after an item closes complete, its claude session may take on this many queued neighbours in total (same lockdirs + same usecase, dependencies satisfied, best on that scope) — 0 or 1 = never chain; default 3"},
+  {key:"priority_scale",label:"priority scale",type:"readonly",help:"100 once the 0–99 priority migration ran (POST /api/projects/<name>/migrate_priority)"},
+  {key:"agents",label:"agent overrides",type:"json",rows:6,help:'per-agent overrides keyed by agent name: {"code":{"max":2,"model":"opus","timeoutsec":3600,"closegate":{"verify":"haiku","requires_commit":true},"lockshape":{"allow":["{topdir}/src/*"]}}}'},
   {key:"failure",label:"failure policy",type:"json",rows:4,help:"maxattempts · first_retry_second · retry_backoff_exponent"},
   {key:"engines",type:"json",rows:2,help:'engine names serving this project, e.g. ["Engine01"]'},
   {key:"accounts",type:"json",rows:5,help:'Claude accounts by env-var NAME (never the token): [{"name":"Dev1","token_envar":"DEV1_TOKEN","order":1,"switch":80,"stop":99}]'},
@@ -950,6 +997,7 @@ const AGENT_FIELDS=[
   {key:"model",type:"text",help:"claude model alias: opus · sonnet · haiku · fable"},{key:"flags",type:"text",help:"extra claude CLI flags"},
   {key:"childstate",label:"child state",type:"text",help:"state for workitems this agent creates (default queued)"},
   {key:"closegate",label:"close gate",type:"json",rows:5,help:'{"verify":"haiku","requires_children":false,"requires_commit":false,"max_bounces":1,"verify_max_turns":8} — verify "" disables the verifier'},
+  {key:"lockshape",label:"lock shape",type:"json",rows:5,help:'what an item of this agent may lock, checked on create and on every lockdirs edit: {"allow":["{topdir}/devops/plan"],"outside":"refuse","max_overlap":0,"none":false} — allow patterns (* one segment, ** any, {test_dir}); outside: refuse | warn; max_overlap warns past N open items; none = takes no lock. Blank = anything goes'},
   {key:"promptbody",label:"prompt body",type:"textarea",rows:18,help:"the agent's full role prompt; project description + workitem request are appended at run time"},
 ];
 const userFields=(self)=>[
@@ -1092,7 +1140,8 @@ async function openDetail(id){
   const i=itemsCache.find(x=>x.id===id);if(!i)return;
   const details=await api(P(id)+"/details").catch(()=>[]);
   dlgDirty=false;
-  const blocked=(i.blockedby||[]).map(b=>`<a href="#" data-dep="${esc(b)}">${esc(b.slice(-8))}</a>`).join(", ")||"—";
+  const blocked=[...(i.blockedby||[]).map(b=>`<a href="#" data-dep="${esc(b)}">${esc(b.slice(-8))}</a>`),
+    ...(i.state==="queued"?(i.blockedby_locks||[]):[]).map(b=>`<a href="#" data-dep="${esc(b)}" title="holds a lock overlapping this item's lockdirs">${esc(b.slice(-8))} (lock)</a>`)].join(", ")||"—";
   dlg.innerHTML=`
     <div style="padding:16px">
       <div class="dlghead"><span class="state ${esc(i.state)}">${esc(i.state)}</span><h2>${esc(i.name)}</h2>${tagsHtml(i)}

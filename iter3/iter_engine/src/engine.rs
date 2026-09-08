@@ -2,7 +2,7 @@
 //! fallback), heartbeat, pick queued work, take central locks, run, close.
 
 use crate::client::Api;
-use iter_core::{DepStatus, Engine, Project, WorkItem, children_index, dependency_status, now_utc, paths_overlap, pick_account};
+use iter_core::{BLOCKED_TAG_COLOR, BLOCKED_TAG_PREFIX, DepStatus, Engine, Project, WorkItem, children_index, dependency_status, now_utc, paths_overlap, pick_account};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -54,6 +54,23 @@ fn max_agents(gates: &BTreeMap<String, u32>, usage_pct: u8) -> u32 {
         return v;
     }
     gates.get("else").copied().unwrap_or(4)
+}
+
+/// Why a queued item is not running this tick (spec: lock waits are visible,
+/// 2026-09-07).  `holders` are the running items whose lock rows overlap it —
+/// a dependency the webui nests it under; `reason` is the text behind the one
+/// engine-owned "blocked by: …" tag.  A dependency wait carries neither: the
+/// blocked-by nesting already shows it.
+#[derive(Debug, Clone, Default)]
+struct Wait {
+    reason: Option<String>,
+    /// (holder workid, the overlapping locked path)
+    holders: Vec<(String, String)>,
+}
+
+/// "2026-09-07T14:05:31Z" -> "14:05Z" for the retry-after tag
+fn hhmm(iso: &str) -> String {
+    if iso.len() >= 16 { format!("{}Z", &iso[11..16]) } else { iso.to_string() }
 }
 
 fn expand_topdir(topdir: &str) -> String {
@@ -499,6 +516,11 @@ impl EngineRuntime {
         let items = self.items.get(&project_name).cloned().unwrap_or_default();
         let by_id: HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
+        // a project-wide hold: nothing starts this tick, and every item that
+        // would otherwise be dispatchable is told why (spec: lock waits are
+        // visible, 2026-09-07 — "queued and idle" must never be silent)
+        let mut hold: Option<String> = None;
+
         // real usage drives both the account ladder and the maxagents gates
         let now = chrono::Utc::now();
         let usage_pct: u8;
@@ -520,7 +542,9 @@ impl EngineRuntime {
                     println!(
                         "[engine] {project_name}: all accounts at stop% — holding until a usage window resets"
                     );
-                    return;
+                    usage_pct = 100;
+                    account = None;
+                    hold = Some("accounts at stop%".into());
                 }
             }
         }
@@ -555,7 +579,7 @@ impl EngineRuntime {
                     println!("[engine] {project_name}: daily budget {} (${spent:.2} of ${capusd:.2}) — picking nothing today", if capusd <= 0.0 { "is zero" } else { "reached" });
                     self.budget_hold.insert(project_name.clone(), today);
                 }
-                return;
+                hold.get_or_insert_with(|| "daily budget".into());
             }
         }
         let now_iso = now_utc();
@@ -585,13 +609,46 @@ impl EngineRuntime {
         let deps_satisfied = |item: &WorkItem| -> bool {
             dependency_status(item, &by_id, &kids) == DepStatus::Satisfied
         };
-        let scope_blocked = |item: &WorkItem| -> bool {
-            item.lockdirs.iter().any(|d| {
-                locked_paths.iter().any(|(path, kind, workid)| {
-                    workid != &item.id && kind == "lock" && paths_overlap(d, path)
-                })
-            })
+        // the running items whose "lock" rows overlap this item's lockdirs:
+        // (holder workid, the locked path) — the holder is a dependency the
+        // engine knows about and, since 2026-09-07, records (`blockedby_locks`)
+        let lock_holders = |item: &WorkItem| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = Vec::new();
+            for d in &item.lockdirs {
+                for (path, kind, workid) in &locked_paths {
+                    if workid != &item.id && kind == "lock" && paths_overlap(d, path) && !v.iter().any(|(w, _)| w == workid) {
+                        v.push((workid.clone(), path.clone()));
+                    }
+                }
+            }
+            v
         };
+        let scope_blocked = |item: &WorkItem| -> bool { !lock_holders(item).is_empty() };
+
+        // classify every queued item once: approval / backoff / lock / hold.
+        // A dependency wait carries no reason — the blocked-by nesting shows
+        // it.  The pick loop below refines the rest (cap, reservation, agent cap).
+        let mut waits: HashMap<String, Wait> = HashMap::new();
+        for i in items.iter().filter(|i| i.state == "queued") {
+            let mut w = Wait::default();
+            if i.needs_approval {
+                w.reason = Some("needs approval".into());
+            } else if !i.retry_after.is_empty() && i.retry_after > now_iso {
+                w.reason = Some(format!("retry after {}", hhmm(&i.retry_after)));
+            } else if deps_satisfied(i) {
+                w.holders = lock_holders(i);
+                if let Some((_, path)) = w.holders.first() {
+                    w.reason = Some(format!("lock {path}"));
+                } else if let Some(h) = &hold {
+                    w.reason = Some(h.clone());
+                }
+            }
+            waits.insert(i.id.clone(), w);
+        }
+        if hold.is_some() {
+            self.reconcile_waits(project, &items, &waits);
+            return;
+        }
 
         // Run Now (operator override, 2026-09-04): a queued item flagged run_now
         // starts as soon as its dependencies are complete and no lock overlaps,
@@ -610,12 +667,17 @@ impl EngineRuntime {
             );
             if self.start_item(engine, project, topdir, item, &account_name) {
                 started_now.push(item.id.clone());
+                waits.remove(&item.id);
             }
         }
         let running_now = self.running.len();
-        if running_now >= cap {
-            return;
-        }
+        let set_reason = |waits: &mut HashMap<String, Wait>, id: &str, r: String| {
+            if let Some(w) = waits.get_mut(id) {
+                if w.reason.is_none() {
+                    w.reason = Some(r);
+                }
+            }
+        };
 
         let mut queued: Vec<&WorkItem> = items
             .iter()
@@ -630,6 +692,14 @@ impl EngineRuntime {
             .filter(|i| deps_satisfied(i))
             .collect();
         queued.sort_by_key(|i| (i.priority, i.ts.receive.clone()));
+
+        if running_now >= cap {
+            for i in &queued {
+                set_reason(&mut waits, &i.id, format!("usage cap ({running_now}/{cap})"));
+            }
+            self.reconcile_waits(project, &items, &waits);
+            return;
+        }
 
         // scope reservation (central "reserve" rows): the best dispatchable-but-
         // scope-blocked item reserves its paths so new overlapping work stops
@@ -655,19 +725,21 @@ impl EngineRuntime {
         let mut slots = cap.saturating_sub(running_now);
         for item in queued {
             if slots == 0 {
-                break;
+                set_reason(&mut waits, &item.id, format!("usage cap ({}/{cap})", self.running.len()));
+                continue;
             }
             if scope_blocked(item) {
-                continue;
+                continue; // reason "lock …" already set above
             }
             // reservation gate: overlapping a reserved scope requires strictly
             // better (lower) priority than the reserver; the reserver is exempt
-            let gated = item.lockdirs.iter().any(|d| {
-                reserved.iter().any(|(path, rprio, rworkid)| {
+            let gated = item.lockdirs.iter().find_map(|d| {
+                reserved.iter().find(|(path, rprio, rworkid)| {
                     rworkid != &item.id && paths_overlap(d, path) && item.priority >= *rprio
                 })
             });
-            if gated {
+            if let Some((_, rprio, rworkid)) = gated {
+                set_reason(&mut waits, &item.id, format!("reserved by {} (P{rprio})", &rworkid[..8.min(rworkid.len())]));
                 continue;
             }
             // per-agent-type cap (project override "max", else agent default)
@@ -683,10 +755,71 @@ impl EngineRuntime {
                 })
                 .unwrap_or(4) as usize;
             if item.agent != "exec" && type_running >= type_max {
+                set_reason(&mut waits, &item.id, format!("agent cap ({} {type_running}/{type_max})", item.agent));
                 continue;
             }
             if self.start_item(engine, project, topdir, item, &account_name) {
                 slots -= 1;
+                waits.remove(&item.id);
+            }
+        }
+        self.reconcile_waits(project, &items, &waits);
+    }
+
+    /// Write the wait state onto every open item whose recorded state differs
+    /// from what this tick derived (spec: lock waits are visible, 2026-09-07):
+    /// `blockedby_locks` (the lock holders — a dependency the webui nests the
+    /// waiter under) and the one engine-owned "blocked by: …" tag.  Queued
+    /// items get the derived state; other open items get both cleared (a
+    /// human parked or paused a waiter).  One versioned PUT per changed item;
+    /// a 409 means someone wrote first and the next tick re-derives it.
+    fn reconcile_waits(&self, project: &Project, items: &[WorkItem], waits: &HashMap<String, Wait>) {
+        for item in items {
+            if item.state == "complete" || item.state == "failed" {
+                continue; // closed items are immutable
+            }
+            let w = if item.state == "queued" { waits.get(&item.id).cloned().unwrap_or_default() } else { Wait::default() };
+            let want_holders: Vec<String> = w.holders.iter().map(|(h, _)| h.clone()).collect();
+            let want_tag = w.reason.as_ref().map(|r| format!("{BLOCKED_TAG_PREFIX}{r}"));
+            let have_tag = item.tags.iter().find(|t| t.text.starts_with(BLOCKED_TAG_PREFIX)).map(|t| t.text.clone());
+            if item.blockedby_locks == want_holders && have_tag == want_tag {
+                continue;
+            }
+            let sid = &item.id[..8.min(item.id.len())];
+            for (h, path) in &w.holders {
+                if !item.blockedby_locks.contains(h) {
+                    println!("[engine] {sid} blocked by {} (lock {path})", &h[..8.min(h.len())]);
+                }
+            }
+            for h in &item.blockedby_locks {
+                if !want_holders.contains(h) {
+                    println!("[engine] {sid} no longer blocked by {} (lock released)", &h[..8.min(h.len())]);
+                }
+            }
+            match (&have_tag, &want_tag) {
+                (_, Some(t)) if have_tag.as_ref() != Some(t) => println!("[engine] {sid} '{}': {t}", item.name),
+                (Some(t), None) => println!("[engine] {sid} '{}': cleared '{t}'", item.name),
+                _ => {}
+            }
+            let mut updated = serde_json::to_value(item).unwrap();
+            updated["blockedby_locks"] = json!(want_holders);
+            let mut tags: Vec<Value> = item
+                .tags
+                .iter()
+                .filter(|t| !t.text.starts_with(BLOCKED_TAG_PREFIX))
+                .map(|t| json!({"text": t.text, "color": t.color}))
+                .collect();
+            if let Some(t) = &want_tag {
+                tags.push(json!({"text": t, "color": BLOCKED_TAG_COLOR}));
+            }
+            updated["tags"] = json!(tags);
+            if let Err(e) = self.api.put(
+                &format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version),
+                &updated,
+            ) {
+                if e.status != 409 {
+                    eprintln!("[engine] could not record the wait state on {sid}: {e}");
+                }
             }
         }
     }
@@ -704,6 +837,10 @@ impl EngineRuntime {
         claimed["state"] = json!("in-progress");
         claimed["run_now"] = json!(false); // the override is consumed by this start
         claimed["retry_after"] = json!("");
+        // the wait is over: drop the lock-derived dependency and the engine's tag
+        claimed["blockedby_locks"] = json!([]);
+        claimed["tags"] = json!(item.tags.iter().filter(|t| !t.text.starts_with(BLOCKED_TAG_PREFIX))
+            .map(|t| json!({"text": t.text, "color": t.color})).collect::<Vec<_>>());
         claimed["engine"] = json!(self.name);
         claimed["attempt"] = json!(item.attempt + 1);
         claimed["ts"]["start"] = json!(now_utc());
@@ -791,6 +928,12 @@ impl EngineRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_tag_shows_hhmm() {
+        assert_eq!(hhmm("2026-09-07T14:05:31Z"), "14:05Z");
+        assert_eq!(hhmm("bad"), "bad");
+    }
 
     /// The pdy-dev ladder as configured 2026-09-04: keys are parsed as ">N%"
     /// (no hard-coded levels); the most restrictive true gate wins.

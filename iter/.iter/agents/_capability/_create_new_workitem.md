@@ -18,7 +18,7 @@ mints a stray temp directory wherever your working directory happens to be.
 The same fields are available as flags for a one-liner, which is easier when the item
 is short:
 
-    "$ITER_BIN" add --project "$ITER_PROJECT" --type plan --priority 3 \
+    "$ITER_BIN" add --project "$ITER_PROJECT" --type plan --usecase "<name>" \
       --title "plan: build out C4 objects for usecase <name>" \
       --mainwork "<where, what, why — the three-tier request text>"
 
@@ -37,7 +37,8 @@ agent may set:
       "codepath": "/abs/or/relative/dir",   // the item's lock scope; narrowest that owns the work
       "codepaths": [],                      // extra directories to lock, when the node declares several codedirs
       "codepath_ignore": ["test/"],         // gitignore-style subtrees carved OUT of that lock
-      "priority": 5,                        // 0–10, LOWER = sooner (P0 most urgent, default 5)
+      "priority": 23,                       // 0–99, LOWER = sooner — INHERITED from your item; omit it (see "Priority and usecase")
+      "usecase": "<name>",                  // the usecase this item serves — inherited too; set only on a usecase's FIRST item
       "risk": 5,                            // 0–10
       "source": "agent: code",              // "agent: <your agent type>"
       "source_testgroup": "<label>",        // provenance: the testgroup this item exists to turn green
@@ -58,22 +59,47 @@ ignored or overridden: `workid`, `state`, `created_by`, `attempts`, `output`,
 `iter add` also cannot create a `scheduled` item — schedules are user-created in the
 webapp and the command refuses.
 
+## Priority and usecase — inherited, not chosen (decided 2026-09-08)
+
+Priority is 0–99, LOWER = sooner, and it is a property of a LINEAGE, not of an
+item: every item you create inherits YOUR item's number exactly, and every
+`usecase:<name>` tag your item carries. **Do not set `priority` on items you
+create** — a number you pass is ignored and `iter add` says so. Dependencies
+(`depends_on`) order the work INSIDE a lineage; the number orders lineages
+against each other. The bands, for reading the queue: 0–9 do now · 10–39 one
+number per usecase · 40–49 human default · 50–99 maintenance and schedules. The
+one place a number is chosen is a ROOT with no creator (a human's item, or the
+first item of a usecase): left blank, the engine takes the lowest unused number
+in its band so two lineages never compete on one number.
+
+`usecase` names the usecase an item serves and becomes the engine-owned tag
+`usecase:<name>` (the webui shows "N of M complete" per usecase from it). You
+almost never set it: it is inherited. Set `--usecase <name>` only when you file
+the FIRST item of a usecase (the usecase agent does, on the plan item it opens).
+
 ## Work items you create: never set `state`
 
 Do not set `state` on work items you create. The engine derives it from YOUR work
 item's automation mode, inherited down the whole chain from the original request:
-`automation: review` → your items are born `todo` (a human reviews each stage before
-it runs); `automation: auto` → born `queued` (fully automated build). A user-filed
-item that named no mode of its own takes `globalsettings.default_automation`
-(Settings). Any `todo`/`queued` you write is overridden — the mode, not the prompt,
-decides. Design every handoff to work in BOTH modes: the documents and mainwork must
-stand alone whether a human reads them first or an agent picks them up seconds later.
-(Guards outrank automation: `iter reject`, the non-convergence guard, and failed
-dependencies land items in `todo` in any mode, and `--question` lands an item in
-`question` in any mode.)
+`automation: review` → your items are born `parked` (a human reviews each stage
+before it runs); `automation: auto` → born `queued` (fully automated build). A
+user-filed item that named no mode of its own takes
+`globalsettings.default_automation` (Settings). Any `parked`/`queued` you write is
+overridden — the mode, not the prompt, decides. Design every handoff to work in BOTH
+modes: the documents and mainwork must stand alone whether a human reads them first
+or an agent picks them up seconds later. (Guards outrank automation: `iter reject`,
+the non-convergence guard, and failed dependencies land items in `parked` in any
+mode, and `--question` lands an item in `question` in any mode.)
 
 You will rarely set `automation` yourself. Setting it changes how the items your NEW
-item creates are born, not how your new item is born.
+item creates are born, not how your new item is born. In particular, never pass
+`--automation review` to park an item "for review" as a way of handing a decision,
+a proposal, or an observation to the human: a parked pile is a review with no
+reviewer. Waiting has exactly two kinds — a prerequisite (`depends_on`) or a
+decision (`--question`, or `iter ask` when it blocks you now). An observation is
+neither: it goes in your output under `Observations (not queued)` (shared rule
+"Task focus"). Anything addressed to the human by name is a question, never a
+parked item.
 
 ## Authoring `mainwork` (request) text on items you create
 
@@ -83,11 +109,19 @@ outputs:
 
 1. Open with a few plain-language sentences: where in the codebase the item
    operates, what must change, and why — which requirement or test of the
-   current mainwork it serves.
+   current mainwork it serves. If you cannot write that first sentence, the item
+   is an observation for your output, not work to queue (shared rule "Task focus").
 2. Then the specifics as hierarchical bullets — acceptance criteria, files,
    constraints — one line each, two max.
 3. Put agent-only detail (exact commands, ids, raw listings the human should
    not wade through) at the bottom, clearly last.
+
+The human-facing part — steps 1 and 2 — follows the shared rule "Writing for the
+human who answers": state each thing rather than naming it, and say what every ID
+and internal name IS the first time you use it. The `title` especially: it states
+the thing and its consequence ("the intake module and the ledger disagree on an
+envelope's balance, so settlement double-counts"), never just a label for it
+("envelope drift").
 
 ## `codepath` — the lock scope you are handing over
 
@@ -119,9 +153,9 @@ imports it from the new home).
   "after everything that plan spawns finishes", which is usually what you want.
   `depends_on_shallow` opts out: wait for the named items' own completion only.
 - A gated item never dispatches until every dependency is satisfied; a FAILED
-  dependency flips the dependent to `todo` for human review. Ambiguous, unknown, or
+  dependency flips the dependent to `parked` for human review. Ambiguous, unknown, or
   cyclic dependencies refuse (exit 2).
-- `depends_on` composes with review-mode gating: deps on a `todo` item are declared
+- `depends_on` composes with review-mode gating: deps on a `parked` item are declared
   but dormant — the gate applies from the moment the item is queued. A queued item
   with unmet dependencies is safe: it stays visibly queued and blocked until they
   close complete.
@@ -158,7 +192,7 @@ that itself carried a testgroup — put the label on the new item
 (`--source-testgroup "<label>"`). Three things depend on it: the sweep's dedup guard
 (one open item per group), the webapp's run-history → work item link, and the
 engine's non-convergence guard, which counts the loop's laps — the third plan born
-from the same testgroup is held in `todo` for human review instead of running.
+from the same testgroup is held in `parked` for human review instead of running.
 
 Carry `source_tests` too when you have it.
 
@@ -179,8 +213,10 @@ state whatever the automation mode says: the text is a decision needed from a hu
 and the item queues itself for work once someone answers it in the webapp. Use it for
 a decision that does NOT block you right now — keep working and let the answer arrive
 later. When the decision DOES block your current item, use `iter ask` instead
-(`_ask_the_human.md`). Either way, write the question in the four-part format that
-file describes.
+(`_ask_the_human.md`). Either way, write the question in the six-part format that
+file describes — and first check it IS a question: a decision that changes what you
+build, not a confirmation, sign-off or "should I proceed?" (the hard rule in that
+file).
 
 ## When the add refuses
 

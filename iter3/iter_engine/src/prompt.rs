@@ -142,11 +142,60 @@ fn markers_in(dir: &Path) -> Vec<PathBuf> {
             rd.flatten()
                 .map(|e| e.path())
                 .filter(|p| p.is_file() && p.file_name().map(|n| n.to_string_lossy().ends_with(".iter.md")).unwrap_or(false))
+                // agent memory files are surfaced separately (read FIRST), never as markers
+                .filter(|p| !is_agentmemory(p))
                 .collect()
         })
         .unwrap_or_default();
     v.sort();
     v
+}
+
+/// `*.agentmemory.iter.md` (decided 2026-09-08): the briefing the last agent
+/// on a codepath left for the next one.
+pub fn is_agentmemory(p: &Path) -> bool {
+    p.file_name().map(|n| { let n = n.to_string_lossy(); n == "agentmemory.iter.md" || n.ends_with(".agentmemory.iter.md") }).unwrap_or(false)
+}
+
+/// The one memory file a codepath keeps: `<codepath>/<basename>.agentmemory.iter.md`.
+pub fn agentmemory_path(codepath: &Path) -> PathBuf {
+    let base = codepath.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|b| !b.is_empty()).unwrap_or_else(|| "project".into());
+    codepath.join(format!("{base}.agentmemory.iter.md"))
+}
+
+/// Existing memory files in the codepath directory itself (not ancestors).
+pub fn agentmemory_files(codepath: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(codepath)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_agentmemory(p)).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Hard cap on a memory file — bigger than this and it costs more context
+/// than the re-orientation it saves.
+pub const AGENTMEMORY_MAX_BYTES: usize = 2048;
+
+/// The "agentmemory" turn (decided 2026-09-08): after the mainwork and before
+/// the self-check, the agent refreshes the codepath's ONE memory file.
+pub fn agentmemory_prompt(codepath: &Path) -> String {
+    let file = agentmemory_path(codepath);
+    format!(
+        "Refresh the agent memory file for this codepath: `{}`.\n\n\
+         This file is the briefing the NEXT agent working in `{}` reads before anything else, so it \
+         pays orientation once instead of every item. Overwrite the whole file (never append a log); \
+         keep it under {} bytes — shorter is better. Plain sentences, no headings deeper than `##`. Contents, in this order:\n\
+         1. `# Agent memory: <codepath>` — one line on what this codepath is and does.\n\
+         2. `## Where things live` — the 3–8 files or directories a newcomer actually needs, one line each.\n\
+         3. `## Build and test` — the exact commands that work here (build, the testgroup labels to run) and how long they take.\n\
+         4. `## Gotchas` — traps you hit or know of: env words, ordering, flaky dependencies, files that must move together.\n\
+         5. `## Recent changes` — at most FIVE entries, newest first, one line each: `<date> <item id short> — <what changed and why>`; drop the oldest when adding.\n\n\
+         If the file exists, read it, correct anything now wrong, and rewrite it. Write nothing sensitive (no tokens, no credentials). \
+         This is the only file this step touches; do not change code or tests here. If the codepath directory does not exist or you cannot write there, say so and skip.",
+        file.display(),
+        codepath.display(),
+        AGENTMEMORY_MAX_BYTES
+    )
 }
 
 /// {marker}: the *.iter.md files of the nearest directory at or above the
@@ -285,8 +334,77 @@ pub fn spinup(inp: &SpinupInput) -> (String, Vec<PathBuf>, Vec<String>) {
     }
     let (files, warnings) = resolve_context(inp.item, inp.project, inp.codepath, inp.topdir);
     let item_files: Vec<PathBuf> = files.into_iter().filter(|f| !inp.head.context_files.contains(f)).collect();
+    s.push_str(&agentmemory_section(inp.codepath));
     if !item_files.is_empty() {
         s.push_str("\n# Context files\nRead each of these before starting:\n");
+        for f in &item_files {
+            s.push_str(&format!("- {}\n", f.display()));
+        }
+    }
+    (s, item_files, warnings)
+}
+
+/// "# Agent memory" — listed BEFORE the context files: the last agent's
+/// briefing on this codepath is the cheapest orientation there is.
+fn agentmemory_section(codepath: &Path) -> String {
+    let mem = agentmemory_files(codepath);
+    if mem.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n# Agent memory — read this FIRST\nThe previous agent on this codepath left a briefing (where things live, how to build and test, gotchas, recent changes). Read it before the context files; trust it as a map, verify before relying on details that could have moved:\n");
+    for f in &mem {
+        s.push_str(&format!("- {}\n", f.display()));
+    }
+    s
+}
+
+/// The item that came BEFORE this one in a chained session (decided
+/// 2026-09-08: session continuation for queue neighbours).
+pub struct ChainPrev {
+    pub sid: String,
+    pub prev_id: String,
+    pub prev_name: String,
+    pub position: u32,
+    pub max: u32,
+}
+
+/// First-turn text for an item run in an EXISTING session: the shared
+/// instructions, capabilities, project context and close gate are already in
+/// the conversation, so only the per-item part is sent.
+pub fn chain_spinup(inp: &SpinupInput, prev: &ChainPrev) -> (String, Vec<PathBuf>, Vec<String>) {
+    let mut s = format!(
+        "# Next work item — same session, same codepath ({} of at most {} in this session)\n\
+         You just closed work item {} ('{}') and its result has been recorded. This is a DIFFERENT work item \
+         with its own request, acceptance and close gate. Everything from the spin-up still applies verbatim: the agent \
+         definition, the shared instructions, the capabilities, the project context files and the close gate. \
+         The environment now points at the new item (ITER_WORKID has changed; `iter add|ask|reject|doc` act on it). \
+         Keep what you learned about this codepath; re-read any file this item changes rather than trusting your memory of it. \
+         Do not redo or undo the previous item's work.\n",
+        prev.position, prev.max, &prev.prev_id[..8.min(prev.prev_id.len())], prev.prev_name
+    );
+    if let Some(src) = source_instructions(inp.tooling, inp.requestedby, inp.createdby_agent) {
+        s.push_str("\n# Source instructions\n");
+        s.push_str(&src);
+    }
+    s.push_str(&format!(
+        "\n\n# Work item\nTitle: {}\nWork item id: {}\nCodepath (your working directory and lock scope): {}\nPriority: P{}\n",
+        inp.item.name,
+        inp.item.id,
+        inp.codepath.display(),
+        inp.item.priority
+    ));
+    if !inp.item.lasterror.is_empty() {
+        s.push_str(&format!("\n# Previous attempt\nThis work item ran before and did not complete. Last error: {}\n", inp.item.lasterror));
+        let out = inp.last_response_tail.trim();
+        if !out.is_empty() {
+            let start = out.char_indices().rev().nth(PREV_OUTPUT_TAIL_CHARS.saturating_sub(1)).map(|(i, _)| i).unwrap_or(0);
+            s.push_str(&format!("Partial output of the previous attempt{}:\n{}\n", if start > 0 { " (tail)" } else { "" }, &out[start..]));
+        }
+    }
+    let (files, warnings) = resolve_context(inp.item, inp.project, inp.codepath, inp.topdir);
+    let item_files: Vec<PathBuf> = files.into_iter().filter(|f| !inp.head.context_files.contains(f)).collect();
+    if !item_files.is_empty() {
+        s.push_str("\n# Context files\nRead each of these (again, if this item changes them) before starting:\n");
         for f in &item_files {
             s.push_str(&format!("- {}\n", f.display()));
         }

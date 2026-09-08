@@ -1,7 +1,8 @@
 # Capability: run tests and make claims (`iter runtests`)
 
 `iter runtests` is the deterministic test runner: it runs a testgroup's shell
-scripts, logs to `<test_dir>/runs/`, and updates the group's `lastrun`, `result`
+scripts, records a `log_header` row on your work item (plus a `log_detail` row with the
+failing scripts' output when non-green), and updates the group's `lastrun`, `result`
 and `counts` in its `testgroup.iter.md`. It is the only acceptance criterion for
 "done" — never your own judgment that the code looks right.
 
@@ -32,7 +33,7 @@ on. In the TDD flow that risk is handled by tests, not prose: a defect-shaped
 item carries the testgroup that proves the defect (`source_testgroup` on
 sweep-born items; the group named in `mainwork` on items an agent authored). The
 receiving agent reproduces BEFORE fixing — `--broken` first, then diagnose from
-the failing tests' logs under `<test_dir>/runs/`, then fix the CODE, then
+the `log_detail` row the run appended to your work item (the failing scripts' output), then fix the CODE, then
 `--fixed` to gate completion.
 
 A defect claim that could have a test gets the test written first, then the fix

@@ -7,11 +7,25 @@ do not quietly complete. Reject it:
 
     "$ITER_BIN" reject --project "$ITER_PROJECT" --reason "<why, and what would make it acceptable>"
 
-The engine moves the item to `todo` at the turn boundary — the human-review
+The engine moves the item to `parked` at the turn boundary — the human-review
 bucket, where the user edits and requeues (or deletes) it. No retries are
 burned; nothing gets buried in the completed archive. Your reason and your
 output are what the re-evaluating human sees: name the blocking fact and the
-smallest change that would make the item valid, then end your work.
+smallest change that would make the item valid, then end your work. Write the
+reason to the shared rule "Writing for the human who answers": state the problem,
+never just name it, and gloss every internal name the first time it appears.
+
+## Rejecting is not asking — and neither is confirming
+
+A rejection says the WORK is invalid. It is never a way to hand back a decision the
+work item already made. Before you reject, or before you turn to `iter ask`, apply
+the hard rule in `_ask_the_human.md`: a question exists only to obtain a decision
+that changes what you build, and a work item that tells you to do something has
+already authorized you to do it. "Should I proceed?", "please confirm this plan",
+"sign off before I apply this" and "is this the right reading?" are neither
+rejections nor questions — proceed, record your reading and its grounds in your
+output, and keep building. A request to delete, park or requeue an item is carried
+out, never re-asked.
 
 ## What a rejectable item looks like
 

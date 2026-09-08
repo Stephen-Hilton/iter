@@ -7,9 +7,22 @@ them (the testwriter agent).
 
 ## The testgroup file
 
-A `*.testgroup.iter.md` lives beside the object it tests, normally in that object's
-test directory (`globalsettings.test_dir`, exported as `$ITER_TEST_DIR`, default
-`test`). It holds two things:
+Testgroups live INSIDE the object they test, in one shape for every kind of
+object — a usecase folder, a `repos/<container>/`, a component directory
+(decided 2026-09-08; `object` = the THING under test, `env` ∈ dev|test|qa|prod|boot):
+
+    <object>/tests/iter/<name>/*.testgroup.iter.md      the group definitions
+    <object>/tests/iter/<name>/<env>/*.sh               one script per test, per environment
+    {topdir}/.iter/tests/<env>/*                        shared test programs (optional; the
+                                                        runner exports $ITER_TESTS_SHARED = {topdir}/.iter/tests)
+
+`<name>` is the testgroup set's name — the object's own name when it has one
+set. Script paths in a `testlist` are relative to the testgroup file, so an
+entry reads `"shell": "dev/t01_golden_create_account.sh"`. Older trees keep
+`<env>.testgroup.iter.md` + `<env>/` directly under `tests/iter/`; the runner
+finds both, but every NEW set uses the shape above. There is no `runs/`
+directory any more — run output goes to the work item (see "Run logs" below).
+The testgroup file holds two things:
 
 1. **Markdown prose describing each group** — exactly what the group must prove:
    golden paths, expected errors, edge cases. This is the most review-critical
@@ -82,6 +95,17 @@ link will find them.
   item asks you to.)
 - If the declared `testgroup.iter.md` does not exist: CREATE it, per the shape
   above.
+
+## Run logs and fix items (decided 2026-09-08)
+
+`iter runtests` writes NO files under the tree. Every run appends a `log_header`
+row to the running work item (date, group, per-test pass/fail, no bodies); a
+non-green run also appends a `log_detail` row with the failing scripts' output
+(tail-capped) for whoever follows up. When the project setting
+`fix_on_test_failure` is on — or a group sets `"auto_fix": true` — a non-green
+FULL run from the Test Loop, an exec item or a human files a `code` item to
+investigate and fix, inheriting the run's priority and usecase; a code or
+testwriter session iterating on its own tests never files one.
 
 ## Prove every new script LAUNCHES
 

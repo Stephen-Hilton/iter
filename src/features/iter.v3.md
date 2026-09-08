@@ -67,10 +67,12 @@ project json:
     "model": "opus",
     "flags": "--dangerously-skip-permissions",
     "closegate": {"verify": "haiku", "requires_children": false, "requires_commit": false, "max_bounces": 1},
+    "lockshape": {"allow": ["{topdir}/devops/plan"], "outside": "refuse", "max_overlap": 0, "none": false},
     "promptbody": "this is the full prompt body defining agent behavior, goals, tools, etc. Note there WILL be additional prompt content and context appended to this text."
 }
 ```
 "closegate" (decided 2026-09-03) is the per-agent completion contract the engine enforces before an item may close complete — see Close Gate under ITER_ENGINE.  Every key is overridable per project in iter3_project "agents" (e.g. `"plan": {"closegate": {"requires_children": true}}`).
+"lockshape" (decided 2026-09-07) is what an item of this agent type may lock — see Lock Shape under Lock Management.  Absent = anything goes; overridable per project the same way, key by key.
 
 #### iter3_project
 Projects are a unified body of work which all share the same dev standards; exactly what you'd associate with the word Project. 
@@ -189,6 +191,7 @@ project json:
     "createdby": "plan (agent)",
     "requestedby": "Susy",
     "blockedby": ["184fa9a3-f967-4a98-9d8f-57152e7cbe64"],
+    "blockedby_locks": ["0aebfe03-f631-4a37-89e5-04117e51f087"],
     "attempt": 1,
     "gate_bounces": 0,
     "prework": ["git-pull"],
@@ -418,6 +421,20 @@ the iter engine:
 - move whatever "fits" into in-progress state, and run (same as today)
 - loop
 
+### Lock waits are visible; Lock Shape (decided 2026-09-07)
+Motivation (pdy-dev, 2026-09-07): a `plan` item filed with codepaths `devops`, `infra/repos` and `core/repos` held three lock rows for an hour while three unblocked P0 items and six others sat `queued` with the cap at 8 and one item running.  Nothing said why — no engine line, no field on the items, nothing on the page; the cause was found by reading engine.rs and querying the locks endpoint by hand.  Stephen's direction: an item waiting on a lock IS legitimately blocked, by the item holding it; make that dependency visible through the existing blocked-by nesting, add nothing new to the page for it, and stop agents from over-locking at the source.
+
+**A lock wait is a recorded dependency.**  Each tick the engine derives, for every queued item, the running items whose `lock` rows overlap its lockdirs (it already had the holder's id in hand at the moment it skipped the item, and threw it away) and writes them to the engine-owned field `blockedby_locks` on the waiter, printing `[engine] <id> blocked by <holder> (lock <path>)` on every change.  The webui nests the waiter under the holder exactly as it nests a `blockedby` dependency, and the lightbox lists the holder as `<id> (lock)`.  It is a SEPARATE field, never merged into `blockedby`, because `dependency_status` is DEEP (a blocker counts only when it and everything it created are complete) while a lock ends with the holder's RUN — so the engine alone owns the entries: it sets them while the wait lasts, clears them the tick after the lock row goes, strips them on the claim that starts the item, and clears them from any open item that has left the queue (a parked or paused waiter).  The nesting only follows an entry whose holder is still in-progress.
+
+**Every other reason an item is not running reads on the line.**  Beyond locks an item can wait on the maxagents cap, the per-agent-type cap, a scope reservation held by a higher-priority item, a retry back-off, an approval, the daily budget, or every account at its stop%.  The engine sets ONE tag on the waiting item, `blocked by: <reason>`, from the closed set `lock <path>` · `usage cap (n/cap)` · `agent cap (<agent> n/max)` · `reserved by <short id> (P<n>)` · `retry after <hh:mm>Z` · `needs approval` · `daily budget` · `accounts at stop%`, and removes it when the reason clears.  The tag is engine-owned (text prefix `blocked by: `, fixed amber); human tags on the same item are untouched.  A dependency wait carries no tag — the blocked-by nesting already shows it.  One versioned PUT per changed item; a 409 (a human or another engine wrote first) is ignored and the next tick re-derives.  The webui's synthesized `full tree lock` tag gained a sibling, `wide lock (N items)`: a lockdir that is a strict ancestor of N ≥ 2 other open items' lockdirs locks an area, not the directory one item writes.
+
+**Lock Shape.**  `iter add` and the record PUT used to accept any codepath; the plan agent's prompt asked for "the narrowest directory the work owns" and nothing measured it.  Now each agent record may carry `lockshape` (per-project override merged key by key, like `closegate`):
+- `allow`: patterns every lockdir must equal or sit under — `*` one path segment, `**` any run, `{test_dir}` the project's test dir name (`tests`).  Empty = any path.  An ancestor of an allowed path is NOT under it (`{topdir}/devops` fails `{topdir}/devops/plan`).
+- `outside`: `refuse` (default) or `warn` for a lockdir outside `allow`.
+- `max_overlap`: warn when a lockdir overlaps more than this many OTHER open items (0 = off).
+- `none`: the agent writes nothing and takes no lock; any lockdir is refused.
+iter_data is the authority: it checks on create and on any PUT that changes `lockdirs` or `agent` (never on other edits, so a rule added later cannot refuse a state change on an existing item), answers 400 with text that names the rule and the cost — `refused: codepath {topdir}/devops is outside the plan agent's lock shape and overlaps 11 open item(s); a plan item locks the directory it writes ({topdir}/devops/plan), not the tree it reads` — and returns warnings in a `warnings` array on the written record.  `iter add` prints the refusal (exit 1) or the warnings to the agent, and adds one check only a checkout can make: a codepath that is a strict ancestor of two or more code nodes' source directories (the structureV2 scan) is an area, and says so.  The table for pdy-dev: `code`/`refactor` any path with `max_overlap` set; `testwriter` `{topdir}/**/{test_dir}`; `deploy` its four devops directories; `plan`/`usecase`/`ingest` `{topdir}/devops/plan` and refuse the rest; `explain` `none`.  Each agent type declares its own on its record (webui agent gear, "lock shape"), or in the `.md` frontmatter as one-line json for `--migrate-v2`.
+
 ### Close Gate (decided 2026-09-03)
 Motivation: in pdy-dev a plan item closed "complete" whose own final message said "I'm waiting for the review to finish"; it had written a plan document but filed none of the ten build items in it.  Three minutes later its dependent dispatched into a tree where the prerequisite had closed but built nothing, and the dependent's agent correctly rejected.  Root cause in iter: "the agent process exited 0 after its last turn" was the entire definition of complete.  Nothing engine-side ever asked whether the item delivered.
 
@@ -443,6 +460,11 @@ Outcomes (state transitions, not comments):
 Worker prompt addition: every agent prompt ends with a Close Gate paragraph telling the agent its final message must state what was delivered and list any obligation it did NOT complete (prefixed "NOT DONE:"), and that a verifier compares that message to the request before the item closes.  An honest NOT DONE is a cheap bounce; a persuasive summary that hides one is what the verifier exists to catch.
 
 Because the dependency check is simply `state == complete`, holding the plan item open would also have held its dependent — the gate closes both halves of the incident.
+
+Three corrections from pdy-dev (2026-09-07, an overnight rebuild parked in `question` for seven hours on a false reading):
+- **children are always counted.**  The "workitems created by this item: N" evidence line used to print 0 unless `requires_children` was set; the verifier read that 0 as engine fact and ruled a worker that had really filed three items "contradicted by git evidence".  The count is one list read the gate makes regardless.
+- **a retry is told what it already filed.**  The feedback section a bounced (or failed, or requeued) attempt receives now ends with "Work items this item has already created": id, state, agent and title of every item whose `createdby` is this item, and one line — do NOT file these again.  Attempt 3 had re-filed the defect attempt 2 filed, and two agents ran against the same file.
+- **a verifier that cannot run is not a verdict about the work.**  A spawn failure, non-zero exit or timeout used to become `unclear` → `question`.  The engine now retries the verifier once (3 s later); if it fails again, the deterministic half having passed, the item closes complete on the worker's evidence with a "verify" row whose verdict is `unavailable` and an engine line saying so.  A tooling failure never routes to the human queue.
 
 ### Dependencies are DEEP; Draining is transitional (built 2026-09-04)
 V2's workitem_dependency.md semantics carried into V3 (iter_core::dependency_status, shared by engine and webui): a blocker is satisfied only when it AND every item it created (createdby, transitively) closed complete; `blockedby_shallow: true` opts out (migrated from V2 depends_on_shallow); a failed blocker or descendant never releases the dependent — it simply stays queued underneath the failed item (decided 2026-09-04: no parking), so retrying the failed item (reopen → complete) lets the dependent flow back into the stream with no manual requeue.  The webui nests every item under its blocker (or its creator) as deep as the chain goes, 22px per level, in every sort.  Motivation: the pdy-dev tombstone (delete pdy_core_shared) sat first in line with its plan complete but the plan's children still open; the shallow check would have fired it.
@@ -506,7 +528,37 @@ Please create a small helper function called `iter --accounts` that attempt to r
 - `iter --doc <id> --text "..."|--file <path|->` — append a "doc" detail row (the one write allowed on a closed item)
 
 
+### Usecase-driven workstreams + agent efficiency (decided + BUILT 2026-09-08)
+
+Context (measured on pdy-dev, 1414 items): 88% of items are agent-born; lineage is shallow (max depth 4) but fan-out is wide (two plan items spawned 72 children in one day); every item landed at P4/P5 so nothing ordered usecases against each other; a median code item costs ~$8 / 68 turns and cost tracks TURNS, not output size — the waste is re-orientation per item, not prompt load (the cheapest items cost <$1 at 7–14 turns). Prompt caching cannot carry understanding across sessions (per-workspace, per-model, exact byte prefix, 5-min TTL); only turn count can be cut. Stephen's rulings: NO parked items as a scheduling device, ever; priorities order lineages, dependencies order work inside one; the spend row must show cache tokens.
+
+**Usecases are the milestone unit.**
+- Tag `usecase:<name>` (iter_core `USECASE_TAG_PREFIX`, engine-owned colour). Set once on a usecase's first item (`iter add --usecase <name>`, the `usecase` JSON field, or the webui's usecase box); iter_data copies every `usecase:` tag from the creating item (`createdby`) to each child at birth, so a whole lineage carries it. The webui renders one chip per usecase — `done/total` items, the lineage's priority, click to filter — computed from the tags, no new table.
+- Testgroup layout, identical for every tested object (a usecase folder, a `repos/<container>/`, a component dir): `<object>/tests/iter/<name>/*.testgroup.iter.md`, `<object>/tests/iter/<name>/<env>/*.sh` (env ∈ dev|test|qa|prod|boot), shared programs in `{topdir}/.iter/tests/<env>/*` (the runner exports `ITER_TESTS_SHARED`). Discovery is recursive so the old `tests/iter/<env>.testgroup.iter.md` shape still runs; pdy-dev's 59 existing sets are NOT moved yet (a one-time, test-verified move — a pdy-dev work item, not an engine change).
+
+**Priority is 0–99, a property of a lineage** (iter_core `PRIO_BAND_*`): 0–9 do now · 10–39 usecases, ONE number per usecase · 40–49 human default · 50–99 maintenance/schedules/agent roots. Placement happens in iter_data on create (`place_new_item`): a child inherits its creator's number EXACTLY (a requested number is ignored and reported in `warnings`); a root with no number takes the lowest number in its band that no OPEN item uses (usecase band when it carries a usecase tag or IS the usecase agent, human band for a human requester, else maintenance). `iter add` sends no default any more; the webui's priority box is blank = auto and capped at 99. Migration: `POST /api/projects/<name>/migrate_priority` (admin) multiplies every item ×10 (closed ones too, capped 99) and stamps `priority_scale: 100` on the project so it is idempotent. Not built yet: "apply to descendants" when a parent's priority is edited (inheritance is birth-only).
+
+**Test run logs live on the work item, not in the tree** (`iter runtests`): no `runs/` directory; every run appends a `log_header` detail row (date, group, per-test pass/fail, no bodies); a non-green run also appends `log_detail` (failing scripts' output, 8 KB per script / 64 KB per row). Project setting `fix_on_test_failure` (or a group's `auto_fix`): a non-green FULL run files a `code` item ("Tests non-green: testgroup …", codepath = the object above `tests/`, `createdby` = the running item so it inherits priority + usecase; deduped by title among open items) — only when the runner is the Test Loop / an exec item / a human, never a code or testwriter session iterating on its own tests, never a `--broken` claim.
+
+**Agent memory per codepath**: `<codepath>/<dirname>.agentmemory.iter.md`, ONE per codepath, overwritten, ≤2 KB, structure fixed by the prompt (what it is · where things live · build and test · gotchas · five recent changes). The engine adds an `agentmemory` turn after postwork and before the self-check for code/refactor/testwriter/deploy items whose codepath exists; the spin-up lists the file FIRST ("# Agent memory — read this FIRST") ahead of the context files; it is excluded from `{marker}` resolution and from `iter validate` (an iter file by name, never a node).
+
+**Session continuation for queue neighbours** (`work::execute` loop): after an item closes COMPLETE, its claude session takes on the best queued item on the same scope when that item has the same lockdirs and the same usecase tags, its dependencies are satisfied, and it is the best (priority, age) of EVERY queued item overlapping those lockdirs — so chaining never lets a lineage jump a more urgent one. The engine claims it exactly like a dispatch (versioned queued→in-progress, central locks; a lost race leaves it queued) and sends only the per-item spin-up (`prompt::chain_spinup`) with `--resume`. One item still = one claim, one gate, one spend row (`chained_from` recorded). Cap: project `session_chain_max` (default 3, 0/1 = never). Verified: a resumed `claude -p` reports its own invocation's cost, not the cumulative.
+
+**Plan agent files coarser items**: one item per codepath with ordered slices, not one per slice; `depends_on` across codepaths; no parking.
+
+**Spend row carries cache tokens**: `cache_read_tokens` + `cache_create_tokens` on the item's spend row and the project daily total (before this the row recorded only uncached input — ~200 tokens for a 130-turn session).
+
+Deployed 2026-09-08: Lambda iter3_data, iter3/bin Mac binaries, live agent/tooling records patched in place (pdy-dev's `_shared` is the 50 KB pdy variant, so patches are surgical — never overwrite it with `src/.iter`), `migrate_priority` run on pdy-dev + SampleV3. Linux engine: built and pushed to pdy-dev main; FHServer still needs pull + restart.
+
 ## ITER_WEBUI
+
+### List load is headers-only but unfiltered (measured 2026-09-08; fix deferred)
+
+The webui's list load fetches ONLY the workitem header rows; detail rows load on click. The slowness is that the list is every item the project has ever had (pdy-dev: 1414 rows, 1.3 MB, ~1.3 s from a laptop, far worse on mobile). Stephen: the counts (total / complete / …) must keep counting ALL history. Fix when picked up: a summary endpoint returns the per-state counts and the per-usecase done/total over the full set; the list endpoint takes a filter and the webui asks for open items + recent completions by default with a "load all" control. Optional; not built.
+
+### Usecase chips, priority 0–99, project settings (built 2026-09-08)
+
+Item form: priority box 0–99, blank = auto (server placement), a `usecase` box that sets/keeps the `usecase:<name>` tag. A second chip row under the state chips: one chip per usecase — `done/total`, the lineage's priority, click to filter the list to that usecase (composes with the state filters and the run-order view). Project settings gained `fix_on_test_failure` (bool), `session_chain_max` (number) and a read-only `priority_scale`.
 
 ### Timezones (decided 2026-09-04)
 Every timestamp is stored and transported in UTC (ISO 8601 `Z`, or unix seconds for the usage resets); nothing on the engine or in iter_data ever converts. The webui renders every timestamp in the **user's timezone**: a dedicated selector in the header (major IANA zones + "browser default") writes `timezone` on the user's own `webui_user` record (self-service PUT; login echoes it), cached in localStorage so the first paint is right. The engine chip reads `Engine01 Running on Dev2`, then one line per window — `• 5h 5% – 2hr 23min` / `• 7d 89% – 3d 18hr 30min` — the time until each window resets (the reset instant, in the user's zone, on hover).

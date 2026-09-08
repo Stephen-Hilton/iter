@@ -247,7 +247,7 @@ fn agent_row(name: &str, fm: &BTreeMap<String, String>, body: &str) -> Value {
     // _shared.md is NOT folded in: it lives in agent_tooling (kind shared) and
     // the engine appends it at run time, exactly like V2 did
     let promptbody = body.trim_end().to_string();
-    json!({
+    let mut row = json!({
         "name": name,
         "desc": fm.get("description").cloned().unwrap_or_default(),
         "max": num("max_agent_count").unwrap_or(2),
@@ -256,7 +256,13 @@ fn agent_row(name: &str, fm: &BTreeMap<String, String>, body: &str) -> Value {
         "model": fm.get("model").cloned().unwrap_or_default(),
         "flags": fm.get("model_flags").cloned().unwrap_or_default(),
         "promptbody": promptbody,
-    })
+    });
+    // lock shape (2026-09-07): a one-line json object in the frontmatter,
+    // e.g. lockshape: {"allow": ["{topdir}/devops/plan"], "outside": "refuse"}
+    if let Some(shape) = fm.get("lockshape").and_then(|v| serde_json::from_str::<Value>(v).ok()).filter(|v| v.is_object()) {
+        row["lockshape"] = shape;
+    }
+    row
 }
 
 fn detail_sk(order: i64) -> String {

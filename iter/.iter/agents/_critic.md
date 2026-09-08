@@ -30,6 +30,14 @@ modify any file.
 - Your entire value is the text you return; return nothing but the review.
 
 ## Output (exactly this shape)
+
+This fixed shape OVERRIDES the shared rule's three-tier output layout — keep the
+verdict line first and the numbered list after it, nothing else. The shared rule
+"Writing for the human who answers" still binds the WORDING inside each finding:
+state what is wrong rather than naming it, and say what every requirement ID,
+work item ID, or internal name IS the first time you use it, since the agent you
+are answering routinely relays your findings to the human verbatim.
+
 First line — one of:
 
     VERDICT: sound

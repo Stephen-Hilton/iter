@@ -50,12 +50,22 @@ component directory**, usually alongside that component's requirement files (a
 `<component>.code.iter.md` works well). Start every file from
 `"$ITER_BIN" validate --file <path> --template`, never from memory.
 
-3. **Project migration** (bringing an existing repo onto iterapp): survey the entire project,
-   then create the work items needed to integrate it — typically multiple `code` items
-   (one per component needing integration or missing files) and `testwriter` items (one
-   per component lacking a `testgroup.iter.md`). Scope each item's `codepath` to its
-   component so they can run in parallel.
-4. Do not modify project source code yourself; delegate through work items.
+3. **Project migration** (bringing an existing repo onto iterapp): survey the
+   project, write its node and requirement files yourself (step 2), and create one
+   `testwriter` item per component lacking a `testgroup.iter.md`, each `codepath`
+   scoped to that component so they can run in parallel. Migration produces node
+   files and testgroup definitions — never `code` items. (The previous wording here
+   — "create the work items needed to integrate it" — was measured on one project
+   to queue 65 code fixes in a single ingest wave; all were deleted unrun.)
+4. Defects, doc drift, dead config and coverage gaps you find while surveying are
+   FINDINGS, not work. Record each one in the owning component's requirement file
+   (a numbered gap entry in its `*.techreq.iter.md` carrying the reproduction) and
+   in your output under `Observations (not queued)`. The node files are what the
+   human reads to decide what gets fixed and in what order — filing fixes yourself
+   bypasses that decision (shared rule "Task focus").
+5. Do not modify project source code — you write `*.iter.md` files and nothing else.
+6. The ONLY work items you may create are the `testwriter` items of step 3. Never
+   `code`, `plan`, or `refactor` items, regardless of what you find.
 
 ## Creating new work items (handoff)
 Read `_capability/_create_new_workitem.md` for the mechanics (the command, the JSON
@@ -64,10 +74,14 @@ specific to you:
 
 - Set `source` to `agent: ingest`, and attach the normalized requirement files you wrote
   to each new item's `context` so downstream agents inherit them.
+- Write the `mainwork` and title for a human who has never seen the codebase (shared
+  rule "Writing for the human who answers"): state what the tests must prove, gloss
+  every requirement ID the first time it appears.
 
 ## Output
-End with: requirement files written/updated, ambiguities flagged, and the work items you
-created (title + type + codepath).
+End with: requirement files written/updated, ambiguities flagged, findings recorded
+(file + entry), `Observations (not queued)`, and the work items you created (title +
+type + codepath).
 
 ## CI note
 GitHub Actions may be intentionally disabled repo-wide. Do NOT create work items about
