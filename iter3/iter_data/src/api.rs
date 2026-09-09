@@ -1436,8 +1436,16 @@ fn verify_ed25519(pubkey_b64: &str, message: &str, sig_b64: &str) -> bool {
 
 // ---------- locks ----------
 
+/// Live rows only: an expired lock or reservation is free to `acquire`, so
+/// it must not be shown (webui) or honored (engine scope gate) either.
 async fn locks_list(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(Value::Array(st.store.query("lock", &name).await?)))
+    let now = now_utc();
+    let rows = st.store.query("lock", &name).await?;
+    Ok(Json(Value::Array(
+        rows.into_iter()
+            .filter(|r| body_str(r, "expires").is_empty() || body_str(r, "expires") >= now)
+            .collect(),
+    )))
 }
 
 #[derive(serde::Deserialize)]

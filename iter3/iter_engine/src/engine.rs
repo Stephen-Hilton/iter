@@ -591,8 +591,11 @@ impl EngineRuntime {
             .ok()
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default();
+        // an expired row is free (acquire treats it so); never let a leftover
+        // row from a closed item hold a waiter (seen live 2026-09-08)
         let locked_paths: Vec<(String, String, String)> = lock_rows
             .iter()
+            .filter(|r| r.get("expires").and_then(|e| e.as_str()).map_or(true, |e| e.is_empty() || e >= now_iso.as_str()))
             .map(|r| {
                 (
                     r.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
