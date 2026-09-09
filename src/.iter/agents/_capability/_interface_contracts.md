@@ -15,6 +15,20 @@ when no existing contract covers the need. NEW interface files are named
 `<id>.interface.iter.md` and land in `$ITER_INTERFACE_DIR` — the scanner finds them
 anywhere, but new ones belong there.
 
+## ONE OPERATION PER FILE
+
+An interface file is ONE operation, event, stream or record: `CreateMembership` is
+one file, `DescribeMembership` is another. Never bundle a service's operations into
+one contract behind an `"op"` / `"verb"` discriminator — `iter validate` flags that
+as `multi-op`. Name the file `<service>-<operation>.interface.iter.md` (for example
+`pdy-core-authority-create-membership.interface.iter.md`); the code node that serves
+the operation links every one of its per-operation files in `children.outputs`.
+
+A shared object — an attestation, an evidence reference, a refusal envelope, a
+money amount — is defined ONCE as its own `kind: dataset` interface file and
+referenced by id from every contract that carries it (`"attestation": <see
+pdy-core-attestation>`). Never restate a shared object's fields in each operation.
+
 ## FIXED FORMAT — these sections and ONLY these
 
 Enforced by `iter validate`. Get the current skeleton with
@@ -31,17 +45,31 @@ skeleton you get.
 - one `# <id> — contract` H1, then a named summary under 300 characters
 - the kind's H2 sections: request-reply → `## Request`, `## Reply, success shape`,
   `## Reply, failure shape`; event → `## Event`; stream → `## Stream item`,
-  `## Stream end`; dataset → `## Record`
-- closing every file, in order: `## Worked examples` (normative pairs in one
-  strict-JSON fence) and `## Invariants` (few bullets — only what examples cannot
-  show)
-- optionally, and ONLY as the final section after `## Invariants`: `## Exceptions` —
-  a declared deviation from the internal transport law that service-to-service calls
-  ride the mesh with mutual TLS and speak gRPC. State what deviates (e.g. a
-  component that must speak an infrastructure wire protocol such as Redis's or
-  Kafka's), why gRPC is impractical there, and what still holds (mesh transit,
-  mTLS). Most contracts have no such section, and that is the normal case: no
-  section, no exception
+  `## Stream end`; dataset → `## Record`. Every field appears once with its type
+  and meaning as an inline comment; a closed vocabulary or a limit is a comment
+  beside the field it governs
+- `## Reply, failure shape` lists EVERY refusal code the operation can return, one
+  line each with what it means — the list is the closed vocabulary. No example per
+  code
+- closing every file: `## Worked examples` — exactly ONE success pair and ONE
+  refusal pair in one strict-JSON fence. Per-test cases (each acceptance test's
+  refusal, each edge) live in the testgroup scripts, never here; `iter validate`
+  flags more than two as `too-many-examples`
+- there is NO `## Invariants` section (retired 2026-09-08). Business rules — who may
+  do what, what must be true afterwards, founder rulings — belong on bizreq/techreq
+  nodes and are referenced by requirement id from there; the contract shows the
+  data, not the law. `iter validate` flags the section as `invariants-section`
+- optionally, and ONLY as the final section after `## Worked examples`:
+  `## Exceptions` — a declared deviation from the internal transport law that
+  service-to-service calls ride the mesh with mutual TLS and speak gRPC. State what
+  deviates (e.g. a component that must speak an infrastructure wire protocol such
+  as Redis's or Kafka's), why gRPC is impractical there, and what still holds (mesh
+  transit, mTLS). Most contracts have no such section, and that is the normal case:
+  no section, no exception
+
+A one-operation contract with two examples is a few kilobytes. `iter validate`
+flags a body over 10 KB as `oversize-body`: look for bundled operations, restated
+shared objects, or business rules.
 
 ## Message shapes
 
@@ -53,8 +81,8 @@ logically request → reply, so a library surface is written as kwargs-object �
 return-object messages. Tag a fence (```json) only when the block strictly parses;
 pseudo-examples stay untagged.
 
-Models: `sampleV1/interfaces/ledger-command/ledger-command.interface.iter.md`
-(request-reply) and `sampleV1/interfaces/entry-recorded/` (event — note the
+Models: `e2e/.fixture/interfaces/ledger-command/ledger-command.interface.iter.md`
+(request-reply) and `e2e/.fixture/interfaces/entry-recorded/` (event — note the
 different fixed sections `kind:` demands).
 
 ## The two-clause test — the file is right when

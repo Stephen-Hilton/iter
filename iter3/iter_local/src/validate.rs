@@ -83,11 +83,25 @@ fn interface_kind_sections(kind: &str) -> Option<&'static [&'static str]> {
         _ => None,
     }
 }
-const INTERFACE_TAIL_SECTIONS: &[&str] = &["Worked examples", "Invariants"];
+const INTERFACE_TAIL_SECTIONS: &[&str] = &["Worked examples"];
 /// The one OPTIONAL section, accepted on every kind and only as the file's last
-/// section, after `## Invariants`: a declared deviation from the internal
+/// section, after `## Worked examples`: a declared deviation from the internal
 /// transport law.
 const INTERFACE_OPTIONAL_TAIL_SECTION: &str = "Exceptions";
+/// Retired 2026-09-08: `## Invariants` invited business rules into contracts
+/// (pdy-dev grew 200 KB of them). Business rules live on bizreq/techreq nodes;
+/// a closed vocabulary or limit goes inline beside the field it governs.
+const INTERFACE_RETIRED_SECTION: &str = "Invariants";
+/// One operation per interface file: more than one distinct discriminator
+/// value (`"op"`, `"verb"`, `"command"`, `"action"`) means the file bundles
+/// several contracts.
+const INTERFACE_DISCRIMINATORS: &[&str] = &["op", "verb", "command", "action"];
+/// Worked examples: one success pair and one refusal pair. Every other refusal
+/// is a one-line code entry in the failure shape, never a full example.
+const INTERFACE_MAX_EXAMPLES: usize = 2;
+/// A one-operation contract with two examples fits well inside this; past it
+/// the file is almost certainly bundling operations or restating rules.
+const INTERFACE_MAX_BODY_BYTES: usize = 10 * 1024;
 
 /// V1 role words: a stem ending in one of these WITHOUT the dot separator is
 /// almost certainly an unmigrated V1 file, worth a targeted message.
@@ -392,10 +406,10 @@ pub fn validate_file(path: &Path, fix: bool) -> std::io::Result<Vec<Finding>> {
             } else if kind_sections.is_none() {
                 push(Severity::Warn, "bad-kind", format!("`kind: {}` is not a logical interaction kind (request-reply | event | stream | dataset) — transports and formats are not kinds", kind), false);
             }
-            // The body IS the contract, in the fixed format (unchanged by V2):
-            // an H1 title, a summary under 300 chars, the kind's required H2
-            // sections, then `## Worked examples` (strict JSON) and
-            // `## Invariants` last — optionally followed by `## Exceptions`.
+            // The body IS the contract, in the fixed format: an H1 title, a
+            // summary under 300 chars, the kind's required H2 sections, then
+            // `## Worked examples` (strict JSON) last — optionally followed by
+            // `## Exceptions`. One operation per file; no `## Invariants`.
             let contract = body.trim();
             if contract.is_empty() {
                 push(
@@ -472,11 +486,15 @@ pub fn validate_file(path: &Path, fix: bool) -> std::io::Result<Vec<Finding>> {
                             push(Severity::Warn, "missing-section", format!("`kind: {}` requires a `## {}` section and the body has none", kind, name), false);
                         }
                     }
+                    if has(INTERFACE_RETIRED_SECTION) {
+                        push(Severity::Warn, "invariants-section", "`## Invariants` is no longer part of the interface format — business rules belong on bizreq/techreq nodes; a closed vocabulary or limit goes inline as a comment beside the field it governs; delete the section".into(), false);
+                    }
                     for s in &sections {
                         let allowed = required
                             .iter()
                             .chain(INTERFACE_TAIL_SECTIONS)
                             .chain(std::iter::once(&INTERFACE_OPTIONAL_TAIL_SECTION))
+                            .chain(std::iter::once(&INTERFACE_RETIRED_SECTION))
                             .any(|n| s.eq_ignore_ascii_case(n));
                         if !allowed {
                             push(Severity::Warn, "unexpected-section", format!("`## {}` is not a section of the fixed format for `kind: {}` — the contract holds ONLY the format's sections; other prose belongs on a code node or techreq", s, kind), false);
@@ -487,19 +505,56 @@ pub fn validate_file(path: &Path, fix: bool) -> std::io::Result<Vec<Finding>> {
                         .map(|s| s.eq_ignore_ascii_case(INTERFACE_OPTIONAL_TAIL_SECTION))
                         .unwrap_or(false);
                     if has(INTERFACE_OPTIONAL_TAIL_SECTION) && !exceptions_last {
-                        push(Severity::Warn, "section-order", "`## Exceptions` is optional, but when it is present it must be the FINAL section, after `## Invariants`".into(), false);
+                        push(Severity::Warn, "section-order", "`## Exceptions` is optional, but when it is present it must be the FINAL section, after `## Worked examples`".into(), false);
                     }
-                    let core = if exceptions_last { &sections[..sections.len() - 1] } else { &sections[..] };
-                    let tail_ok = core.len() >= 2
-                        && core[core.len() - 2].eq_ignore_ascii_case("Worked examples")
-                        && core[core.len() - 1].eq_ignore_ascii_case("Invariants");
-                    if !tail_ok && INTERFACE_TAIL_SECTIONS.iter().all(|n| has(n)) {
-                        push(Severity::Warn, "section-order", "`## Worked examples` then `## Invariants` must be the last two sections, ahead of an optional closing `## Exceptions`".into(), false);
+                    let core: Vec<&String> = sections
+                        .iter()
+                        .filter(|s| !s.eq_ignore_ascii_case(INTERFACE_OPTIONAL_TAIL_SECTION) && !s.eq_ignore_ascii_case(INTERFACE_RETIRED_SECTION))
+                        .collect();
+                    let tail_ok = core.last().map(|s| s.eq_ignore_ascii_case("Worked examples")).unwrap_or(false);
+                    if !tail_ok && has("Worked examples") {
+                        push(Severity::Warn, "section-order", "`## Worked examples` must be the last section, ahead of an optional closing `## Exceptions`".into(), false);
                     }
                     let we_json = blocks.iter().any(|(lang, _, sec)| lang == "json" && sec.eq_ignore_ascii_case("Worked examples"));
                     if has("Worked examples") && !we_json {
                         push(Severity::Warn, "worked-examples-not-json", "the `## Worked examples` section has no ```json fence — worked examples are normative and must strictly parse".into(), false);
                     }
+                    // One success pair and one refusal pair, no more.
+                    let example_count: usize = blocks
+                        .iter()
+                        .filter(|(lang, _, sec)| lang == "json" && sec.eq_ignore_ascii_case("Worked examples"))
+                        .filter_map(|(_, content, _)| serde_json::from_str::<serde_json::Value>(content).ok())
+                        .map(|v| v.as_array().map(|a| a.len()).unwrap_or(1))
+                        .sum();
+                    if example_count > INTERFACE_MAX_EXAMPLES {
+                        push(Severity::Warn, "too-many-examples", format!("{} worked examples — the format holds one success pair and one refusal pair; every other refusal is a one-line code entry in the failure shape, and per-test cases live in the testgroup scripts", example_count), false);
+                    }
+                }
+                // One operation per file: distinct discriminator values across
+                // every fenced block betray a bundled contract.
+                let mut ops: Vec<String> = Vec::new();
+                for (_, content, _) in &blocks {
+                    for line in content.lines() {
+                        let t = line.trim();
+                        for key in INTERFACE_DISCRIMINATORS {
+                            let prefix = format!("\"{}\":", key);
+                            for (at, _) in t.match_indices(&prefix) {
+                                let rest = t[at + prefix.len()..].trim();
+                                let Some(rest) = rest.strip_prefix('"') else { continue };
+                                let v: String = rest.chars().take_while(|c| *c != '"').collect();
+                                let v = v.trim();
+                                if !v.is_empty() && !v.starts_with('<') && !v.contains('|') && !ops.iter().any(|o| o == v) {
+                                    ops.push(v.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                if ops.len() > 1 {
+                    push(Severity::Warn, "multi-op", format!("{} operations in one file ({}) — one operation per interface file; split each into `<id>-<operation>.interface.iter.md` and define any shared object once as its own `kind: dataset` interface", ops.len(), ops.join(", ")), false);
+                }
+                if contract.len() > INTERFACE_MAX_BODY_BYTES {
+                    push(Severity::Warn, "oversize-body", format!("the body is {} bytes — a one-operation contract with one success and one refusal example fits in under {} bytes; look for bundled operations, restated shared objects, or business rules", contract.len(), INTERFACE_MAX_BODY_BYTES), false);
                 }
                 for (lang, content, _) in &blocks {
                     if lang == "json" && serde_json::from_str::<serde_json::Value>(content).is_err() {
@@ -630,11 +685,11 @@ fn interface_template(kind: &str) -> String {
             "## Record\n\n```\n{\n  \"<field>\": \"<example>\"        // <type>; mark the identity/key fields\n}\n```\n\n## Worked examples\n\nNormative — each record must be producible and acceptable on every implementation (strict JSON):\n\n```json\n[\n  { \"record\": { } }\n]\n```\n"
         }
         _ => {
-            "## Request\n\n```\n{\n  \"<field>\": \"<example>\"        // <type>, <required|optional — default>\n}\n```\n\n## Reply, success shape\n\n```\n{\n  \"<field>\": \"<example>\"        // <type, rules the value must satisfy>\n}\n```\n\n## Reply, failure shape\n\n```\n{\n  \"refusal\": {\n    \"code\":   \"<REFUSAL_CODE>\",  // closed vocabulary — list every code\n    \"detail\": \"<one line naming what was refused>\"\n  }\n}\n```\n\n## Worked examples\n\nNormative — each pair must hold on every implementation (strict JSON):\n\n```json\n[\n  { \"request\": { }, \"reply\": { } }\n]\n```\n"
+            "## Request\n\n```\n{\n  \"<field>\": \"<example>\"        // <type>, <required|optional — default>\n}\n```\n\n## Reply, success shape\n\n```\n{\n  \"<field>\": \"<example>\"        // <type, rules the value must satisfy>\n}\n```\n\n## Reply, failure shape\n\n```\n{\n  \"refusal\": {\n    \"code\":   \"<REFUSAL_CODE>\",  // closed vocabulary — list EVERY code here, one line each, no example per code\n    \"detail\": \"<one line naming what was refused>\"\n  }\n}\n```\n\n## Worked examples\n\nNormative — exactly one success pair and one refusal pair (strict JSON):\n\n```json\n[\n  { \"request\": { }, \"reply\": { } },\n  { \"request\": { }, \"reply\": { \"refusal\": { \"code\": \"<REFUSAL_CODE>\", \"detail\": \"\" } } }\n]\n```\n"
         }
     };
     format!(
-        "---\nname: <kebab-case-id>\nkind: {}                    # request-reply | event | stream | dataset\ndescription: \"<one line: what data crosses this boundary>\"\nteststate: inherit\nowner: bespoke\nchildren:\n  bizreqs:    [\"{{thisfiledir}}/{{thisfilestem}}/*.bizreq.iter.md\"]\n  techreqs:   [\"{{thisfiledir}}/{{thisfilestem}}/*.techreq.iter.md\"]\n  testgroups: [\"{{thisfiledir}}/{{thisfilestem}}/*.testgroup.iter.md\"]\n---\n\n# <kebab-case-id> — contract\n\n<Named summary, under 300 characters: what goes in, what comes out, and why.\nNo carrier, no consumers, no deployment.>\n\n{}\n## Invariants\n\n- <property the examples cannot show: totality, determinism, ordering, limits,\n  closed vocabularies>\n- Transport-neutral: these messages ride any carrier unchanged; carrier\n  bindings (routes, ports, topics, flags, exit codes) live on the serving\n  node's code file, never here.\n\n## Exceptions\n\n<!-- none — a declared deviation from the internal transport law goes here (what deviates, why, what still holds); with no declaration there is no exception, so leave this section empty or drop it -->\n",
+        "---\nname: <kebab-case-id>            # ONE operation per file: <service>-<operation>\nkind: {}                    # request-reply | event | stream | dataset\ndescription: \"<one line: what data crosses this boundary>\"\nteststate: inherit\nowner: bespoke\nchildren:\n  bizreqs:    [\"{{thisfiledir}}/{{thisfilestem}}/*.bizreq.iter.md\"]\n  techreqs:   [\"{{thisfiledir}}/{{thisfilestem}}/*.techreq.iter.md\"]\n  testgroups: [\"{{thisfiledir}}/{{thisfilestem}}/*.testgroup.iter.md\"]\n---\n\n# <kebab-case-id> — contract\n\n<Named summary, under 300 characters: what goes in, what comes out, and why.\nNo carrier, no consumers, no deployment. A shared object (an attestation, an\nevidence reference, a refusal envelope) is defined ONCE as its own `kind: dataset`\ninterface and referenced here by id, never restated. Business rules stay on\nbizreq/techreq nodes; a closed vocabulary or limit is a comment beside its field.>\n\n{}\n## Exceptions\n\n<!-- none — a declared deviation from the internal transport law goes here (what deviates, why, what still holds); with no declaration there is no exception, so leave this section empty or drop it -->\n",
         kind, middle
     )
 }
@@ -900,7 +955,7 @@ mod tests {
     }
 
     /// A fully format-compliant request-reply contract (V2 frontmatter).
-    const CLEAN_IFACE: &str = "---\nname: pay-msg\nkind: request-reply\ndescription: \"a payment in, a receipt or refusal out\"\nchildren:\n  testgroups: []\n---\n\n# pay-msg — contract\n\nA payment request in; exactly one reply out — a receipt XOR a refusal.\n\n## Request\n\n```\n{ \"amount_cents\": 1200 }\n```\n\n## Reply, success shape\n\n```\n{ \"receipt_id\": \"r-1\" }\n```\n\n## Reply, failure shape\n\n```\n{ \"refusal\": { \"code\": \"NO_FUNDS\" } }\n```\n\n## Worked examples\n\n```json\n[ { \"request\": { \"amount_cents\": 1200 }, \"reply\": { \"receipt_id\": \"r-1\" } } ]\n```\n\n## Invariants\n\n- Deterministic and total.\n";
+    const CLEAN_IFACE: &str = "---\nname: pay-msg\nkind: request-reply\ndescription: \"a payment in, a receipt or refusal out\"\nchildren:\n  testgroups: []\n---\n\n# pay-msg — contract\n\nA payment request in; exactly one reply out — a receipt XOR a refusal.\n\n## Request\n\n```\n{ \"amount_cents\": 1200 }\n```\n\n## Reply, success shape\n\n```\n{ \"receipt_id\": \"r-1\" }\n```\n\n## Reply, failure shape\n\n```\n{ \"refusal\": { \"code\": \"NO_FUNDS\" } }\n```\n\n## Worked examples\n\n```json\n[ { \"request\": { \"amount_cents\": 1200 }, \"reply\": { \"receipt_id\": \"r-1\" } } ]\n```\n";
 
     #[test]
     fn interface_body_is_the_contract() {
@@ -930,6 +985,29 @@ mod tests {
         );
         std::fs::write(&p, misplaced).unwrap();
         assert!(codes(&validate_file(&p, false).unwrap()).contains(&"section-order"));
+
+        // Retired `## Invariants` is called out by name, not as a stray section.
+        std::fs::write(&p, format!("{}\n## Invariants\n\n- Deterministic and total.\n", CLEAN_IFACE)).unwrap();
+        let c = codes(&validate_file(&p, false).unwrap());
+        assert!(c.contains(&"invariants-section") && !c.contains(&"unexpected-section") && !c.contains(&"section-order"), "{:?}", c);
+
+        // Exceptions may still close the file after Worked examples.
+        std::fs::write(&p, format!("{}\n## Exceptions\n\n- Redis protocol, not gRPC.\n", CLEAN_IFACE)).unwrap();
+        assert!(validate_file(&p, false).unwrap().is_empty());
+
+        // Bundled operations, more than two examples, and an oversize body are flagged.
+        let bundled = CLEAN_IFACE
+            .replace("{ \"amount_cents\": 1200 }\n```\n\n## Reply, success", "{ \"op\": \"pay\", \"amount_cents\": 1200 }\n```\n\n## Reply, success")
+            .replace(
+                "[ { \"request\": { \"amount_cents\": 1200 }, \"reply\": { \"receipt_id\": \"r-1\" } } ]",
+                "[ { \"request\": { \"op\": \"pay\" }, \"reply\": {} }, { \"request\": { \"op\": \"refund\" }, \"reply\": {} }, { \"request\": { \"op\": \"pay\" }, \"reply\": {} } ]",
+            );
+        std::fs::write(&p, bundled).unwrap();
+        let c = codes(&validate_file(&p, false).unwrap());
+        assert!(c.contains(&"multi-op") && c.contains(&"too-many-examples"), "{:?}", c);
+        let big = CLEAN_IFACE.replace("## Request\n\n```\n{ \"amount_cents\": 1200 }", &format!("## Request\n\n```\n{{ \"amount_cents\": 1200, \"pad\": \"{}\" }}", "x".repeat(11_000)));
+        std::fs::write(&p, big).unwrap();
+        assert!(codes(&validate_file(&p, false).unwrap()).contains(&"oversize-body"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -939,9 +1017,10 @@ mod tests {
 
         let p = dir.join("new.interface.iter.md");
         let t = template_for(&p).unwrap();
-        for section in ["## Request", "## Reply, success shape", "## Reply, failure shape", "## Worked examples", "## Invariants", "## Exceptions"] {
+        for section in ["## Request", "## Reply, success shape", "## Reply, failure shape", "## Worked examples", "## Exceptions"] {
             assert!(t.contains(section), "missing {} in:\n{}", section, t);
         }
+        assert!(!t.contains("## Invariants"), "the retired section must not be in the template:\n{}", t);
         std::fs::write(&p, "---\nname: x\nkind: event\nchildren:\n  testgroups: []\n---\n").unwrap();
         let t = template_for(&p).unwrap();
         assert!(t.contains("## Event") && !t.contains("## Request"), "{}", t);

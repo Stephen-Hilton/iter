@@ -1283,11 +1283,11 @@ mod tests {
     #[test]
     fn long_bodies_are_kept_whole() {
         // A contract well past the old 64 KiB cap, ending in a multi-byte
-        // character and an `## Invariants` section, must come back intact
+        // character and a closing section, must come back intact
         // on both the frontmatter and the bare-file paths.
         let mut body = "a".repeat(100_000);
         body.push('—');
-        body.push_str("\n\n## Invariants\n\n- last line");
+        body.push_str("\n\n## Worked examples\n\n- last line");
         let front = parse_front(&format!("---\nname: x\n---\n{body}"));
         assert_eq!(front.body, body, "frontmatter path keeps the whole body");
         assert!(front.body.ends_with("- last line"));
