@@ -120,24 +120,6 @@ impl Front {
     }
 }
 
-/// Body cap per node in scan responses: bodies ride into the UI/API in full,
-/// but a runaway file must not bloat every response.
-const BODY_CAP: usize = 65536;
-
-/// Truncate to at most BODY_CAP bytes, backing up off a multi-byte character
-/// so the cut never lands mid-codepoint (String::truncate panics there).
-fn cap_body(body: &mut String) -> bool {
-    if body.len() <= BODY_CAP {
-        return false;
-    }
-    let mut cut = BODY_CAP;
-    while !body.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    body.truncate(cut);
-    true
-}
-
 fn clean_value(raw: &str) -> String {
     let raw = raw.trim();
     if raw.len() >= 2
@@ -180,16 +162,15 @@ pub fn parse_front(content: &str) -> Front {
     let trimmed = content.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
     let Some(rest) = trimmed.strip_prefix("---") else {
         front.body = content.trim().to_string();
-        cap_body(&mut front.body);
         return front;
     };
     let Some(end) = rest.find("\n---") else { return front };
     front.has_frontmatter = true;
-    let mut body = rest[end + 4..].trim_start_matches('-').trim().to_string();
-    if cap_body(&mut body) {
-        body.push_str("\n… (truncated — read the full file on disk)");
-    }
-    front.body = body;
+    // The body is never truncated: an interface node's body IS the contract,
+    // and validate / the engine must see all of it. (A 64 KiB cap once lived
+    // here for the V2 webapp's scan response; it silently ate the tail of
+    // long contracts — pdy-dev item 7e860d5b.)
+    front.body = rest[end + 4..].trim_start_matches('-').trim().to_string();
 
     let mut mode = FrontMode::Top;
     for line in rest[..end].lines() {
@@ -1300,27 +1281,18 @@ mod tests {
     }
 
     #[test]
-    fn body_cap_backs_off_a_mid_character_cut() {
-        // Position an em dash (3 bytes: E2 80 94) so BODY_CAP lands on its
-        // second byte — the pdy-dev crash: String::truncate panicked there.
-        for lead in [BODY_CAP - 2, BODY_CAP - 1] {
-            let mut body = "a".repeat(lead);
-            body.push('—');
-            body.push_str(&"b".repeat(64));
-            let text = format!("---\nname: x\n---\n{body}");
-            let front = parse_front(&text);
-            assert!(front.body.len() <= BODY_CAP + 64, "capped plus notice");
-            assert!(front.body.ends_with("read the full file on disk)"));
-            // No-frontmatter path caps too.
-            let bare = parse_front(&body);
-            assert!(bare.body.len() <= BODY_CAP);
-        }
-        // A cut on a char boundary still truncates at exactly BODY_CAP.
-        let mut body = "a".repeat(BODY_CAP);
-        body.push_str(&"b".repeat(64));
+    fn long_bodies_are_kept_whole() {
+        // A contract well past the old 64 KiB cap, ending in a multi-byte
+        // character and an `## Invariants` section, must come back intact
+        // on both the frontmatter and the bare-file paths.
+        let mut body = "a".repeat(100_000);
+        body.push('—');
+        body.push_str("\n\n## Invariants\n\n- last line");
         let front = parse_front(&format!("---\nname: x\n---\n{body}"));
-        assert!(front.body.starts_with(&"a".repeat(BODY_CAP)));
-        assert!(front.body.ends_with("read the full file on disk)"));
+        assert_eq!(front.body, body, "frontmatter path keeps the whole body");
+        assert!(front.body.ends_with("- last line"));
+        let bare = parse_front(&body);
+        assert_eq!(bare.body, body, "bare path keeps the whole body");
     }
 
     #[test]
