@@ -145,6 +145,10 @@ pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);borde
 .dlghead{display:flex;align-items:center;gap:10px}
 .dlghead h2{flex:1;font-size:15px;color:var(--text);text-transform:none;letter-spacing:0;margin:0}
 details.v2>summary{cursor:pointer;color:var(--dim);font-size:12px;margin-top:14px}
+details.dbox>summary{cursor:pointer;margin-top:14px;display:list-item}
+details.dbox>summary h2{display:inline;margin:0}
+details.dbox>summary .peek{display:block;color:var(--dim);font-size:12px;margin:2px 0 0 18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+details.dbox[open]>summary .peek{display:none}
 a{color:var(--accent)}
 
 /* ---- phones: stack everything vertically (laptops keep the wide layout) ---- */
@@ -357,6 +361,13 @@ function wideLockCount(i){
     if((o.lockdirs||[]).some(d=>mine.some(m=>isStrictAncestor(m,d))))n++;
   }
   return n;
+}
+/* the other open items whose lockdirs sit strictly under one lockdir of i —
+   what makes that lockdir a wide lock; shown per dir in the lightbox */
+function lockdirCoverage(i,d){
+  if(CLOSED.has(i.state))return [];
+  return itemsCache.filter(o=>o.id!==i.id&&!CLOSED.has(o.state)&&o.state!=="scheduled"&&
+    (o.lockdirs||[]).some(x=>isStrictAncestor(d,x))).map(o=>o.id);
 }
 function tagsHtml(i){
   const tags=(i.tags||[]).filter(t=>t&&t.text);
@@ -766,6 +777,12 @@ function menuItems(i){
 }
 function openMenu(id,anchor){
   const i=itemsCache.find(x=>x.id===id);if(!i)return;
+  /* a modal <dialog> sits in the browser's top layer: everything outside it is
+     inert and drawn under the backdrop, so when the anchor is inside an open
+     dialog the menu must live inside that dialog too (2026-09-09 fix) */
+  const host=anchor.closest("dialog")||document.body;
+  if(menu.parentElement!==host)host.appendChild(menu);
+  const fromDlg=host===dlg;
   menu.innerHTML=`<span class="note"><b>${esc(i.name.slice(0,60))}</b> · ${esc(i.state)}</span>`+menuItems(i);
   menu.hidden=false;menuOpenedAt=Date.now();
   const r=anchor.getBoundingClientRect();
@@ -773,7 +790,12 @@ function openMenu(id,anchor){
   menu.style.left=Math.max(8,Math.min(r.right-menu.offsetWidth,window.innerWidth-menu.offsetWidth-8))+"px";
   menu.querySelectorAll("button[data-act]").forEach(btn=>btn.onclick=async e=>{
     e.stopPropagation();closeMenu();
-    try{await doAction(btn.dataset.act,i);}catch(err){alert("action failed: "+err.message);}
+    const act=btn.dataset.act;
+    /* from the lightbox: close it first (forms / jumps need the list), then
+       reopen it on the refreshed item for plain state changes */
+    if(fromDlg&&act!=="answer"&&act!=="doc"){dlgDirty=false;dlg.close();}
+    try{await doAction(act,i);}catch(err){alert("action failed: "+err.message);return;}
+    if(fromDlg&&!["answer","doc","delete","pauseedit","clone","runnow","followup"].includes(act)&&itemsCache.some(x=>x.id===i.id))openDetail(i.id);
   });
 }
 async function fresh(id){return api(P(id));}
@@ -1154,7 +1176,8 @@ async function openDetail(id){
       ${(()=>{const byId={};itemsCache.forEach(x=>{byId[x.id]=x;});const ds=depStatus(i,byId);
         return ds.ok?"":`<div class="kv" style="color:var(--warn)">gate: ${ds.failed?"dependency "+esc(ds.failed.slice(-8))+" closed FAILED — retry it and this item flows after it":"waiting on "+esc(ds.waiting.slice(-8))+(ds.via?" (created by blocker "+esc(ds.via.slice(-8))+"; deep dependency)":"")}</div>`;})()}
       ${(i.context||[]).length?`<div class="kv">context: ${esc(i.context.join(", "))}</div>`:""}${i.model?`<div class="kv">model: <b>${esc(i.model)}</b></div>`:""}
-      <div class="kv">lockdirs: ${esc((i.lockdirs||[]).join(", ")||"—")}
+      <div class="kv">lockdirs: ${(i.lockdirs||[]).map(d=>{const under=lockdirCoverage(i,d);
+        return esc(d)+(under.length?` <span title="open items whose lockdirs sit under this one — they all wait while this item runs">(${under.length} open item${under.length===1?"":"s"} lock subdirs: ${under.map(u=>`<a href="#" data-dep="${esc(u)}">${esc(u.slice(-8))}</a>`).join(", ")})</span>`:"");}).join(", ")||"—"}
         ${i.lasterror?" · <span style='color:var(--bad)'>"+esc(i.lasterror.slice(0,200))+"</span>":""}</div>
       <div id="dl"></div>
       <div style="margin-top:14px" class="docbox"><h2>append doc</h2>
@@ -1184,15 +1207,23 @@ async function openDetail(id){
       dl.appendChild(box);return;
     }
     const label=d.key==="explained"?`Explained Simply <span class="kv">(ELI5)</span> `:esc(d.key)+" ";
-    box.innerHTML=`<h2 style="margin-top:14px">${label}${head.slice(esc(d.key).length+1)}</h2>`;
-    if(d.valuetype==="json"&&d.value&&Array.isArray(d.value.fields)){box.appendChild(widgetForm(i,d));}
-    else{const pre=document.createElement("pre");pre.textContent=typeof d.value==="string"?d.value:JSON.stringify(d.value,null,2);box.appendChild(pre);}
+    /* every detail is an accordion, collapsed by default; the one thing that
+       must be read — a question widget on an item in state question — opens */
+    const isWidget=d.valuetype==="json"&&d.value&&Array.isArray(d.value.fields);
+    const open=isWidget&&i.state==="question";
+    const text=isWidget?(d.value.title||""):(typeof d.value==="string"?d.value:JSON.stringify(d.value));
+    const peek=String(text||"").split("\n").find(l=>l.trim())||"";
+    box.innerHTML=`<details class="dbox"${open?" open":""}><summary><h2>${label}${head.slice(esc(d.key).length+1)}</h2>`+
+      (peek?`<span class="peek">${esc(peek.slice(0,110))}${peek.length>110?"…":""}</span>`:"")+`</summary></details>`;
+    const det=box.firstElementChild;
+    if(isWidget){det.appendChild(widgetForm(i,d,open));}
+    else{const pre=document.createElement("pre");pre.textContent=typeof d.value==="string"?d.value:JSON.stringify(d.value,null,2);det.appendChild(pre);}
     if(d.key==="request"){
       /* ELI5 (spec: Explain / ELI5): the engine runs the read-only explain agent
          on this item at once, outside the cap, and appends "Explained Simply" */
       const bar=document.createElement("div");bar.style.cssText="margin:6px 0 2px;display:flex;gap:10px;align-items:center";
       bar.innerHTML=`<button class="ghost sm" id="eli5" title="ask the engine to re-explain this item for someone who has never seen the codebase">ELI5</button><span class="kv" id="eli5-status"></span>`;
-      box.appendChild(bar);
+      det.appendChild(bar);
     }
     dl.appendChild(box);
   });
@@ -1222,14 +1253,15 @@ async function openDetail(id){
     if(!tryCloseDlg())return;
     jumpToItem(dep);
   });
-  dlg.showModal();
+  if(!dlg.open)dlg.showModal();   // re-render in place when already open (answer/doc/ELI5 refresh)
 }
 
 /* dynamic question widget: answers overwrite value in place */
-function widgetForm(item,d){
+function widgetForm(item,d,expanded){
   const w=d.value,form=document.createElement("div");
+  /* the full question text is the required reading on a live question: open */
   form.innerHTML=`<div><b>${esc(w.title)}</b></div><div class="kv">${esc(w.summary||"")}</div>
-    ${w.detail?`<details><summary class="kv">more…</summary><pre>${esc(w.detail)}</pre></details>`:""}`;
+    ${w.detail?`<details${expanded?" open":""}><summary class="kv">${expanded?"full question":"more…"}</summary><pre>${esc(w.detail)}</pre></details>`:""}`;
   w.fields.forEach((f,idx)=>{
     const fd=document.createElement("div");fd.className="wfield";
     const lab=`<label>${esc(f.label||f.key)}</label>`;
