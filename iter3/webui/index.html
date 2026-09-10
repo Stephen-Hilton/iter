@@ -136,6 +136,7 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 #login input{width:100%;margin-bottom:10px}
 .err{color:var(--bad);min-height:20px}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;max-width:1100px;width:92%}
+#tagpick{max-width:520px}
 dialog::backdrop{background:rgba(0,0,0,.55)}
 pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:480px;overflow:auto}
 .wfield{margin:10px 0}
@@ -281,6 +282,7 @@ a{color:var(--accent)}
 <dialog id="detail"></dialog>
 <dialog id="form"></dialog>
 <dialog id="settings"></dialog>
+<dialog id="tagpick"></dialog>
 <div id="actmenu" class="actmenu" hidden></div>
 <script>
 "use strict";
@@ -750,23 +752,23 @@ function menuItems(i){
   if(CLOSED.has(s)){
     const att=i.attempt?` after ${i.attempt} attempt${i.attempt===1?"":"s"}`:"";
     return b("clone","Clone (run it again)")+(s==="complete"?b("followup","Create follow-up request"):"")+
-      b("reopen","Reopen (back to queued)…")+b("doc","Append doc…")+`<div class="sep"></div>`+
+      b("reopen","Reopen (back to queued)…")+b("doc","Append doc…")+b("addtag","Add tag…")+`<div class="sep"></div>`+
       note(`Closed ${esc(s)}${esc(att)} — a closed item is immutable; docs can be appended, or reopen it.`)+
       b("delete","Delete from archive…","danger");
   }
   if(s==="in-progress"){
-    return b("clone","Clone")+`<div class="sep"></div>`+
+    return b("clone","Clone")+b("addtag","Add tag…")+`<div class="sep"></div>`+
       (i.stop_requested?note("Stop requested — the engine kills the session on its next tick and parks the item."):b("stopitem","Stop (halt mid-run)…","danger"))+
       note("Agent is running. Stop kills its session and parks the item for review; changes it already committed stay in git.");
   }
   if(s==="scheduled"){
     return b("runnow","Run now")+b("pause","Pause schedule")+b("pauseedit","Pause &amp; edit")+
-      b("complete","Complete (retire schedule)")+b("clone","Clone")+`<div class="sep"></div>`+
+      b("complete","Complete (retire schedule)")+b("clone","Clone")+b("addtag","Add tag…")+`<div class="sep"></div>`+
       note("Run now clones this schedule into a queued run.")+b("delete","Delete","danger");
   }
   if(s==="question"){
     return b("answer","Answer…")+b("queue","Queue without answering")+b("park","Park")+b("pauseedit","Pause &amp; edit")+
-      b("complete","Complete (no work needed)")+b("clone","Clone")+`<div class="sep"></div>`+
+      b("complete","Complete (no work needed)")+b("clone","Clone")+b("addtag","Add tag…")+`<div class="sep"></div>`+
       note("An agent is waiting on this decision — open the item and answer there.")+b("delete","Delete","danger");
   }
   let rows=[];
@@ -776,7 +778,7 @@ function menuItems(i){
   if((s==="parked"||s==="paused")&&i.sched&&i.sched.kind)rows.push(b("schedule","Resume schedule"));
   if(s==="parked"||s==="paused")rows.push(b("question","Move to question"));
   if(s==="paused"||s==="queued")rows.push(b("park","Park"));
-  rows.push(b("complete","Complete"));rows.push(b("pauseedit","Pause &amp; edit"));rows.push(b("clone","Clone"));
+  rows.push(b("complete","Complete"));rows.push(b("pauseedit","Pause &amp; edit"));rows.push(b("clone","Clone"));rows.push(b("addtag","Add tag…"));
   rows.push(`<div class="sep"></div>`);rows.push(b("delete","Delete","danger"));
   return rows.join("");
 }
@@ -796,6 +798,7 @@ function openMenu(id,anchor){
   menu.querySelectorAll("button[data-act]").forEach(btn=>btn.onclick=async e=>{
     e.stopPropagation();closeMenu();
     const act=btn.dataset.act;
+    if(act==="addtag"){if(fromDlg){dlgDirty=false;dlg.close();}return openTagPicker(i,fromDlg);}
     /* from the lightbox: close it first (forms / jumps need the list), then
        reopen it on the refreshed item for plain state changes */
     if(fromDlg&&act!=="answer"&&act!=="doc"){dlgDirty=false;dlg.close();}
@@ -875,6 +878,58 @@ async function doAction(act,i){
       await api(P(i.id),{method:"DELETE"});break;
   }
   await loadItems(project);
+}
+
+/* ================= add tag (Actions -> Add tag…) =================
+   A selector of the tags already in use on this project (fewer typos), or a
+   free-form text with an optional color.  One tags-only PUT, so it works on
+   closed items too.  Engine-owned "blocked by: …" tags are never offered. */
+const tagpick=$("#tagpick");
+tagpick.addEventListener("click",e=>{if(e.target===tagpick)tagpick.close();});
+function knownTags(exclude){
+  const seen=new Map();
+  itemsCache.forEach(x=>(x.tags||[]).forEach(t=>{
+    if(!t||!t.text||t.text.startsWith(BLOCKED_PREFIX)||exclude.has(t.text))return;
+    if(!seen.has(t.text))seen.set(t.text,t.color||"");
+  }));
+  return [...seen.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+}
+function openTagPicker(i,reopen){
+  const have=new Set((i.tags||[]).map(t=>t&&t.text).filter(Boolean));
+  const known=knownTags(have);
+  tagpick.innerHTML=`<div style="padding:16px;min-width:min(420px,90vw)">
+    <div class="dlghead"><h2>Add tag</h2><span class="kv">${esc(i.name.slice(0,60))} · ${esc(i.state)}</span></div>
+    <div class="frow"><label>existing tag</label><select id="tp-sel">
+      ${known.map(([t,c])=>`<option value="${esc(t)}" data-color="${esc(c)}">${esc(t)}</option>`).join("")}
+      <option value="">— free-form —</option></select></div>
+    <div class="frow"><label>free-form</label><input id="tp-text" placeholder="new tag text (used when free-form is selected)"></div>
+    <div class="frow"><label>color</label><input id="tp-color" placeholder="optional #hex (existing tags keep theirs)"></div>
+    <div class="kv" id="tp-err" style="color:var(--bad)"></div>
+    <div style="text-align:right;margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="ghost" id="tp-cancel">cancel</button><button id="tp-add">add tag</button></div></div>`;
+  const sel=tagpick.querySelector("#tp-sel"),txt=tagpick.querySelector("#tp-text"),col=tagpick.querySelector("#tp-color"),err=tagpick.querySelector("#tp-err");
+  if(!known.length)sel.value="";
+  const sync=()=>{txt.disabled=sel.value!=="";if(sel.value==="")txt.focus();};
+  sel.onchange=sync;sync();
+  tagpick.querySelector("#tp-cancel").onclick=()=>tagpick.close();
+  tagpick.querySelector("#tp-add").onclick=async()=>{
+    err.textContent="";
+    const text=(sel.value!==""?sel.value:txt.value).trim();
+    if(!text){err.textContent="pick an existing tag or type a new one";return;}
+    if(text.startsWith(BLOCKED_PREFIX)){err.textContent=`"${BLOCKED_PREFIX}…" tags are engine-owned and derived each tick — the engine would remove it`;return;}
+    let color=col.value.trim();
+    if(color&&!/^#[0-9a-fA-F]{3,8}$/.test(color)){err.textContent="color must be #hex";return;}
+    if(!color&&sel.value!=="")color=sel.selectedOptions[0].dataset.color||"";
+    if(!color&&text.startsWith(UC_PREFIX))color=UC_COLOR;
+    try{
+      const f=await fresh(i.id);
+      if(!(f.tags||[]).some(t=>t&&t.text===text)){f.tags=[...(f.tags||[]),{text,color}];
+        await api(P(i.id)+"?expect_version="+f.version,{method:"PUT",body:JSON.stringify(f)});}
+      tagpick.close();await loadItems(project);
+      if(reopen&&itemsCache.some(x=>x.id===i.id))openDetail(i.id);else jumpToItem(i.id);
+    }catch(e){err.textContent="add failed: "+e.message;}
+  };
+  tagpick.showModal();
 }
 
 /* ================= new / edit / follow-up form ================= */
