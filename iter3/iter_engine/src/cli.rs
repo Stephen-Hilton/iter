@@ -94,6 +94,18 @@ enum Verb {
         #[arg(long)]
         reason: String,
     },
+    /// Block the CALLING work item on the nightly cluster restart: it parks
+    /// tagged `blocked-by-cluster-restart` with the attempt counter put back
+    /// (no retry burned); the engine requeues it once the cluster is back up
+    /// and healthy and strips the tag when it starts.
+    Block {
+        /// the block kind — the cluster's 02:00–06:00 PT restart window (the only kind today)
+        #[arg(long = "cluster-restart")]
+        cluster_restart: bool,
+        /// what you needed the cluster for — the next run reads it back as its "previous attempt"
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Append a "doc" note to a work item (the calling one by default; works on closed items).
     Doc {
         text: Option<String>,
@@ -325,6 +337,7 @@ pub fn run(args: CliArgs) {
         }
         Verb::Ask { question, file } => ask(&e, read_arg_or_file(question, file)),
         Verb::Reject { reason } => reject(&e, &reason),
+        Verb::Block { cluster_restart, reason } => block(&e, cluster_restart, reason),
         Verb::Doc { text, file, id } => doc(&e, read_arg_or_file(text, file), id),
         Verb::Critreview { file, context, max_retry, disposition, round } => critreview(&e, file, context, max_retry, disposition, round),
         Verb::Capability { .. } | Verb::Status | Verb::Other(_) | Verb::Runtests { .. } | Verb::Validate { .. }
@@ -944,6 +957,38 @@ fn reject(e: &Env, reason: &str) {
     );
     set_state(e, item, "parked", Some(&format!("rejected: {}", reason.trim().chars().take(400).collect::<String>())));
     println!("rejected — this work item parks for human review when this turn ends. Finish your turn now.");
+}
+
+/// `iter block --cluster-restart [--reason …]` (built 2026-09-09; plan:
+/// iter3/plans/cluster_restart_block.buildplan.md §1).  One versioned PUT —
+/// `set_state` is not reused because it leaves `attempt` alone, and giving
+/// the attempt back is the whole point.
+fn block(e: &Env, cluster_restart: bool, reason: Option<String>) {
+    if !cluster_restart {
+        die("nothing to block on: pass --cluster-restart".into());
+    }
+    let reason = reason.unwrap_or_default();
+    let reason = reason.trim();
+    let reason: String = if reason.is_empty() { "the cluster is required for this work".into() } else { reason.chars().take(400).collect() };
+    let mut item = calling_item(e);
+    let version = item.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+    let before = item.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0);
+    iter_core::cluster::apply_block(&mut item, &reason);
+    let after = item.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0);
+    let _ = e.api.post(
+        &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
+        &json!({"key": "doc", "valuetype": "text", "value": format!(
+            "blocked by cluster restart (the {} agent): {reason} — attempt put back from {before} to {after}; parked until the cluster is back up and healthy",
+            e.agent
+        )}),
+    );
+    e.api
+        .put(&format!("/api/projects/{}/workitems/{}?expect_version={}", e.project, e.workid, version), &item)
+        .unwrap_or_else(|err| die(format!("block failed: {err}")));
+    println!(
+        "blocked on the cluster restart — this work item parks when this turn ends, tagged `{}`, with its attempt put back to {after} (it was {before}). The engine requeues it once the cluster is back up and healthy and strips the tag when it starts; your reason is what the next run reads back. Finish your turn now.",
+        iter_core::cluster::CLUSTER_RESTART_TAG
+    );
 }
 
 fn doc(e: &Env, text: String, id: Option<String>) {

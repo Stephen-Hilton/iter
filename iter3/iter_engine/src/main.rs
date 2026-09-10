@@ -17,7 +17,7 @@ use serde_json::json;
 
 #[derive(clap::Subcommand, Debug)]
 enum Cmd {
-    /// agent-facing verbs (`iter add|ask|reject|doc|critreview|capability|status`); the
+    /// agent-facing verbs (`iter add|ask|reject|block|doc|critreview|capability|status`); the
     /// engine installs `{topdir}/.iter/bin/iter` as a shim to this
     Cli(cli::CliArgs),
 }

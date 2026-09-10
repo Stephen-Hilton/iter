@@ -5,8 +5,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod cluster;
 pub mod sched;
 pub mod widget;
+
+/// The claim's tag rule, at the root so both claim sites name one thing
+/// (iter_core::claim_tags — see `cluster::claim_tags`).
+pub use cluster::claim_tags;
 
 /// Logical table names — storage backends map these to physical names
 /// (DynamoDB: prefix + name; SQLite: table name).
@@ -364,6 +369,11 @@ pub struct Project {
     /// 0 or 1 = never chain
     #[serde(default = "default_session_chain_max")]
     pub session_chain_max: u32,
+    /// cluster-restart block (built 2026-09-09, see `cluster`): the nightly
+    /// restart template and the window an item tagged
+    /// `blocked-by-cluster-restart` waits out
+    #[serde(default)]
+    pub cluster_restart: cluster::ClusterRestart,
     /// 100 once the 0–99 priority migration ran on this project (absent =
     /// still on the 0–10 scale); read by the migration endpoint only
     #[serde(default, skip_serializing_if = "Option::is_none")]

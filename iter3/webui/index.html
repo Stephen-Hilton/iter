@@ -74,6 +74,7 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .tile .id{font-family:ui-monospace,monospace;cursor:copy}
 .tile .att{color:var(--warn);font-size:12px}
 .tags{display:flex;gap:5px;flex:none}
+.tagx{margin-left:5px;color:inherit;opacity:.7;text-decoration:none;font-weight:700}.tagx:hover{opacity:1}
 .tag{font-size:11px;padding:1px 8px;border-radius:9px;font-weight:600;white-space:nowrap}
 .state{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700;text-transform:uppercase;flex:none}
 .state.queued{background:#28405c;color:#9ec9ff}.state.in-progress{background:#274733;color:#7de0ae}
@@ -289,6 +290,7 @@ const filters=new Set();   // additive state filters from the pinned counts bar
 const STATES=["in-progress","queued","question","parked","paused","failed","complete","scheduled"];
 const CLOSED=new Set(["complete","failed"]); // immutable except appended "doc" rows + reopen
 const UC_PREFIX="usecase:", UC_COLOR="#3b6fb6", PRIO_DEFAULT=40; // priority 0–99 (decided 2026-09-08)
+const BLOCKED_PREFIX="blocked by: "; // engine-owned wait tag (iter_core BLOCKED_TAG_PREFIX); derived, never edited here
 let ucFilter=""; // one usecase name, or ""
 const ucOf=i=>(i.tags||[]).filter(t=>t&&t.text&&t.text.startsWith(UC_PREFIX)).map(t=>t.text.slice(UC_PREFIX.length));
 const OPEN_TARGETS=["queued","parked","paused","question"];
@@ -369,13 +371,16 @@ function lockdirCoverage(i,d){
   return itemsCache.filter(o=>o.id!==i.id&&!CLOSED.has(o.state)&&o.state!=="scheduled"&&
     (o.lockdirs||[]).some(x=>isStrictAncestor(d,x))).map(o=>o.id);
 }
-function tagsHtml(i){
-  const tags=(i.tags||[]).filter(t=>t&&t.text);
+function tagsHtml(i,removable){
+  const tags=(i.tags||[]).filter(t=>t&&t.text).map(t=>({...t,own:!t.text.startsWith(BLOCKED_PREFIX)}));
   const wide=fullTreeLock(i)?0:wideLockCount(i);
   if(wide>=2)tags.unshift({text:`wide lock (${wide} items)`,color:"#e05252"});
   if(fullTreeLock(i)&&!CLOSED.has(i.state))tags.unshift({text:"full tree lock",color:"#e05252"});
   if(!tags.length)return "";
-  return `<span class="tags">${tags.map(t=>{const c=tagColor(t);return `<span class="tag" style="background:${esc(c)};color:${tagFg(c)}">${esc(t.text)}</span>`;}).join("")}</span>`;
+  /* removable (lightbox only): a × on every tag that is really on the row — the engine's
+     derived "blocked by: …" and the synthesized lock tags are not on it, so they get none */
+  return `<span class="tags">${tags.map(t=>{const c=tagColor(t);const x=removable&&t.own?`<a href="#" class="tagx" data-rmtag="${esc(t.text)}" title="remove this tag (a tags-only change; allowed on closed items)">×</a>`:"";
+    return `<span class="tag" style="background:${esc(c)};color:${tagFg(c)}">${esc(t.text)}${x}</span>`;}).join("")}</span>`;
 }
 
 async function boot(){
@@ -1002,6 +1007,7 @@ const PROJECT_FIELDS=[
   {key:"priority_scale",label:"priority scale",type:"readonly",help:"100 once the 0–99 priority migration ran (POST /api/projects/<name>/migrate_priority)"},
   {key:"agents",label:"agent overrides",type:"json",rows:6,help:'per-agent overrides keyed by agent name: {"code":{"max":2,"model":"opus","timeoutsec":3600,"closegate":{"verify":"haiku","requires_commit":true},"lockshape":{"allow":["{topdir}/src/*"]}}}'},
   {key:"failure",label:"failure policy",type:"json",rows:4,help:"maxattempts · first_retry_second · retry_backoff_exponent"},
+  {key:"cluster_restart",label:"cluster restart",type:"json",rows:3,help:'the nightly cluster restart an item tagged blocked-by-cluster-restart waits out: {"schedule":"<id of the scheduled restart template>","tz":"America/Los_Angeles","from":"02:00","until":"06:00"} — the newest clone of that template decides (complete + clusterhealth row exits 0 = healthy; red row / still running / failed = unavailable); with no clone in 24h, or no schedule, the wall clock in tz decides. The engine shows "blocked by: cluster restart" while it holds, requeues a parked tagged item when healthy, and strips the tag when the item starts'},
   {key:"engines",type:"json",rows:2,help:'engine names serving this project, e.g. ["Engine01"]'},
   {key:"accounts",type:"json",rows:5,help:'Claude accounts by env-var NAME (never the token): [{"name":"Dev1","token_envar":"DEV1_TOKEN","order":1,"switch":80,"stop":99}]'},
 ];
@@ -1166,7 +1172,7 @@ async function openDetail(id){
     ...(i.state==="queued"?(i.blockedby_locks||[]):[]).map(b=>`<a href="#" data-dep="${esc(b)}" title="holds a lock overlapping this item's lockdirs">${esc(b.slice(-8))} (lock)</a>`)].join(", ")||"—";
   dlg.innerHTML=`
     <div style="padding:16px">
-      <div class="dlghead"><span class="state ${esc(i.state)}">${esc(i.state)}</span><h2>${esc(i.name)}</h2>${tagsHtml(i)}
+      <div class="dlghead"><span class="state ${esc(i.state)}">${esc(i.state)}</span><h2>${esc(i.name)}</h2>${tagsHtml(i,true)}
         <button class="ghost sm actbtn" id="dlg-actions">Actions ▾</button><button class="ghost sm" id="dlg-close">close</button></div>
       <div class="kv">id <b style="font-family:monospace">${esc(i.id)}</b> · v${esc(i.version)} ·
         P${esc(i.priority)} · agent <b>${esc(i.agent)}</b> ·
@@ -1246,6 +1252,18 @@ async function openDetail(id){
       catch(e){eli5s.textContent="failed: "+e.message;}
     };
   }
+  /* tag ×: drop that one tag with a tags-only PUT (legal on closed items too) and re-render.
+     Removing blocked-by-cluster-restart is how a human keeps a parked item parked on purpose. */
+  dlg.querySelectorAll("[data-rmtag]").forEach(a=>a.onclick=async ev=>{
+    ev.preventDefault();ev.stopPropagation();
+    const text=a.dataset.rmtag;
+    try{
+      const f=await fresh(i.id);
+      f.tags=(f.tags||[]).filter(t=>!(t&&t.text===text));
+      await api(P(i.id)+"?expect_version="+f.version,{method:"PUT",body:JSON.stringify(f)});
+      dlgDirty=false;await load().catch(()=>{});openDetail(i.id);
+    }catch(e){a.textContent="!";a.title="remove failed: "+e.message;}
+  });
   /* blocked-by: close the lightbox, jump to that line, flash it */
   dlg.querySelectorAll("[data-dep]").forEach(a=>a.onclick=ev=>{
     ev.preventDefault();

@@ -42,6 +42,12 @@ file to read — expand it to `$ITER_PROJECT/.iter/agents/_capability/<file>.md`
   with a `*bizreq.iter.md` invariant) rather than your ability to do it. Rejecting
   is not failing, and it is not asking either. Read it before you fail — or quietly
   complete — a bad item.
+- **`_block_cluster_restart.md`** — `iter block --cluster-restart`: what to do when
+  your work needs the cluster and it is inside the nightly restart window (02:00–06:00
+  PT). Blocking is not failing and not rejecting: the item parks tagged
+  `blocked-by-cluster-restart`, your attempt is given back, and the engine requeues it
+  once the cluster is back up and healthy. Read it before you retry against a cluster
+  that is being rebuilt.
 - **`_runtests.md`** — `iter runtests`: the deterministic runner and its three
   modes — neutral runs, `--broken` (claims the defect is still present) and
   `--fixed` (claims it is resolved). A false claim flags your item as failed. Read

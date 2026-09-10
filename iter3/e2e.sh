@@ -620,6 +620,11 @@ case "$name" in
       emit success "Filed the disk guard item. I'm waiting for the review to finish."
     fi ;;
   gate-crash) emit success "DONE-MARKER: all obligations done, live proof attached" ;;
+  gate-cluster)
+    # attempt 1 needs the cluster during the restart window and blocks; the
+    # re-run reads the block back as its "previous attempt" and finishes
+    if grep -q "blocked by: cluster restart" <<<"$prompt"; then emit success "DONE-MARKER: the cluster is back; smoke test done"
+    else "$ITER_BIN" block --cluster-restart --reason "need corridor-dev1 for the smoke test" > "$GATE_PROMPTS/block.txt" 2>&1; emit success "blocked on the restart; ending turn"; fi ;;
   *) emit success "Plan written. I'm waiting for the review to finish." ;;
 esac
 FAKE
@@ -1015,6 +1020,93 @@ done
 grep -q "### spend" "$GATE_PROMPTS/eli5-prompt.txt" && fail "ELI5 prompt should not carry spend rows"
 [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR/details" | jq '[.[]|select(.key=="spend" and .value.agent=="explain")]|length')" = 1 ] || fail "explain spend row missing"
 pass "ELI5: one engine only (random live engine at request, claim 409s a rival) -> explains a closed item at once with cap 0 (read-only tools), 'Explained Simply' row appended, flags cleared, spend recorded"
+
+# ---- cluster-restart block (built 2026-09-09; iter3/plans/cluster_restart_block.buildplan.md) ----
+# `iter block --cluster-restart` parks the calling item tagged blocked-by-cluster-restart with
+# its attempt put back; the engine derives "blocked by: cluster restart" while the cluster is
+# unavailable (by the clock, or by the newest restart window's clusterhealth row), requeues a
+# parked tagged item once healthy, never picks a tagged queued item until then, and strips the
+# tag on the claim. No faked clock: the window is moved around the real UTC time instead.
+hhmm_utc() { date -u -v"$1"H +%H:%M 2>/dev/null || date -u -d "$1 hours" +%H:%M; }
+set_window() { # schedule-id from until
+  curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq --arg s "$1" --arg f "$2" --arg u "$3" '.cluster_restart={schedule:$s,tz:"UTC",from:$f,until:$u}' \
+    | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "cluster_restart window put"
+}
+tags_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r '[.tags[].text]|join("|")'; }
+attempt_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .attempt; }
+lasterror_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .lasterror; }
+mkdir -p "$SAMPLE/src/cluster"
+CB=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"gate-cluster","agent":"gatetest","priority":1,"lockdirs":["{topdir}/src/cluster/"],"tags":[{"text":"usecase:ops","color":"#3b6fb6"}]}' | jq -r .id)
+# 1. inside the restart window by the clock: the (untagged) item is dispatched as usual, the agent
+#    needs the cluster and blocks; the engine keeps the parked state and does not requeue it
+set_window "" "$(hhmm_utc -1)" "$(hhmm_utc +1)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-cluster1.log" 2>&1) || true
+[ "$(st_of "$CB")" = parked ] || { cat "$SCRATCH/engine-cluster1.log"; cat "$GATE_PROMPTS/block.txt" 2>/dev/null; fail "gate-cluster state=$(st_of "$CB") after iter block (expected parked)"; }
+[ "$(attempt_of "$CB")" = 0 ] || fail "gate-cluster attempt=$(attempt_of "$CB") after the block (expected 0: the claim's increment given back)"
+tags_of "$CB" | grep -q "^usecase:ops|blocked-by-cluster-restart" || fail "gate-cluster tags after the block: $(tags_of "$CB")"
+grep -q "requeued (parked -> queued" "$SCRATCH/engine-cluster1.log" && fail "engine requeued the item inside the window" || true
+lasterror_of "$CB" | grep -q "^blocked by: cluster restart — need corridor-dev1 for the smoke test" || fail "lasterror after the block: $(lasterror_of "$CB")"
+keys_of "$CB" | grep -q "doc" || fail "no doc row from iter block: $(keys_of "$CB")"
+grep -q "moved it to parked during the run" "$SCRATCH/engine-cluster1.log" || { cat "$SCRATCH/engine-cluster1.log"; fail "engine did not keep the parked state"; }
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 1 ] || fail "gate-cluster worker runs=$(grep -c "worker gate-cluster" "$GATE_LOG") (expected 1)"
+pass "iter block --cluster-restart: parked, durable tag set, attempt put back to 0, lasterror + doc row written"
+
+# 2. still inside the window: the parked item shows the derived tag and is NOT requeued
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-cluster2.log" 2>&1) || true
+[ "$(st_of "$CB")" = parked ] || fail "gate-cluster state=$(st_of "$CB") inside the window (expected parked)"
+[ "$(tags_of "$CB")" = "usecase:ops|blocked-by-cluster-restart|blocked by: cluster restart" ] || fail "tags inside the window: $(tags_of "$CB")"
+grep -q "cluster unavailable — clock: inside the" "$SCRATCH/engine-cluster2.log" || { cat "$SCRATCH/engine-cluster2.log"; fail "engine did not announce the clock block"; }
+pass "clock rule: parked tagged item shows 'blocked by: cluster restart' and stays parked"
+
+# 3. a human (or the nightly requeue script) queues it, tag kept: still not picked while the newest
+#    restart window's clusterhealth row is red, even outside the clock window
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq '.state="queued"' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$CB?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq .version)" -d @- >/dev/null || fail "manual requeue"
+TPL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window\",\"agent\":\"exec\",\"state\":\"scheduled\",\"priority\":60,\"exec_shell\":\"true\",\"sched\":{\"kind\":\"daily\",\"at\":\"$(hhmm_utc +12)\",\"tz\":\"UTC\"}}" | jq -r .id)
+RED=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window (red)\",\"agent\":\"exec\",\"state\":\"parked\",\"priority\":60,\"exec_shell\":\"true\",\"source_schedule\":\"$TPL\"}" | jq -r .id)
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$RED/details" \
+  -d '{"key":"clusterhealth","valuetype":"json","value":{"cluster":"corridor-dev1","bringup_exit":0,"status_exit":3,"at":"e2e"}}' >/dev/null || fail "clusterhealth row"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RED" | jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="complete"|.ts.complete=$t' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$RED?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RED" | jq .version)" -d @- >/dev/null || fail "red clone complete"
+set_window "$TPL" "$(hhmm_utc +2)" "$(hhmm_utc +3)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-cluster3.log" 2>&1) || true
+[ "$(st_of "$CB")" = queued ] || { cat "$SCRATCH/engine-cluster3.log"; fail "gate-cluster state=$(st_of "$CB") with a red window (expected queued, not picked)"; }
+[ "$(tags_of "$CB")" = "usecase:ops|blocked-by-cluster-restart|blocked by: cluster restart" ] || fail "tags with a red window: $(tags_of "$CB")"
+grep -q "recorded a red status (bringup_exit 0, status_exit 3)" "$SCRATCH/engine-cluster3.log" || { cat "$SCRATCH/engine-cluster3.log"; fail "engine did not read the red clusterhealth row"; }
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 1 ] || fail "a red window let gate-cluster run"
+pass "red window: queued tagged item held on the clusterhealth row (status_exit 3), 'blocked by: cluster restart' shown"
+
+# 4. the next window is an exec clone that POSTs its own green row through the exec environment
+#    (ITER_WORKID / ITER_DATA_URL / ITER_ENGINE_TOKEN): the item is released, dispatched, tag
+#    stripped on the claim, attempt back to 1, and the re-run reads the block back as its previous attempt
+GREEN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window (green)\",\"agent\":\"exec\",\"priority\":0,\"source_schedule\":\"$TPL\",\"exec_shell\":\"curl -sf -H \\\"authorization: Bearer \$ITER_ENGINE_TOKEN\\\" -H content-type:application/json -X POST \\\"\$ITER_DATA_URL/api/projects/\$ITER_PROJECT/workitems/\$ITER_WORKID/details\\\" -d '{\\\"key\\\":\\\"clusterhealth\\\",\\\"valuetype\\\":\\\"json\\\",\\\"value\\\":{\\\"cluster\\\":\\\"corridor-dev1\\\",\\\"bringup_exit\\\":0,\\\"status_exit\\\":0}}' && echo green\"}" | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-cluster4.log" 2>&1) || true
+[ "$(st_of "$GREEN")" = complete ] || { cat "$SCRATCH/engine-cluster4.log"; fail "green window exec clone state=$(st_of "$GREEN")"; }
+keys_of "$GREEN" | grep -q "clusterhealth" || fail "exec clone could not POST its clusterhealth row (exec env): $(keys_of "$GREEN")"
+grep -q "cluster back up and healthy — restart window .* clusterhealth exits 0/0" "$SCRATCH/engine-cluster4.log" || { cat "$SCRATCH/engine-cluster4.log"; fail "engine did not read the green row"; }
+[ "$(st_of "$CB")" = complete ] || { cat "$SCRATCH/engine-cluster4.log"; fail "gate-cluster state=$(st_of "$CB") after the green window (expected complete)"; }
+[ "$(tags_of "$CB")" = "usecase:ops" ] || fail "tags after the claim: $(tags_of "$CB") (both block tags must be stripped)"
+[ "$(attempt_of "$CB")" = 1 ] || fail "gate-cluster attempt=$(attempt_of "$CB") after the re-run (expected 1: the block gave one back, this claim took one)"
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 2 ] || fail "gate-cluster worker runs=$(grep -c "worker gate-cluster" "$GATE_LOG") (expected 2)"
+grep -lq "Last error: blocked by: cluster restart — need corridor-dev1 for the smoke test" "$GATE_PROMPTS"/*-gate-cluster.txt || fail "the re-run's prompt did not read the block back"
+pass "green window: exec clone addressed itself via the exec env, engine released the tagged item, tag stripped on claim, attempt 1, prompt carried the block reason"
+
+# 5. the parked path releases too: block again inside the window, then a green clock releases it by requeue
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$CB/reopen" -d '{}' >/dev/null || fail "reopen gate-cluster"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq '.state="parked"|.tags+=[{"text":"blocked-by-cluster-restart","color":"#c47a1f"}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$CB?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq .version)" -d @- >/dev/null || fail "park with tag"
+set_window "" "$(hhmm_utc +2)" "$(hhmm_utc +3)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-cluster5.log" 2>&1) || true
+grep -q "cluster back up and healthy — requeued (parked -> queued, tag kept until it starts)" "$SCRATCH/engine-cluster5.log" || { cat "$SCRATCH/engine-cluster5.log"; fail "engine did not requeue the parked tagged item"; }
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB/details" | jq -r '[.[]|select(.key=="doc")]|last|.value' | grep -q "requeued by engine" || fail "no requeue doc row"
+[ "$(st_of "$CB")" = complete ] || { cat "$SCRATCH/engine-cluster5.log"; fail "gate-cluster state=$(st_of "$CB") after the requeue (expected complete)"; }
+[ "$(tags_of "$CB")" = "usecase:ops" ] || fail "tags after the requeue+claim: $(tags_of "$CB")"
+pass "parked path: a parked item tagged blocked-by-cluster-restart is requeued by the engine once healthy (doc row), then claimed with the tag stripped"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq 'del(.cluster_restart)' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
 
 # webui served
 [ "$(curl -sf "$BASE/" | grep -c "ITER")" -ge 1 ] || fail "webui not served"

@@ -170,6 +170,8 @@ fn claim_chain_candidate(api: &Api, engine_name: &str, project: &Project, prev: 
             && !i.needs_approval
             && !i.stop_requested
             && (i.retry_after.is_empty() || i.retry_after <= now)
+            // a neighbour waiting out the cluster restart is dispatch's to release (it knows the cluster's health)
+            && !iter_core::cluster::has_tag(&i.tags, iter_core::cluster::CLUSTER_RESTART_TAG)
             && iter_core::dependency_status(i, &by_id, &kids) == iter_core::DepStatus::Satisfied
     };
     let overlaps = |i: &WorkItem| i.lockdirs.iter().any(|d| prev_dirs.iter().any(|p| iter_core::paths_overlap(d, p)));
@@ -187,8 +189,7 @@ fn claim_chain_candidate(api: &Api, engine_name: &str, project: &Project, prev: 
     claimed["run_now"] = json!(false);
     claimed["retry_after"] = json!("");
     claimed["blockedby_locks"] = json!([]);
-    claimed["tags"] = json!(best.tags.iter().filter(|t| !t.text.starts_with(iter_core::BLOCKED_TAG_PREFIX))
-        .map(|t| json!({"text": t.text, "color": t.color})).collect::<Vec<_>>());
+    claimed["tags"] = json!(iter_core::claim_tags(&best.tags)); // the one home for the claim's tag rule
     claimed["engine"] = json!(engine_name);
     claimed["attempt"] = json!(best.attempt + 1);
     claimed["ts"]["start"] = json!(now_utc());
@@ -283,7 +284,7 @@ fn run_all(
         if item.exec_shell.trim().is_empty() {
             return Err("exec item has empty exec_shell".into());
         }
-        RunOut::plain(run_shell(topdir, &item.exec_shell, agent_timeout(project, item, &Value::Null))?)
+        RunOut::plain(run_exec(api, project, topdir, item, agent_timeout(project, item, &Value::Null))?)
     } else {
         run_claude(api, project, topdir, item, account, details, chain)?
     };
@@ -830,6 +831,33 @@ fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    wait_with_timeout(cmd, timeout_sec)
+}
+
+/// An exec item's shell, with the same addressing the agent branch gives a
+/// claude session (built 2026-09-09): `ITER_WORKID`, `ITER_PROJECT`,
+/// `ITER_TOPDIR`, `ITER_DATA_URL`, `ITER_ENGINE_TOKEN` and the `iter` shim on
+/// PATH — so a window script can POST a detail row on its own clone.
+fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout_sec: u64) -> Result<String, String> {
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(&item.exec_shell)
+        .current_dir(topdir)
+        .env("ITER_WORKID", &item.id)
+        .env("ITER_PROJECT", &project.name)
+        .env("ITER_AGENT", &item.agent)
+        .env("ITER_TOPDIR", topdir)
+        .env("ITER_DATA_URL", &api.base)
+        .env("ITER_ENGINE_TOKEN", &api.token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Ok(shim) = write_iter_shim(topdir) {
+        cmd.env("ITER_BIN", &shim);
+        if let Some(dir) = std::path::Path::new(&shim).parent() {
+            cmd.env("PATH", format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default()));
+        }
+    }
     wait_with_timeout(cmd, timeout_sec)
 }
 

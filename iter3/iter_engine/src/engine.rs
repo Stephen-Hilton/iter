@@ -2,7 +2,8 @@
 //! fallback), heartbeat, pick queued work, take central locks, run, close.
 
 use crate::client::Api;
-use iter_core::{BLOCKED_TAG_COLOR, BLOCKED_TAG_PREFIX, DepStatus, Engine, Project, WorkItem, children_index, dependency_status, now_utc, paths_overlap, pick_account};
+use iter_core::cluster::{self, CLUSTER_RESTART_REASON, CLUSTER_RESTART_TAG};
+use iter_core::{BLOCKED_TAG_COLOR, BLOCKED_TAG_PREFIX, DepStatus, Engine, Project, WorkItem, children_index, claim_tags, dependency_status, now_utc, paths_overlap, pick_account};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -34,6 +35,8 @@ pub struct EngineRuntime {
     last_probe: HashMap<String, Instant>,
     /// project -> date the daily-budget hold was announced
     budget_hold: HashMap<String, String>,
+    /// project -> last cluster-health verdict announced (healthy, why)
+    cluster_state: HashMap<String, (bool, String)>,
 }
 
 use crate::usage;
@@ -100,6 +103,7 @@ impl EngineRuntime {
             last_test_handled: String::new(),
             last_probe: HashMap::new(),
             budget_hold: HashMap::new(),
+            cluster_state: HashMap::new(),
         }
     }
 
@@ -516,6 +520,16 @@ impl EngineRuntime {
         let items = self.items.get(&project_name).cloned().unwrap_or_default();
         let by_id: HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
+        // cluster-restart block (built 2026-09-09, iter_core::cluster): one
+        // health verdict per tick, taken only when some open item carries the
+        // durable tag.  A tagged QUEUED item is never picked while the cluster
+        // is unavailable; a tagged PARKED item (what `iter block` leaves) is
+        // requeued — tag kept — the moment the cluster is back up and healthy,
+        // and the claim strips the tag when the item starts.
+        let is_cluster_tagged = |i: &WorkItem| cluster::has_tag(&i.tags, CLUSTER_RESTART_TAG);
+        let cluster_tagged_open = items.iter().any(|i| (i.state == "queued" || i.state == "parked") && is_cluster_tagged(i));
+        let cluster_healthy = if cluster_tagged_open { self.cluster_health(project, &items) } else { true };
+
         // a project-wide hold: nothing starts this tick, and every item that
         // would otherwise be dispatchable is told why (spec: lock waits are
         // visible, 2026-09-07 — "queued and idle" must never be silent)
@@ -605,6 +619,22 @@ impl EngineRuntime {
             })
             .collect();
 
+        // the cluster is back: requeue every parked tagged item that is NOT still
+        // in flight.  `iter block` parks the item mid-run, seconds to minutes
+        // before its turn ends; requeueing inside that gap would let the run
+        // close through the gate (seen in e2e 2026-09-09).  In flight = running
+        // on this engine, or still holding a live central lock row (another
+        // engine's run releases its rows only when the run is over).
+        if cluster_healthy {
+            let in_flight = |i: &WorkItem| {
+                self.running.iter().any(|(w, _, _)| w == &i.id)
+                    || locked_paths.iter().any(|(_, kind, w)| kind == "lock" && w == &i.id)
+            };
+            for i in items.iter().filter(|i| i.state == "parked" && is_cluster_tagged(i) && !in_flight(i)) {
+                self.requeue_after_cluster_restart(project, i);
+            }
+        }
+
         // dependency gate: DEEP (workitem_dependency.md) — a blocker counts only
         // when it and everything it created closed complete; a failed blocker
         // simply keeps its dependents waiting (reopen + complete releases them)
@@ -632,12 +662,19 @@ impl EngineRuntime {
         // A dependency wait carries no reason — the blocked-by nesting shows
         // it.  The pick loop below refines the rest (cap, reservation, agent cap).
         let mut waits: HashMap<String, Wait> = HashMap::new();
+        // a parked item waiting out the restart shows the same reason as a
+        // queued one (it is requeued above the moment the cluster is healthy)
+        for i in items.iter().filter(|i| i.state == "parked" && cluster::blocks(i, cluster_healthy)) {
+            waits.insert(i.id.clone(), Wait { reason: Some(CLUSTER_RESTART_REASON.into()), holders: vec![] });
+        }
         for i in items.iter().filter(|i| i.state == "queued") {
             let mut w = Wait::default();
             if i.needs_approval {
                 w.reason = Some("needs approval".into());
             } else if !i.retry_after.is_empty() && i.retry_after > now_iso {
                 w.reason = Some(format!("retry after {}", hhmm(&i.retry_after)));
+            } else if cluster::blocks(i, cluster_healthy) {
+                w.reason = Some(CLUSTER_RESTART_REASON.into()); // renders "blocked by: cluster restart"
             } else if deps_satisfied(i) {
                 w.holders = lock_holders(i);
                 if let Some((_, path)) = w.holders.first() {
@@ -661,7 +698,7 @@ impl EngineRuntime {
         let mut started_now: Vec<String> = Vec::new();
         let run_now: Vec<&WorkItem> = items
             .iter()
-            .filter(|i| i.run_now && i.state == "queued" && !i.needs_approval && deps_satisfied(i) && !scope_blocked(i))
+            .filter(|i| i.run_now && i.state == "queued" && !i.needs_approval && !cluster::blocks(i, cluster_healthy) && deps_satisfied(i) && !scope_blocked(i))
             .collect();
         for item in run_now {
             println!(
@@ -686,6 +723,7 @@ impl EngineRuntime {
             .iter()
             .filter(|i| i.state == "queued" && !i.needs_approval && !started_now.contains(&i.id))
             .filter(|i| i.retry_after.is_empty() || i.retry_after <= now_iso) // failure backoff
+            .filter(|i| !cluster::blocks(i, cluster_healthy)) // cluster-restart block
             .filter(|i| {
                 self.deferred
                     .get(&i.id)
@@ -781,7 +819,7 @@ impl EngineRuntime {
             if item.state == "complete" || item.state == "failed" {
                 continue; // closed items are immutable
             }
-            let w = if item.state == "queued" { waits.get(&item.id).cloned().unwrap_or_default() } else { Wait::default() };
+            let w = if item.state == "queued" || item.state == "parked" { waits.get(&item.id).cloned().unwrap_or_default() } else { Wait::default() };
             let want_holders: Vec<String> = w.holders.iter().map(|(h, _)| h.clone()).collect();
             let want_tag = w.reason.as_ref().map(|r| format!("{BLOCKED_TAG_PREFIX}{r}"));
             let have_tag = item.tags.iter().find(|t| t.text.starts_with(BLOCKED_TAG_PREFIX)).map(|t| t.text.clone());
@@ -827,6 +865,53 @@ impl EngineRuntime {
         }
     }
 
+    /// One cluster-health verdict for this project (iter_core::cluster::evaluate):
+    /// the newest restart-window clone's state and its `clusterhealth` row,
+    /// else the wall clock in the configured zone.  Announced on change only.
+    fn cluster_health(&mut self, project: &Project, items: &[WorkItem]) -> bool {
+        let cfg = &project.cluster_restart;
+        let clone = cluster::newest_clone(cfg, items);
+        let details: Vec<Value> = clone
+            .and_then(|c| self.api.get(&format!("/api/projects/{}/workitems/{}/details", project.name, c.id)).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let h = cluster::evaluate(cfg, clone, &details, chrono::Utc::now());
+        let announced = self.cluster_state.get(&project.name).map(|(ok, why)| (*ok, why.as_str()));
+        if announced != Some((h.healthy, h.why.as_str())) {
+            println!("[engine] {}: cluster {} — {}", project.name, if h.healthy { "back up and healthy" } else { "unavailable" }, h.why);
+            self.cluster_state.insert(project.name.clone(), (h.healthy, h.why.clone()));
+        }
+        h.healthy
+    }
+
+    /// The cluster is back: a parked item still tagged `blocked-by-cluster-restart`
+    /// goes to queued with the tag kept (the claim strips it, so the row stays
+    /// truthful right up to the moment the agent starts) and a "doc" row
+    /// naming the release.  A 409 means someone wrote first; next tick re-derives.
+    fn requeue_after_cluster_restart(&self, project: &Project, item: &WorkItem) {
+        let why = self.cluster_state.get(&project.name).map(|(_, w)| w.clone()).unwrap_or_default();
+        let mut updated = serde_json::to_value(item).unwrap();
+        updated["state"] = json!("queued");
+        updated["retry_after"] = json!("");
+        match self.api.put(
+            &format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version),
+            &updated,
+        ) {
+            Ok(_) => {
+                println!("[engine] {} '{}': cluster back up and healthy — requeued (parked -> queued, tag kept until it starts)", &item.id[..8.min(item.id.len())], item.name);
+                let _ = self.api.post(
+                    &format!("/api/projects/{}/workitems/{}/details", project.name, item.id),
+                    &json!({"key": "doc", "valuetype": "text", "value": format!(
+                        "requeued by engine {} at {}: the cluster is back up and healthy ({why}); `blocked-by-cluster-restart` comes off when the item starts",
+                        self.name, now_utc()
+                    )}),
+                );
+            }
+            Err(e) if e.status == 409 => {}
+            Err(e) => eprintln!("[engine] could not requeue {} after the cluster restart: {e}", &item.id[..8.min(item.id.len())]),
+        }
+    }
+
     fn start_item(
         &mut self,
         _engine: &Engine,
@@ -840,10 +925,10 @@ impl EngineRuntime {
         claimed["state"] = json!("in-progress");
         claimed["run_now"] = json!(false); // the override is consumed by this start
         claimed["retry_after"] = json!("");
-        // the wait is over: drop the lock-derived dependency and the engine's tag
+        // the wait is over: drop the lock-derived dependency, the engine's tag
+        // and the durable cluster-restart tag (iter_core::claim_tags)
         claimed["blockedby_locks"] = json!([]);
-        claimed["tags"] = json!(item.tags.iter().filter(|t| !t.text.starts_with(BLOCKED_TAG_PREFIX))
-            .map(|t| json!({"text": t.text, "color": t.color})).collect::<Vec<_>>());
+        claimed["tags"] = json!(claim_tags(&item.tags));
         claimed["engine"] = json!(self.name);
         claimed["attempt"] = json!(item.attempt + 1);
         claimed["ts"]["start"] = json!(now_utc());
