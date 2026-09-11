@@ -162,6 +162,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{name}/workitems/{id}/details/{order}", put(detail_put))
         .route("/api/projects/{name}/workitems/{id}/approve", post(workitem_approve))
         .route("/api/projects/{name}/workitems/{id}/reopen", post(workitem_reopen))
+        .route("/api/projects/{name}/workitems/{id}/priority", post(workitem_priority))
+        .route("/api/projects/{name}/workitems/{id}/state", post(workitem_state))
         .route("/api/projects/{name}/workitems/{id}/explain", post(workitem_explain).delete(workitem_explained))
         .route("/api/projects/{name}/workitems/{id}/explain/claim", post(workitem_explain_claim))
         .route("/api/projects/{name}/workitems/{id}/duplicate_of", post(workitem_duplicate_of))
@@ -674,15 +676,38 @@ struct HeartbeatReq {
     /// real name on the record while the default login's usage replaced it).
     #[serde(default)]
     account: Option<String>,
-    /// latest usage snapshot for the active account (engine-owned)
+    /// why the engine is dispatching nothing ("" = not holding); absent =
+    /// leave alone (older engines).  "all accounts at stop%" -> webui shows
+    /// "Suspended, no usage left" with dashed windows.
     #[serde(default)]
-    usage: Option<Value>,
+    hold: Option<String>,
+    /// latest usage snapshot for the active account (engine-owned).  An
+    /// explicit null CLEARS it (holding: no account is running, so no numbers
+    /// describe this engine); absent = leave alone.
+    #[serde(default, deserialize_with = "null_clears")]
+    usage: Option<Option<Value>>,
+    /// every configured account's windows, reset times and `available_at`
+    /// (engine-owned, soonest first); absent = leave alone
+    #[serde(default)]
+    accounts: Option<Value>,
+    /// the account that comes back first: {"account","available_at"}; an
+    /// explicit null clears it (nothing estimable); absent = leave alone
+    #[serde(default, deserialize_with = "null_clears")]
+    next: Option<Option<Value>>,
     /// outcome of a connectivity test the engine just ran
     #[serde(default)]
     test_result: Option<Value>,
     /// the engine consumed test_requested
     #[serde(default)]
     clear_test: bool,
+}
+
+/// serde reads a JSON null into `Option<T>` as None, which is the same as an
+/// absent field; this keeps the two apart: absent = None (leave the row
+/// alone), null = Some(None) (clear the row's value).
+fn null_clears<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Value>>, D::Error> {
+    let v = <Value as serde::Deserialize>::deserialize(d)?;
+    Ok(Some(if v.is_null() { None } else { Some(v) }))
 }
 
 /// webui -> engine: ask for a connectivity nudge (`claude -p "."` on haiku);
@@ -739,8 +764,17 @@ async fn engine_heartbeat(
     if let Some(a) = req.account {
         row["account"] = json!(a);
     }
+    if let Some(h) = req.hold {
+        row["hold"] = json!(h);
+    }
     if let Some(u) = req.usage {
-        row["usage"] = u;
+        row["usage"] = u.unwrap_or(Value::Null);
+    }
+    if let Some(a) = req.accounts {
+        row["accounts"] = a;
+    }
+    if let Some(n) = req.next {
+        row["next"] = n.unwrap_or(Value::Null);
     }
     if let Some(t) = req.test_result {
         row["test_result"] = t;
@@ -856,6 +890,67 @@ async fn project_migrate_priority(user: AuthUser, State(st): Ctx, Path(name): Pa
     st.store.bump_seq(&name, "workitem").await?;
     st.store.bump_seq(&name, "project").await?;
     Ok(Json(json!({"migrated": migrated, "already": false})))
+}
+
+#[derive(serde::Deserialize)]
+struct PriorityReq {
+    priority: i64,
+}
+
+/// Re-assign one item's priority in place (webui Actions -> Set priority…,
+/// 2026-09-10) without the pause -> edit -> requeue detour.  A lineage
+/// carries ONE number (children inherit exactly), so the new number is
+/// written to the item and to everything it created, transitively, open or
+/// closed — the same rule realign applies — leaving schedule templates alone.
+/// The target itself must be open: closed items stay immutable.  Every
+/// version bumps; the state, claims and locks are untouched.
+async fn workitem_priority(
+    user: AuthUser,
+    State(st): Ctx,
+    Path((name, id)): Path<(String, String)>,
+    Json(req): Json<PriorityReq>,
+) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let target = st.store.get("workitem", &name, &id).await?.ok_or_else(notfound)?;
+    if is_closed(&body_str(&target, "state")) {
+        return Err(closed_err());
+    }
+    let to = req.priority.clamp(0, PRIO_MAX);
+    let rows = st.store.query("workitem", &name).await?;
+    let by_id: HashMap<String, Value> = rows.iter().map(|r| (body_str(r, "id"), r.clone())).collect();
+    let mut kids: HashMap<String, Vec<String>> = HashMap::new();
+    for r in &rows {
+        let cb = body_str(r, "createdby");
+        if by_id.contains_key(&cb) {
+            kids.entry(cb).or_default().push(body_str(r, "id"));
+        }
+    }
+    let mut lineage: Vec<String> = vec![id.clone()];
+    let mut stack = vec![id.clone()];
+    while let Some(x) = stack.pop() {
+        for c in kids.get(&x).cloned().unwrap_or_default() {
+            if !lineage.contains(&c) {
+                lineage.push(c.clone());
+                stack.push(c);
+            }
+        }
+    }
+    let mut changed: Vec<String> = Vec::new();
+    for lid in &lineage {
+        let Some(r) = by_id.get(lid) else { continue };
+        if (lid != &id && body_str(r, "state") == "scheduled") || r.get("priority").and_then(|p| p.as_i64()) == Some(to) {
+            continue;
+        }
+        let mut row = r.clone();
+        row["priority"] = json!(to);
+        row["version"] = json!(body_u64(&row, "version") + 1);
+        st.store.put("workitem", &name, lid, &row).await?;
+        changed.push(lid.clone());
+    }
+    if !changed.is_empty() {
+        st.store.bump_seq(&name, "workitem").await?;
+    }
+    Ok(Json(json!({"id": id, "priority": to, "lineage": lineage.len(), "changed": changed})))
 }
 
 /// Band of a priority number (see iter_core PRIO_BAND_*).
@@ -1592,6 +1687,65 @@ async fn workitem_reopen(
         format!("reopened by {} (was {was})", user.sub)
     } else {
         format!("reopened by {} (was {was}): {}", user.sub, req.reason.trim())
+    };
+    let _ = append_detail(&st, &user, &name, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
+    Ok(Json(item))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct StateReq {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Move an item to ANY state by hand (webui Actions -> Change to…, decided
+/// 2026-09-10) — the escape hatch beside the shortcuts (Queue, Park, Reopen…),
+/// including closed -> closed (failed -> complete).  Users-only like reopen:
+/// the engine/agent path keeps its own transitions.  Bookkeeping mirrors the
+/// shortcuts: into a closed state stamps ts.complete when empty; out of one
+/// clears ts.complete, the bounce counter and lasterror; every move appends a
+/// "doc" row naming who, from, to and why.  Nothing is stopped or started:
+/// a session an agent is running on the item is untouched.
+async fn workitem_state(
+    user: AuthUser,
+    State(st): Ctx,
+    Path((name, id)): Path<(String, String)>,
+    body: Option<Json<StateReq>>,
+) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    if user.role == "engine" {
+        return Err(ApiError::Status(StatusCode::FORBIDDEN, "state change is users-only: the engine/agent path keeps its own transitions".into()));
+    }
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let to = req.state.trim().to_string();
+    if !iter_core::STATES.contains(&to.as_str()) {
+        return Err(bad(format!("unknown state '{to}' (one of {})", iter_core::STATES.join(", "))));
+    }
+    let mut item = st.store.get("workitem", &name, &id).await?.ok_or_else(notfound)?;
+    let was = body_str(&item, "state");
+    if was == to {
+        return Err(bad(format!("workitem is already {to}")));
+    }
+    let expect = body_u64(&item, "version");
+    item["state"] = json!(to);
+    if is_closed(&to) {
+        if body_str(&item, "ts").is_empty() && item.get("ts").and_then(|t| t.get("complete")).and_then(|c| c.as_str()).unwrap_or("").is_empty() {
+            item["ts"]["complete"] = json!(now_utc());
+        }
+    } else if is_closed(&was) {
+        item["gate_bounces"] = json!(0);
+        item["lasterror"] = json!("");
+        item["ts"]["complete"] = json!("");
+    }
+    item["version"] = json!(expect + 1);
+    st.store.put_versioned("workitem", &name, &id, &item, expect).await?;
+    st.store.bump_seq(&name, "workitem").await?;
+    let note = if req.reason.trim().is_empty() {
+        format!("state changed by {}: {was} -> {to}", user.sub)
+    } else {
+        format!("state changed by {}: {was} -> {to}: {}", user.sub, req.reason.trim())
     };
     let _ = append_detail(&st, &user, &name, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
     Ok(Json(item))

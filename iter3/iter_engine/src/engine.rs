@@ -43,6 +43,10 @@ pub struct EngineRuntime {
     budget_hold: HashMap<String, String>,
     /// project -> last cluster-health verdict announced (healthy, why)
     cluster_state: HashMap<String, (bool, String)>,
+    /// accounts are configured but none is under its stop% (set each tick):
+    /// heartbeats then carry no usage snapshot — the ambient login's numbers
+    /// would describe an account this engine is not running on
+    holding: bool,
 }
 
 use crate::usage;
@@ -112,6 +116,7 @@ impl EngineRuntime {
             running_count: Arc::new(AtomicUsize::new(0)),
             max_ticks: None,
             last_test_handled: String::new(),
+            holding: false,
             last_probe: HashMap::new(),
             budget_hold: HashMap::new(),
             cluster_state: HashMap::new(),
@@ -207,7 +212,7 @@ impl EngineRuntime {
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
             &json!({"test_result": result, "clear_test": true, "account": account,
-                    "usage": usage::snapshot_json(account, chrono::Utc::now())}),
+                    "usage": if self.holding { Value::Null } else { usage::snapshot_json(account, chrono::Utc::now()).unwrap_or(Value::Null) }}),
         );
     }
 
@@ -356,10 +361,34 @@ impl EngineRuntime {
         // idle probe refresh it, so a run's cost shows up on the next tick).
         // The account is sent even when "" (holding: nothing pickable) so the
         // record's label and its usage always describe the same account.
+        // hold: accounts are configured but none is under its stop% — usage
+        // goes up as null (the ambient login's numbers are not this engine's;
+        // showing them was the 2026-09-11 "Running on default | 5h 1%" bug)
+        // and the webui shows "Suspended, no usage left".
+        // accounts/next: every account's windows + reset times and the one
+        // that comes back first, so the record says WHEN work resumes.
+        let all_accounts: Vec<iter_core::Account> = {
+            let mut v: Vec<iter_core::Account> = Vec::new();
+            for pn in engine.projects.keys() {
+                if let Some(p) = self.projects.get(pn) {
+                    for a in &p.accounts {
+                        if !v.iter().any(|x| x.name == a.name) {
+                            v.push(a.clone());
+                        }
+                    }
+                }
+            }
+            v
+        };
+        self.holding = chosen_account.is_empty() && !all_accounts.is_empty();
+        let accounts = usage::accounts_json(&all_accounts, &in_use, now);
+        let next = usage::next_json(&accounts);
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
             &json!({"state": "Running", "account": chosen_account,
-                    "usage": usage::snapshot_json(&chosen_account, now)}),
+                    "hold": if self.holding { "all accounts at stop%" } else { "" },
+                    "usage": if self.holding { Value::Null } else { usage::snapshot_json(&chosen_account, now).unwrap_or(Value::Null) },
+                    "accounts": accounts, "next": next}),
         );
 
         // connectivity test requested from the webui: one haiku nudge, then

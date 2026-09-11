@@ -301,6 +301,76 @@ pub fn effective_pct_for(account: &str, now: DateTime<Utc>) -> u8 {
         .unwrap_or(0)
 }
 
+/// When `account` next satisfies `used < stop` on BOTH windows (unix secs).
+/// `now` when it already does.  Rules (decided 2026-09-11):
+///  - a window over its stop% clears at its `resets_at`; an expired window
+///    already reads 0 (the V2 rule effective_pct applies);
+///  - the two windows are independent — a 7d reset leaves the 5h window
+///    where it was, so an account can sit at "5h 100% | 7d 0%" for up to
+///    five hours — hence the later of the two clearing times;
+///  - overage = both windows treated as over;
+///  - stop 0 = no limit; no snapshot = unknown usage, which never blocks.
+///  None = over its stop% with no reset time on record (cannot be estimated).
+pub fn available_at(u: Option<&Usage>, stop: u8, now: DateTime<Utc>) -> Option<i64> {
+    let ts = now.timestamp();
+    let Some(u) = u else { return Some(ts) };
+    if stop == 0 {
+        return Some(ts);
+    }
+    let over = u.is_using_overage;
+    let win = |pct: f64, resets: Option<i64>| -> Option<i64> {
+        match resets {
+            Some(r) if r <= ts => Some(ts),
+            _ if !over && pct.round().clamp(0.0, 100.0) < stop as f64 => Some(ts),
+            Some(r) => Some(r),
+            None => None,
+        }
+    };
+    let t5 = win(u.five_hour_pct, u.five_hour_resets_at)?;
+    let t7 = win(u.seven_day_pct, u.seven_day_resets_at)?;
+    Some(t5.max(t7))
+}
+
+/// Every configured account's windows, reset times and `available_at`, for
+/// the engine record (webui: which account comes back first, and when).
+/// Sorted soonest-available first (unknown last), then by ladder order.
+pub fn accounts_json(accounts: &[iter_core::Account], in_use: &[String], now: DateTime<Utc>) -> Vec<Value> {
+    let mut rows: Vec<(Option<i64>, i64, Value)> = accounts
+        .iter()
+        .map(|a| {
+            let u = read_usage(&a.name);
+            let at = available_at(u.as_ref(), a.stop, now);
+            let row = json!({
+                "name": a.name, "order": a.order, "switch": a.switch, "stop": a.stop,
+                "in_use": in_use.contains(&a.name),
+                "five_hour_pct": u.as_ref().map(|u| (u.five_hour_pct * 10.0).round() / 10.0),
+                "seven_day_pct": u.as_ref().map(|u| (u.seven_day_pct * 10.0).round() / 10.0),
+                "five_hour_resets_at": u.as_ref().and_then(|u| u.five_hour_resets_at),
+                "seven_day_resets_at": u.as_ref().and_then(|u| u.seven_day_resets_at),
+                "effective_pct": u.as_ref().map(|u| u.effective_pct(now).round()),
+                "is_using_overage": u.as_ref().map(|u| u.is_using_overage).unwrap_or(false),
+                "status": u.as_ref().map(|u| u.status.clone()),
+                "ts": u.as_ref().and_then(|u| u.ts).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                "age_sec": u.as_ref().and_then(|u| u.age_sec(now)),
+                "available_at": at,
+            });
+            (at, a.order, row)
+        })
+        .collect();
+    rows.sort_by_key(|(at, order, _)| (at.is_none(), at.unwrap_or(i64::MAX), *order));
+    rows.into_iter().map(|(_, _, r)| r).collect()
+}
+
+/// The account that comes back first: {"account", "available_at"} from a
+/// sorted `accounts_json` list, or Null when nothing can be estimated.
+pub fn next_json(accounts: &[Value]) -> Value {
+    accounts
+        .iter()
+        .find(|a| a.get("available_at").and_then(|t| t.as_i64()).is_some())
+        .map(|a| json!({"account": a["name"], "available_at": a["available_at"]}))
+        .unwrap_or(Value::Null)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,4 +429,52 @@ mod tests {
         let other: Value = serde_json::from_str(r#"{"type":"result","subtype":"success"}"#).unwrap();
         assert!(usage_from_stream_event(&other).is_none());
     }
+    fn u(five: f64, r5: i64, seven: f64, r7: i64) -> Usage {
+        Usage { five_hour_pct: five, five_hour_resets_at: Some(r5), seven_day_pct: seven, seven_day_resets_at: Some(r7), ..Default::default() }
+    }
+
+    #[test]
+    fn available_at_is_the_later_window_clearing() {
+        let now = Utc::now();
+        let t = now.timestamp();
+        // under stop on both windows: now
+        assert_eq!(available_at(Some(&u(10.0, t + 100, 20.0, t + 5000)), 55, now), Some(t));
+        // 5h over, 7d under: the 5h reset
+        assert_eq!(available_at(Some(&u(103.0, t + 100, 20.0, t + 5000)), 99, now), Some(t + 100));
+        // 7d over, 5h under: the 7d reset — the 5h number is meaningless meanwhile
+        assert_eq!(available_at(Some(&u(1.0, t + 100, 99.0, t + 5000)), 99, now), Some(t + 5000));
+        // both over, 5h resets AFTER the 7d reset: the 5h reset wins
+        assert_eq!(available_at(Some(&u(100.0, t + 9000, 100.0, t + 5000)), 99, now), Some(t + 9000));
+        // an expired window already reads 0
+        assert_eq!(available_at(Some(&u(100.0, t - 1, 10.0, t + 5000)), 55, now), Some(t));
+        // exact stop% is "at stop" (engine picks only used < stop)
+        assert_eq!(available_at(Some(&u(55.0, t + 100, 0.0, t + 5000)), 55, now), Some(t + 100));
+        // 54.6 rounds to 55: at stop
+        assert_eq!(available_at(Some(&u(54.6, t + 100, 0.0, t + 5000)), 55, now), Some(t + 100));
+        // overage: both windows count as over
+        let ov = Usage { is_using_overage: true, ..u(1.0, t + 100, 2.0, t + 5000) };
+        assert_eq!(available_at(Some(&ov), 99, now), Some(t + 5000));
+        // stop 0 = no limit; no snapshot = unknown never blocks
+        assert_eq!(available_at(Some(&u(100.0, t + 100, 100.0, t + 5000)), 0, now), Some(t));
+        assert_eq!(available_at(None, 55, now), Some(t));
+        // over with no reset on record: cannot estimate
+        let nr = Usage { five_hour_pct: 100.0, ..Default::default() };
+        assert_eq!(available_at(Some(&nr), 55, now), None);
+    }
+
+    #[test]
+    fn next_is_the_soonest_account() {
+        let t = 1_800_000_000;
+        let rows = vec![
+            json!({"name": "A", "available_at": t + 500}),
+            json!({"name": "B", "available_at": Value::Null}),
+            json!({"name": "C", "available_at": t + 10}),
+        ];
+        // accounts_json sorts; next_json takes the first estimable row
+        let mut sorted = rows.clone();
+        sorted.sort_by_key(|r| (r["available_at"].is_null(), r["available_at"].as_i64().unwrap_or(i64::MAX)));
+        assert_eq!(next_json(&sorted), json!({"account": "C", "available_at": t + 10}));
+        assert_eq!(next_json(&[json!({"name": "B", "available_at": Value::Null})]), Value::Null);
+    }
+
 }

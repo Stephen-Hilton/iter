@@ -296,6 +296,7 @@ let token=null,me=null,myRole="",project=null,itemsCache=[],agentsCache=[],proje
 const filters=new Set();   // additive state filters from the pinned counts bar
 const STATES=["in-progress","queued","question","parked","paused","failed","complete","scheduled"];
 const CLOSED=new Set(["complete","failed"]); // immutable except appended "doc" rows + reopen
+const ALL_STATES=["queued","in-progress","question","parked","paused","scheduled","complete","failed"]; // Actions -> Change to…
 const UC_PREFIX="usecase:", UC_COLOR="#3b6fb6", PRIO_DEFAULT=40; // priority 0–99 (decided 2026-09-08)
 const BLOCKED_PREFIX="blocked by: "; // engine-owned wait tag (iter_core BLOCKED_TAG_PREFIX); derived, never edited here
 let ucFilter=""; // one usecase name, or ""
@@ -474,13 +475,26 @@ async function load(){
     const alive=seen&&(now-seen)<3*(e.ticksec||5)*1000+5000;
     const u=e.usage;
     const win=(label,pct,reset)=>`<br>• ${label} <b>${esc(Math.round(pct||0))}%</b> – <span title="resets ${esc(fmtTs(reset?new Date(reset*1000).toISOString():""))} ${esc(tzAbbrev())}">${esc(fmtDur(reset))}</span>`;
-    const usage=u?win("5h",u.five_hour_pct,u.five_hour_resets_at)+win("7d",u.seven_day_pct,u.seven_day_resets_at)
+    const holding=!!e.hold;   // engine: accounts configured, none under its stop% — nothing runs
+    const at=s=>s?`${fmtTs(new Date(s*1000).toISOString())} ${tzAbbrev()}`:"";
+    const pct=v=>v==null?"—":Math.round(v)+"%";
+    // every account's windows + when it is next under its stop% (engine-owned, soonest first)
+    const accts=Array.isArray(e.accounts)?e.accounts:[];
+    const acctTitle=a=>`${a.name}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
+      +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate");
+    const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${esc(a.name)} ${esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
+    const nx=e.next&&e.next.account?e.next:null;
+    const usage=holding?`<br>• 5h <b>--</b><br>• 7d <b>--</b>`
+      +(nx?`<br>• next: <b>${esc(nx.account)}</b> <span title="at ${esc(at(nx.available_at))}">${esc(nx.available_at>Date.now()/1000?"in "+fmtDur(nx.available_at):"resetting…")}</span>`:`<br>• next: <span class="kv">no reset time on record</span>`)
+      +acctList
+      :u?win("5h",u.five_hour_pct,u.five_hour_resets_at)+win("7d",u.seven_day_pct,u.seven_day_resets_at)
       +(u.is_using_overage?`<br>• <b title="a window is exhausted and requests are billing as extra usage">OVERAGE</b>`:"")
       +(u.age_sec!=null&&u.age_sec>900?`<br><span class="kv" title="snapshot age">usage snapshot ${esc(Math.round(u.age_sec/60))}m old</span>`:""):"<br>• usage: —";
+    const acctLabel=holding?"":` on <b title="${esc(accts.map(acctTitle).join("\n"))}">${esc((u&&u.account!=null?u.account:e.account)||"default")}</b>`;
     const t=e.test_result;
     const test=e.test_requested?`<span class="kv" data-testing="${esc(e.name)}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
-    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b> ${esc(e.state)}${alive?"":" (offline)"} on <b>${esc((u&&u.account!=null?u.account:e.account)||"default")}</b>${usage}
+    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b> ${holding?`<span title="${esc(e.hold)}">Suspended, no usage left</span>`:esc(e.state)}${alive?"":" (offline)"}${acctLabel}${usage}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")} · ${esc(e.host||"?")}
       <br>serves: ${esc(Object.keys(e.projects||{}).join(", ")||"—")}
       <br><button class="ghost sm" data-test="${esc(e.name)}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
@@ -757,23 +771,23 @@ function menuItems(i){
   if(CLOSED.has(s)){
     const att=i.attempt?` after ${i.attempt} attempt${i.attempt===1?"":"s"}`:"";
     return b("clone","Clone (run it again)")+(s==="complete"?b("followup","Create follow-up request"):"")+
-      b("reopen","Reopen (back to queued)…")+b("doc","Append doc…")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
+      b("reopen","Reopen (back to queued)…")+b("changeto","Change to…")+b("doc","Append doc…")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
       note(`Closed ${esc(s)}${esc(att)} — a closed item is immutable; docs can be appended, or reopen it.`)+
       b("delete","Delete from archive…","danger");
   }
   if(s==="in-progress"){
-    return b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
+    return b("setprio","Set priority…")+b("changeto","Change to…")+b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
       (i.stop_requested?note("Stop requested — the engine kills the session on its next tick and parks the item."):b("stopitem","Stop (halt mid-run)…","danger"))+
       note("Agent is running. Stop kills its session and parks the item for review; changes it already committed stay in git.");
   }
   if(s==="scheduled"){
-    return b("runnow","Run now")+b("pause","Pause schedule")+b("pauseedit","Pause &amp; edit")+
-      b("complete","Complete (retire schedule)")+b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
+    return b("runnow","Run now")+b("setprio","Set priority…")+b("pause","Pause schedule")+b("pauseedit","Pause &amp; edit")+
+      b("complete","Complete (retire schedule)")+b("changeto","Change to…")+b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
       note("Run now clones this schedule into a queued run.")+b("delete","Delete","danger");
   }
   if(s==="question"){
-    return b("answer","Answer…")+b("queue","Queue without answering")+b("park","Park")+b("pauseedit","Pause &amp; edit")+
-      b("complete","Complete (no work needed)")+b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
+    return b("answer","Answer…")+b("queue","Queue without answering")+b("park","Park")+b("setprio","Set priority…")+b("pauseedit","Pause &amp; edit")+
+      b("complete","Complete (no work needed)")+b("changeto","Change to…")+b("clone","Clone")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
       note("An agent is waiting on this decision — open the item and answer there.")+b("delete","Delete","danger");
   }
   let rows=[];
@@ -783,7 +797,7 @@ function menuItems(i){
   if((s==="parked"||s==="paused")&&i.sched&&i.sched.kind)rows.push(b("schedule","Resume schedule"));
   if(s==="parked"||s==="paused")rows.push(b("question","Move to question"));
   if(s==="paused"||s==="queued")rows.push(b("park","Park"));
-  rows.push(b("complete","Complete"));rows.push(b("pauseedit","Pause &amp; edit"));rows.push(b("clone","Clone"));rows.push(b("addtag","Add tag…"));rows.push(b("eli5","ELI5 (explain simply)"));
+  rows.push(b("setprio","Set priority…"));rows.push(b("complete","Complete"));rows.push(b("changeto","Change to…"));rows.push(b("pauseedit","Pause &amp; edit"));rows.push(b("clone","Clone"));rows.push(b("addtag","Add tag…"));rows.push(b("eli5","ELI5 (explain simply)"));
   rows.push(`<div class="sep"></div>`);rows.push(b("delete","Delete","danger"));
   return rows.join("");
 }
@@ -795,21 +809,36 @@ function openMenu(id,anchor){
   const host=anchor.closest("dialog")||document.body;
   if(menu.parentElement!==host)host.appendChild(menu);
   const fromDlg=host===dlg;
-  menu.innerHTML=`<span class="note"><b>${esc(i.name.slice(0,60))}</b> · ${esc(i.state)}</span>`+menuItems(i);
-  menu.hidden=false;menuOpenedAt=Date.now();
-  const r=anchor.getBoundingClientRect();
-  menu.style.top=Math.min(r.bottom+4,window.innerHeight-menu.offsetHeight-8)+"px";
-  menu.style.left=Math.max(8,Math.min(r.right-menu.offsetWidth,window.innerWidth-menu.offsetWidth-8))+"px";
-  menu.querySelectorAll("button[data-act]").forEach(btn=>btn.onclick=async e=>{
-    e.stopPropagation();closeMenu();
-    const act=btn.dataset.act;
+  const render=html=>{
+    menu.innerHTML=html;
+    menu.hidden=false;
+    const r=anchor.getBoundingClientRect();
+    menu.style.top=Math.min(r.bottom+4,window.innerHeight-menu.offsetHeight-8)+"px";
+    menu.style.left=Math.max(8,Math.min(r.right-menu.offsetWidth,window.innerWidth-menu.offsetWidth-8))+"px";
+    menu.querySelectorAll("button[data-act]").forEach(btn=>btn.onclick=onAct);
+  };
+  const head=`<span class="note"><b>${esc(i.name.slice(0,60))}</b> · ${esc(i.state)}</span>`;
+  const onAct=async e=>{
+    e.stopPropagation();
+    const act=e.currentTarget.dataset.act;
+    /* Change to…: a second level listing every other state (the shortcuts
+       above stay; this is the escape hatch, e.g. failed -> complete) */
+    if(act==="changeto"){
+      render(`<span class="note"><b>${esc(i.name.slice(0,60))}</b> · ${esc(i.state)} → change to…</span>`+
+        ALL_STATES.filter(s=>s!==i.state).map(s=>`<button data-act="state:${s}" class="${CLOSED.has(s)?"danger":""}">${esc(s)}</button>`).join("")+
+        `<div class="sep"></div><button data-act="back">← back</button>`);
+      return;
+    }
+    if(act==="back"){render(head+menuItems(i));return;}
+    closeMenu();
     if(act==="addtag"){if(fromDlg){dlgDirty=false;dlg.close();}return openTagPicker(i,fromDlg);}
     /* from the lightbox: close it first (forms / jumps need the list), then
        reopen it on the refreshed item for plain state changes */
     if(fromDlg&&act!=="answer"&&act!=="doc"&&act!=="eli5"){dlgDirty=false;dlg.close();}
     try{await doAction(act,i);}catch(err){alert("action failed: "+err.message);return;}
     if(fromDlg&&!["answer","doc","delete","pauseedit","clone","runnow","followup"].includes(act)&&itemsCache.some(x=>x.id===i.id))openDetail(i.id);
-  });
+  };
+  render(head+menuItems(i));menuOpenedAt=Date.now();
 }
 async function fresh(id){return api(P(id));}
 async function setState(i,state,mutate){
@@ -850,6 +879,29 @@ async function doAction(act,i){
       if(i.needs_approval){alert("Cannot run now: this item still needs a signed approval.");return;}
       if(!confirm(`Run "${i.name.slice(0,60)}" now?\nThe engine starts it on its next tick even if the agent cap is full (no other work starts until the count drops back under the cap). It still waits for any overlapping lock to clear.`))return;
       await setState(i,"queued",f=>{f.needs_approval=false;f.run_now=true;});break;}
+    default:
+      if(act.startsWith("state:")){
+        const to=act.slice(6),from=i.state;
+        const warn=to==="in-progress"?"\nNote: in-progress is engine-owned — no agent session starts from this; the engine may overwrite it."
+          :from==="in-progress"?"\nNote: this does NOT stop a running agent session — use Stop for that."
+          :CLOSED.has(to)?"\nNote: closed items are immutable afterwards (docs, tags and reopen only); items blocked by this one may flow.":"";
+        const reason=prompt(`Change "${i.name.slice(0,60)}" from ${from} to ${to}?${warn}\nReason (optional, recorded on the item):`,"");
+        if(reason===null)return;
+        await api(P(i.id)+"/state",{method:"POST",body:JSON.stringify({state:to,reason})});
+        break;
+      }
+      alert("unknown action "+act);return;
+    case "setprio":{
+      /* in-place re-prioritisation (2026-09-10): one POST, no pause/edit/requeue;
+         the whole lineage this item created follows it (children inherit exactly) */
+      const cur=i.priority??PRIO_DEFAULT;
+      const raw=prompt(`Priority for "${i.name.slice(0,60)}" — currently P${cur}.\n0–99, lower runs sooner: 0–9 do now · 10–39 use cases · 40–49 human · 50+ maintenance.\nApplies to this item and everything it created.`,String(cur));
+      if(raw===null)return;
+      const p=parseInt(raw,10);
+      if(!Number.isInteger(p)||p<0||p>99){alert("priority must be a whole number from 0 to 99");return;}
+      const r=await api(P(i.id)+"/priority",{method:"POST",body:JSON.stringify({priority:p})});
+      if(r.changed&&r.changed.length>1)console.log(`priority P${p} set on ${r.changed.length} items of the lineage`);
+      break;}
     case "park": await setState(i,"parked");break;
     case "pause": await setState(i,"paused");break;
     case "question": await setState(i,"question");break;
