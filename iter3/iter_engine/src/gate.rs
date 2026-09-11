@@ -136,6 +136,38 @@ pub fn parse_verdict(text: &str) -> Verdict {
     }
 }
 
+/// The blockers `item` still waits on (decided 2026-09-10, from pdy-dev item
+/// cb9c52c30bd6: four attempts and $59 re-measuring a block the record already
+/// declared).  Every blocker is judged with the item's own dependency rule —
+/// deep unless `blockedby_shallow` — so a blocker that closed complete while
+/// something it created is still open counts as waiting.  At dispatch every
+/// blocker was satisfied (the item could not have started otherwise), so an
+/// open one at close was declared DURING the run: the agent linked the item
+/// it cannot finish without.  Unknown ids count as satisfied, like the gate.
+pub fn waiting_on(item: &iter_core::WorkItem, items: &[iter_core::WorkItem]) -> Vec<String> {
+    use iter_core::{DepStatus, children_index, dependency_status};
+    let by_id: std::collections::HashMap<String, &iter_core::WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
+    let kids = children_index(items);
+    item.blockedby
+        .iter()
+        .filter(|b| {
+            let mut probe = item.clone();
+            probe.blockedby = vec![(*b).clone()];
+            dependency_status(&probe, &by_id, &kids) != DepStatus::Satisfied
+        })
+        .cloned()
+        .collect()
+}
+
+/// The "verify" row when the gate holds an item BEHIND its declared
+/// blockers instead of bouncing it: verdict "waiting", the open list the
+/// verifier saw, the blocker ids, and no bounce counted.
+pub fn waiting_row(bounces: u32, source: &str, open: &[String], reason: &str, waiting_on: &[String], ev: &Evidence) -> Value {
+    let mut row = verify_row(bounces, source, "waiting", open, reason, ev);
+    row["waiting_on"] = json!(waiting_on);
+    row
+}
+
 /// The "verify" detail row body written on every bounce.
 pub fn verify_row(bounce: u32, source: &str, verdict: &str, open: &[String], reason: &str, ev: &Evidence) -> Value {
     json!({
@@ -330,6 +362,40 @@ pub fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wi(id: &str, state: &str, createdby: &str, blockedby: &[&str]) -> iter_core::WorkItem {
+        iter_core::WorkItem {
+            id: id.into(), state: state.into(), createdby: createdby.into(),
+            blockedby: blockedby.iter().map(|b| b.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A declared block holds the item behind its OPEN blockers: an open
+    /// blocker, a complete blocker with an open child (deep), a failed one;
+    /// never a complete lineage, an unknown id, or (shallow) a blocker's child.
+    #[test]
+    fn waiting_on_lists_only_unsatisfied_blockers() {
+        let items = vec![
+            wi("open1", "queued", "", &[]),
+            wi("done", "complete", "", &[]),
+            wi("done_with_kid", "complete", "", &[]),
+            wi("kid", "in-progress", "done_with_kid", &[]),
+            wi("failed1", "failed", "", &[]),
+        ];
+        let me = wi("me", "in-progress", "", &["open1", "done", "done_with_kid", "failed1", "ghost"]);
+        assert_eq!(waiting_on(&me, &items), vec!["open1", "done_with_kid", "failed1"]);
+        let none = wi("me", "in-progress", "", &["done"]);
+        assert!(waiting_on(&none, &items).is_empty());
+        assert!(waiting_on(&wi("me", "in-progress", "", &[]), &items).is_empty(), "no blockers = nothing to wait on");
+        let mut shallow = wi("me", "in-progress", "", &["done_with_kid"]);
+        shallow.blockedby_shallow = true;
+        assert!(waiting_on(&shallow, &items).is_empty(), "shallow ignores the blocker's open child");
+        let row = waiting_row(2, "verifier", &["TC-ON-14".into()], "not all five tests", &["open1".into()], &Evidence::default());
+        assert_eq!(row["verdict"], "waiting");
+        assert_eq!(row["bounce"], 2);
+        assert_eq!(row["waiting_on"], json!(["open1"]));
+    }
 
     #[test]
     fn verdict_parses_wrapped_json_and_defaults_unclear() {

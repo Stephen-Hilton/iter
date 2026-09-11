@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod cluster;
+pub mod dedup;
 pub mod sched;
 pub mod widget;
 
@@ -42,6 +43,22 @@ pub const STATES: &[&str] = &[
     "complete",
     "scheduled",
 ];
+
+/// `null` reads as the default (fixed 2026-09-10): the webui's settings form
+/// sends `null` for an emptied JSON box, and `#[serde(default)]` alone only
+/// covers a MISSING key — "project does not parse: invalid type: null,
+/// expected struct DedupConfig" was the symptom.
+pub fn null_is_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+/// same, for `default_context` (whose default is the pattern list, not empty)
+fn null_is_default_context<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_else(default_context))
+}
 
 pub fn now_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -335,20 +352,20 @@ pub struct Project {
     #[serde(default)]
     pub gitrepo: String,
     /// ordered usage-gates, e.g. {">98%": 0, "else": 4}
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub maxagents: BTreeMap<String, u32>,
     /// null/absent = unlimited; 0 = spend nothing; >0 = $/day cap
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maxdailycost: Option<f64>,
     /// per-project agent overrides keyed by agent name
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub agents: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub failure: FailurePolicy,
     /// links to iter3_engine records by name
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub engines: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub accounts: Vec<Account>,
     /// the project head file (structureV2): its frontmatter names the global
     /// context files, interface/usecase dirs and scan dirs the engine surfaces
@@ -358,7 +375,7 @@ pub struct Project {
     /// context patterns every NEW item inherits when it names none
     /// ({marker} = nearest *.iter.md above the codepath, {ancestor_markers} =
     /// the markers of every ancestor directory up to topdir)
-    #[serde(default = "default_context")]
+    #[serde(default = "default_context", deserialize_with = "null_is_default_context")]
     pub default_context: Vec<String>,
     /// decided 2026-09-08: a non-green testgroup run files a `code` item to
     /// investigate and fix (a group's own `auto_fix` flag overrides per group)
@@ -372,8 +389,20 @@ pub struct Project {
     /// cluster-restart block (built 2026-09-09, see `cluster`): the nightly
     /// restart template and the window an item tagged
     /// `blocked-by-cluster-restart` waits out
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub cluster_restart: cluster::ClusterRestart,
+    /// decided 2026-09-09: tags the webui's "Add tag…" picker offers FIRST,
+    /// before the tags already in use on the project, so a project can name
+    /// the tags its agents and scripts react to (pdy-dev:
+    /// ["blocked-by-cluster-restart","blocked-until-cluster-restart"]) without
+    /// every project inheriting them. Text only; a pinned tag that is also in
+    /// use keeps that colour. Never an engine-owned `blocked by: ` tag.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub pinned_tags: Vec<String>,
+    /// repeat detection (built 2026-09-10, see `dedup`): `repeated_threshold`
+    /// = the `repeats` count at which a survivor gets the `repeated` tag
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub dedup: dedup::DedupConfig,
     /// 100 once the 0–99 priority migration ran on this project (absent =
     /// still on the 0–10 scale); read by the migration endpoint only
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -588,6 +617,14 @@ pub struct WorkItem {
     /// else claimed by the first engine to see the flag; cleared with it
     #[serde(default)]
     pub explain_engine: String,
+    /// how many times this item's fault was reported again (see `dedup`):
+    /// a stage-1 twin refused at create, or a duplicate merged into it
+    #[serde(default)]
+    pub repeats: u64,
+    /// engine-owned: ISO ts of the stage-2 dedup triage (`dedup` module);
+    /// "" = not yet — a queued item without it is held one tick for the judge
+    #[serde(default)]
+    pub dedup_checked: String,
 }
 fn default_queued() -> String { "queued".into() }
 fn default_priority() -> i64 { PRIO_BAND_HUMAN.0 }
@@ -853,6 +890,23 @@ mod tests {
         assert!(lock_pattern_matches("{topdir}/devops/deploy/*", "{topdir}/devops/deploy/corridor", "tests"));
         assert!(!lock_pattern_matches("{topdir}/devops/deploy/*", "{topdir}/devops/deploy", "tests"));
         assert!(lock_pattern_matches("{topdir}/**/{test_dir}", "{topdir}/core/repos/x/tests", "tests"));
+    }
+
+    /// The webui sends `null` for an emptied settings box; every defaulted
+    /// object/list field must read that as its default, not refuse the save.
+    #[test]
+    fn project_settings_accept_null_as_default() {
+        let p: Project = serde_json::from_value(serde_json::json!({
+            "name": "x", "state": "Running",
+            "dedup": null, "cluster_restart": null, "failure": null, "pinned_tags": null,
+            "maxagents": null, "agents": null, "engines": null, "accounts": null, "default_context": null
+        })).expect("null settings parse");
+        assert_eq!(p.dedup, dedup::DedupConfig::default());
+        assert_eq!(p.dedup.repeated_threshold, 3);
+        assert!(p.pinned_tags.is_empty() && p.engines.is_empty() && p.maxagents.is_empty());
+        assert_eq!(p.default_context, default_context(), "null default_context = the pattern list, not empty");
+        let p: Project = serde_json::from_value(serde_json::json!({"name": "x", "state": "Running", "dedup": {"repeated_threshold": 5}})).unwrap();
+        assert_eq!(p.dedup.repeated_threshold, 5);
     }
 
     #[test]

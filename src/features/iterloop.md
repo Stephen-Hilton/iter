@@ -593,8 +593,15 @@ Deliberately excluded from v1, but the file formats above leave room:
    (cf. Google's stateless-MCP infrastructure writeup:
    <https://developers.googleblog.com/scaling-ai-agent-infrastructure-with-the-mcp-stateless-updates/>)?
    It would decouple agents from binary paths and double as the web UI's backend.
-2. **Handoff guardrails beyond `max_open_workitems`:** dedup of near-identical items
-   (same type + codepath + similar title)? A lineage/depth cap on agent-created chains?
+2. **Handoff guardrails beyond `max_open_workitems`:** dedup of near-identical items —
+   BUILT in V3 on 2026-09-10 (`iter_core::dedup`, spec `iter3/plans/!iter_dedup_spec.md`):
+   stage 1 at create refuses an exact `check:<label>` + `container:<name>` twin of an open
+   item and books the repeat on it (doc row with the repeat's request text, `repeats` + 1,
+   priority halved with floor 1, `repeated` tag at `dedup.repeated_threshold`); stage 2 in
+   the engine has Sonnet judge each new item against open neighbours sharing its
+   container / check / lock scope before its first dispatch and closes a confident
+   duplicate `complete` tagged `dup of: <last 12 of the survivor>`. Still open: a
+   lineage/depth cap on agent-created chains.
 3. **Cloud packaging:** parked by choice — container or a very small EC2 both serve;
    revisit after v1.
 

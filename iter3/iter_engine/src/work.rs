@@ -219,7 +219,7 @@ fn short(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
 
-fn fetch_details(api: &Api, project: &Project, item: &WorkItem) -> Vec<Value> {
+pub(crate) fn fetch_details(api: &Api, project: &Project, item: &WorkItem) -> Vec<Value> {
     api.get(&format!("/api/projects/{}/workitems/{}/details", project.name, item.id))
         .ok()
         .and_then(|v| v.as_array().cloned())
@@ -227,7 +227,7 @@ fn fetch_details(api: &Api, project: &Project, item: &WorkItem) -> Vec<Value> {
 }
 
 /// request text is detail row key "request" (order 0), else the name
-fn request_text(details: &[Value], item: &WorkItem) -> String {
+pub(crate) fn request_text(details: &[Value], item: &WorkItem) -> String {
     details
         .iter()
         .find(|d| d.get("key").and_then(|k| k.as_str()) == Some("request"))
@@ -602,7 +602,7 @@ fn write_iter_shim(topdir: &str) -> Result<String, String> {
 /// (spec: Usage%) and the `result` line becomes the RunOut (+ session id for
 /// `--resume`).  A lone result object (older CLIs, test doubles) or plain
 /// text still parse via `parse_claude_json`.
-fn parse_claude_stream(account: &str, raw: &str) -> (String, RunOut) {
+pub(crate) fn parse_claude_stream(account: &str, raw: &str) -> (String, RunOut) {
     let mut sid = String::new();
     let mut result: Option<RunOut> = None;
     for line in raw.lines() {
@@ -671,7 +671,7 @@ fn spawn_claude_env(
 
 /// Spawn one headless claude session (json result output) billed to the
 /// chosen account; shared by the worker and the verifier.
-fn spawn_claude(
+pub(crate) fn spawn_claude(
     project: &Project,
     topdir: &str,
     account: &str,
@@ -917,6 +917,36 @@ fn wait_with_timeout(mut cmd: Command, timeout_sec: u64) -> Result<String, Strin
 }
 
 /// The gate's decision for a successful agent run.
+/// How the close gate held an item.
+enum GateHold {
+    /// the verdict bounces it: requeue (or question once the budget is spent)
+    Bounce { reason: String, to_question: bool },
+    /// the record names open blockers: queued behind them, no bounce
+    Waiting { reason: String, on: Vec<String> },
+}
+
+/// The blockers the item (re-read: the agent may have linked them this run)
+/// still waits on — `gate::waiting_on` over the project's current items.
+fn declared_blockers(api: &Api, project: &Project, item: &WorkItem) -> Vec<String> {
+    let fresh: WorkItem = match api
+        .get(&format!("/api/projects/{}/workitems/{}", project.name, item.id))
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+    {
+        Some(i) => i,
+        None => return vec![],
+    };
+    if fresh.blockedby.is_empty() {
+        return vec![];
+    }
+    let items: Vec<WorkItem> = api
+        .get(&format!("/api/projects/{}/workitems", project.name))
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    gate::waiting_on(&fresh, &items)
+}
+
 enum GateOutcome {
     Pass,
     /// the deterministic half passed and the verifier could not run twice:
@@ -1076,7 +1106,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
     }
 
     // the close gate decides what "ok" closes to
-    let mut gate_hold: Option<(String, bool)> = None; // (short reason, to_question)
+    let mut gate_hold: Option<GateHold> = None;
     if let (Ok(out), Some(ctx)) = (&result, &ctx) {
         let (outcome, ev) = run_gate(api, project, &item, out, ctx);
         if let GateOutcome::PassUnverified { reason } = &outcome {
@@ -1087,6 +1117,23 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
             );
         }
         if let GateOutcome::Hold { source, open, reason, to_human } = outcome {
+            // a declared block wins (decided 2026-09-10): when the record now
+            // names blockers that are still open — linked DURING this run,
+            // since dispatch needed them satisfied — an incomplete verdict
+            // queues the item behind them, counts no bounce and asks no human;
+            // the dependency gate re-runs it once they close.  An "unclear"
+            // verdict (to_human) still goes to the human.
+            let waiting = if to_human { vec![] } else { declared_blockers(api, project, &item) };
+            if !waiting.is_empty() {
+                put_detail("verify", "json", gate::waiting_row(item.gate_bounces, source, &open, &reason, &waiting, &ev));
+                println!(
+                    "[engine] close gate: {} '{}' is waiting on {} open blocker(s) [{}] — queued behind them, no bounce counted: {}",
+                    short(&item.id), item.name, waiting.len(),
+                    waiting.iter().map(|w| short(w)).collect::<Vec<_>>().join(", "),
+                    gate::clip(&reason, 160)
+                );
+                gate_hold = Some(GateHold::Waiting { reason: gate::clip(&reason, 300), on: waiting });
+            } else {
             let bounce = item.gate_bounces + 1;
             let to_question = to_human || item.gate_bounces >= ctx.gate.max_bounces;
             put_detail("verify", "json", gate::verify_row(bounce, source, if to_human { "unclear" } else { "incomplete" }, &open, &reason, &ev));
@@ -1099,7 +1146,8 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
                 if to_question { "-> question" } else { "-> queued" },
                 gate::clip(&reason, 200)
             );
-            gate_hold = Some((gate::clip(&reason, 500), to_question));
+            gate_hold = Some(GateHold::Bounce { reason: gate::clip(&reason, 500), to_question });
+            }
         }
     }
 
@@ -1120,10 +1168,16 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
             updated["state"] = json!("parked");
             updated["stop_requested"] = json!(false);
             updated["lasterror"] = json!(STOPPED_BY_USER);
-        } else if let Some((reason, to_question)) = &gate_hold {
+        } else if let Some(GateHold::Bounce { reason, to_question }) = &gate_hold {
             updated["state"] = json!(if *to_question { "question" } else { "queued" });
             updated["gate_bounces"] = json!(item.gate_bounces + 1);
             updated["lasterror"] = json!(format!("close gate: {reason}"));
+        } else if let Some(GateHold::Waiting { reason, on }) = &gate_hold {
+            // queued behind the declared blockers; the dispatch dependency
+            // gate holds it there and the bounce budget is untouched
+            updated["state"] = json!("queued");
+            updated["lasterror"] = json!(format!("close gate: waiting on {} open blocker(s) [{}] — {reason}", on.len(),
+                on.iter().map(|w| &w[w.len().saturating_sub(12)..]).collect::<Vec<_>>().join(", ")));
         } else if ok {
             updated["state"] = json!("complete");
             updated["ts"]["complete"] = json!(now_utc());
@@ -1172,8 +1226,9 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
         item.name,
         match (&gate_hold, ok) {
             _ if stopped => "parked (stopped by user)",
-            (Some((_, true)), _) => "question (close gate)",
-            (Some((_, false)), _) => "queued (close gate bounce)",
+            (Some(GateHold::Bounce { to_question: true, .. }), _) => "question (close gate)",
+            (Some(GateHold::Bounce { to_question: false, .. }), _) => "queued (close gate bounce)",
+            (Some(GateHold::Waiting { .. }), _) => "queued (waiting on declared blockers)",
             (None, true) => "complete",
             (None, false) => "failed/retry",
         }

@@ -253,6 +253,12 @@ described above; manual: `iter testsweep`):
    may refresh its `source_tests` snapshot in place (nicety, not contract).
    Manually opened items do NOT suppress sweep items — a refactor item makes
    no promise about test02.
+   *V3 (2026-09-10):* the record has no `source_testgroup`; the guard is the
+   general repeat key instead — the fix item carries the tags
+   `check:tests-non-green` and `container:<testgroup label>`, and iter_data
+   refuses a create whose two key tags match an open item, booking the repeat
+   on it (`iter_core::dedup`, spec `iter3/plans/!iter_dedup_spec.md`). A
+   manually opened item without those tags still does not suppress it.
 
 ## Provenance fields (workitems)
 

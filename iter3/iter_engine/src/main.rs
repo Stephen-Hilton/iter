@@ -4,6 +4,7 @@
 
 mod client;
 mod cli;
+mod dedup;
 mod engine;
 mod gate;
 mod prompt;

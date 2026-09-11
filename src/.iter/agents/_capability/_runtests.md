@@ -48,3 +48,11 @@ test, and against unimplemented code that is expected and fine. An exit greater
 than `1` means the script itself broke, which is a defect in the test, not in the
 code under test. Fix script errors where you own the tests; report them where you
 do not.
+
+## Run logs on the work item (2026-09-10)
+
+Every `iter runtests` run writes a `log_header` row (and a `log_detail` row when
+the run is not green) on the work item you are running. Runs of the SAME
+testgroup during the same attempt replace the previous run's rows rather than
+adding to them, so iterate freely: the item keeps one header (and one detail) per
+group per attempt, showing the latest result.

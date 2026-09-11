@@ -106,6 +106,19 @@ enum Verb {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Declare that the CALLING work item cannot finish until other items land:
+    /// links them as dependencies of this item (deep: they and everything they
+    /// create must close complete). When your turn then ends with NOT DONE lines,
+    /// the close gate queues this item behind them — no bounce, no human question —
+    /// and the engine re-runs it once they close.
+    Wait {
+        /// an item id or unique suffix this item must wait for (repeatable)
+        #[arg(long = "on", required = true)]
+        on: Vec<String>,
+        /// what those items must land — recorded on this item
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Append a "doc" note to a work item (the calling one by default; works on closed items).
     Doc {
         text: Option<String>,
@@ -338,10 +351,13 @@ pub fn run(args: CliArgs) {
         Verb::Ask { question, file } => ask(&e, read_arg_or_file(question, file)),
         Verb::Reject { reason } => reject(&e, &reason),
         Verb::Block { cluster_restart, reason } => block(&e, cluster_restart, reason),
+        Verb::Wait { on, reason } => wait(&e, on, reason),
         Verb::Doc { text, file, id } => doc(&e, read_arg_or_file(text, file), id),
         Verb::Critreview { file, context, max_retry, disposition, round } => critreview(&e, file, context, max_retry, disposition, round),
         Verb::Capability { .. } | Verb::Status | Verb::Other(_) | Verb::Runtests { .. } | Verb::Validate { .. }
         | Verb::Markers | Verb::Teststate { .. } | Verb::Usecase { .. } => {}
+        #[allow(unreachable_patterns)]
+        _ => {}
     }
 }
 
@@ -406,13 +422,35 @@ mod local {
         }
         let api = Api::new(&url, &token);
         let details = format!("/api/projects/{project}/workitems/{workid}/details");
-        let _ = api.post(&details, &json!({"key": "log_header", "valuetype": "text", "value": header}));
+        // one header (+ one detail) per testgroup per ATTEMPT (decided
+        // 2026-09-10: an agent iterating on its tests logged 16 runs / 31 rows
+        // on one item): a run of the same group during this attempt
+        // overwrites the previous run's rows instead of appending
+        let since = api
+            .get(&format!("/api/projects/{project}/workitems/{workid}"))
+            .ok()
+            .and_then(|i| i.get("ts").and_then(|t| t.get("start")).and_then(|s| s.as_str()).map(String::from))
+            .unwrap_or_default();
+        let existing: Vec<serde_json::Value> = api.get(&details).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let prior = prior_run_rows(&existing, &run.label, &since);
+        let header_row = json!({"key": "log_header", "valuetype": "text", "value": header});
+        match prior {
+            Some((h, _)) => { let _ = api.put(&format!("{details}/{h}"), &header_row); }
+            None => { let _ = api.post(&details, &header_row); }
+        }
+        let detail = if run.outcome == rt::Outcome::Green { String::new() } else { rt::log_detail(run) };
+        match (prior, detail.is_empty()) {
+            (Some((_, Some(d))), true) => {
+                // the earlier run was red and this one is green: say so where the old output was
+                let _ = api.put(&format!("{details}/{d}"), &json!({"key": "log_detail", "valuetype": "text",
+                    "value": format!("(green on the latest run of testgroup \"{}\" at {}; the earlier failing output was replaced)", run.label, iter_core::now_utc())}));
+            }
+            (Some((_, Some(d))), false) => { let _ = api.put(&format!("{details}/{d}"), &json!({"key": "log_detail", "valuetype": "text", "value": detail})); }
+            (_, false) => { let _ = api.post(&details, &json!({"key": "log_detail", "valuetype": "text", "value": detail})); }
+            (_, true) => {}
+        }
         if run.outcome == rt::Outcome::Green {
             return;
-        }
-        let detail = rt::log_detail(run);
-        if !detail.is_empty() {
-            let _ = api.post(&details, &json!({"key": "log_detail", "valuetype": "text", "value": detail}));
         }
         // fix items: only from full runs that are NOT an agent iterating on its
         // own code (a code/testwriter session sees red on purpose), and never
@@ -428,15 +466,13 @@ mod local {
             return;
         }
         let title = format!("Tests non-green: testgroup \"{}\" {}/{} in {}", run.label, run.pass, run.total, tg_rel);
-        let items: Vec<serde_json::Value> = api.get(&format!("/api/projects/{project}/workitems")).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        let open_dup = items.iter().any(|i| {
-            let st = i.get("state").and_then(|s| s.as_str()).unwrap_or("");
-            i.get("name").and_then(|n| n.as_str()) == Some(title.as_str()) && !matches!(st, "complete" | "failed" | "rejected" | "cancelled")
-        });
-        if open_dup {
-            println!("fix item already open for this testgroup — not filing another");
-            return;
-        }
+        // one open fix item per testgroup: the `check:` + `container:` key
+        // (iter_core::dedup, 2026-09-10) lets iter_data refuse the repeat and
+        // book it on the open item — the old exact-title match is retired
+        let key_tags = json!([
+            {"text": format!("{}tests-non-green", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""},
+            {"text": format!("{}{}", iter_core::dedup::CONTAINER_TAG_PREFIX, run.label), "color": ""},
+        ]);
         // the object under test: the parent of the nearest `tests` ancestor
         let object_dir = tg_file
             .ancestors()
@@ -461,17 +497,44 @@ mod local {
         let requestedby = if agent.is_empty() { "user".to_string() } else { format!("agent:{agent}") };
         let body = json!({
             "name": title, "agent": "code", "state": "queued",
-            "lockdirs": [lockdir], "blockedby": [], "context": [], "model": "", "tags": [],
+            "lockdirs": [lockdir], "blockedby": [], "context": [], "model": "", "tags": key_tags,
             "createdby": workid, "requestedby": requestedby, "prework": [], "postwork": [],
+            "request": request,
         });
         match api.post(&format!("/api/projects/{project}/workitems"), &body) {
+            Ok(created) if crate::cli::already_open(&created) => {
+                let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                println!("fix item already open for testgroup \"{}\": {} (repeat #{} recorded on it, now P{}) — not filing another",
+                    run.label, &id[..8.min(id.len())], created.get("repeats").and_then(|r| r.as_u64()).unwrap_or(0), created.get("priority").and_then(|p| p.as_i64()).unwrap_or(0));
+            }
             Ok(created) => {
                 let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                let _ = api.put(&format!("/api/projects/{project}/workitems/{id}/details/0"), &json!({"key": "request", "valuetype": "text", "value": request}));
                 println!("filed fix item {} (code, P{}) for testgroup \"{}\"", &id[..8.min(id.len())], created.get("priority").and_then(|p| p.as_i64()).unwrap_or(0), run.label);
             }
             Err(e) => eprintln!("could not file the fix item: {e}"),
         }
+    }
+
+    /// The rows an earlier run of `label` wrote during THIS attempt (header
+    /// rows at or after `since`, the attempt's start ts): the latest header's
+    /// order, and the order of its detail row when that row sits right after
+    /// it.  None = first run of this group this attempt (or no attempt ts).
+    pub(crate) fn prior_run_rows(details: &[serde_json::Value], label: &str, since: &str) -> Option<(i64, Option<i64>)> {
+        if since.is_empty() {
+            return None;
+        }
+        fn key(d: &serde_json::Value) -> &str { d.get("key").and_then(|k| k.as_str()).unwrap_or("") }
+        fn order(d: &serde_json::Value) -> i64 { d.get("order").and_then(|o| o.as_i64()).unwrap_or(-1) }
+        let needle = format!("testgroup \"{label}\"");
+        let header = details
+            .iter()
+            .filter(|d| key(d) == "log_header")
+            .filter(|d| d.get("ts").and_then(|t| t.as_str()).map(|t| t >= since).unwrap_or(false))
+            .filter(|d| d.get("value").and_then(|v| v.as_str()).map(|v| v.contains(&needle)).unwrap_or(false))
+            .max_by_key(|d| order(d))?;
+        let h = order(header);
+        let detail = details.iter().find(|d| order(d) == h + 1 && key(d) == "log_detail").map(|d| order(d));
+        Some((h, detail))
     }
 
     fn record_claim(claim: &str, group: &str, run: &rt::GroupRunResult, upheld: bool, park_reason: Option<&str>) {
@@ -852,6 +915,10 @@ fn add(
         "context": ctx, "model": model, "tags": tags, "usecase": usecase,
         "createdby": if e.workid.is_empty() { requestedby.clone() } else { e.workid.clone() },
         "requestedby": requestedby, "prework": [], "postwork": [],
+        // the request text rides in the create (2026-09-10): iter_data writes
+        // detail row 0 from it, and a create refused as a repeat still leaves
+        // what this item observed on the survivor
+        "request": request,
     });
     // lock scope sanity the server cannot see: a codepath that is a strict
     // ancestor of several code nodes locks an AREA, not the directory one
@@ -870,17 +937,46 @@ fn add(
         eprintln!("iter add: {w}");
     }
     let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-    let _ = e.api.put(
-        &format!("/api/projects/{}/workitems/{}/details/0", e.project, id),
-        &json!({"key": "request", "valuetype": "text", "value": request}),
-    );
+    // stage 1 repeat detection (iter_core::dedup): the same `check:` +
+    // `container:` tags as an OPEN item = no new row; the open item was told
+    // (doc row with this request text, repeats, priority) and comes back
+    if already_open(&created) {
+        println!("{}", add_outcome_line(&created));
+        return;
+    }
     if let Some(q) = question {
         let _ = e.api.post(
             &format!("/api/projects/{}/workitems/{}/details", e.project, id),
             &json!({"key": "question", "valuetype": "json", "value": question_widget(&q)}),
         );
     }
-    println!("added {} ({}) state={} agent={}", id, &id[id.len().saturating_sub(12)..], body["state"].as_str().unwrap_or(""), body["agent"].as_str().unwrap_or(""));
+    println!("{}", add_outcome_line(&created));
+}
+
+pub(crate) fn already_open(created: &Value) -> bool {
+    created.get("already_open").and_then(|b| b.as_bool()).unwrap_or(false)
+}
+
+/// The one line `iter add` prints: "added <id> …" for a new row, or
+/// "already open: <id> …" when iter_data refused a repeat (exit 0 either way —
+/// the work exists, which is what the caller wanted).
+fn add_outcome_line(created: &Value) -> String {
+    let id = created.get("id").and_then(|i| i.as_str()).unwrap_or("");
+    let tail = &id[id.len().saturating_sub(12)..];
+    if already_open(created) {
+        format!(
+            "already open: {id} ({tail}) state={} P{} repeats={} — the same check and container is already filed; your request text was recorded on it. Do not file it again.",
+            created.get("state").and_then(|s| s.as_str()).unwrap_or(""),
+            created.get("priority").and_then(|p| p.as_i64()).unwrap_or(0),
+            created.get("repeats").and_then(|r| r.as_u64()).unwrap_or(0),
+        )
+    } else {
+        format!(
+            "added {id} ({tail}) state={} agent={}",
+            created.get("state").and_then(|s| s.as_str()).unwrap_or(""),
+            created.get("agent").and_then(|a| a.as_str()).unwrap_or(""),
+        )
+    }
 }
 
 /// Warn for every lockdir that is a strict ancestor of two or more code
@@ -988,6 +1084,60 @@ fn block(e: &Env, cluster_restart: bool, reason: Option<String>) {
     println!(
         "blocked on the cluster restart — this work item parks when this turn ends, tagged `{}`, with its attempt put back to {after} (it was {before}). The engine requeues it once the cluster is back up and healthy and strips the tag when it starts; your reason is what the next run reads back. Finish your turn now.",
         iter_core::cluster::CLUSTER_RESTART_TAG
+    );
+}
+
+/// The calling item's new `blockedby`: existing links kept, new ids added
+/// once each, never the item itself.
+fn merge_blockers(existing: &[String], add: &[String], me: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = existing.to_vec();
+    for id in add {
+        if id == me {
+            return Err("an item cannot wait on itself".into());
+        }
+        if !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// `iter wait --on <id>…` (decided 2026-09-10): one versioned PUT on the
+/// calling item adding the ids to `blockedby` (deep), plus a "doc" row.  The
+/// close gate reads the links back: an incomplete verdict with open blockers
+/// queues the item behind them instead of bouncing it (gate::waiting_on).
+fn wait(e: &Env, on: Vec<String>, reason: Option<String>) {
+    let all = items(e);
+    let ids: Vec<String> = on.iter().map(|n| resolve_id(e, &all, n)).collect();
+    let mut item = calling_item(e);
+    let version = item.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+    let existing: Vec<String> = item.get("blockedby").and_then(|b| b.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    let merged = merge_blockers(&existing, &ids, &e.workid).unwrap_or_else(|m| die(m));
+    let added: Vec<&String> = merged.iter().filter(|m| !existing.contains(m)).collect();
+    if added.is_empty() {
+        println!("already waiting on {} — nothing to add", ids.iter().map(|i| &i[i.len().saturating_sub(12)..]).collect::<Vec<_>>().join(", "));
+        return;
+    }
+    let reason = reason.unwrap_or_default();
+    let reason: String = reason.trim().chars().take(400).collect();
+    item["blockedby"] = json!(merged);
+    e.api
+        .put(&format!("/api/projects/{}/workitems/{}?expect_version={}", e.project, e.workid, version), &item)
+        .unwrap_or_else(|err| die(format!("wait failed: {err}")));
+    let _ = e.api.post(
+        &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
+        &json!({"key": "doc", "valuetype": "text", "value": format!(
+            "waiting on {} (the {} agent, attempt {}){}",
+            added.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "), e.agent,
+            item.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0),
+            if reason.is_empty() { String::new() } else { format!(": {reason}") }
+        )}),
+    );
+    println!(
+        "waiting on {} — linked as {} dependenc{} of this item. Finish what you can, then end your turn listing what still waits on them as NOT DONE lines: \
+         the close gate queues this item behind them (no bounce, no question) and the engine re-runs it once they close complete.",
+        added.iter().map(|a| &a[a.len().saturating_sub(12)..]).collect::<Vec<_>>().join(", "),
+        added.len(), if added.len() == 1 { "y" } else { "ies" }
     );
 }
 
@@ -1140,3 +1290,57 @@ fn status(e: &Env) {
     std::process::exit(0);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(order: i64, key: &str, ts: &str, value: &str) -> Value {
+        json!({"order": order, "key": key, "ts": ts, "value": value})
+    }
+
+    /// Test-run rows collapse to one pair per group per attempt: the latest
+    /// header of the same group since the attempt started is reused (with
+    /// its adjacent detail row); earlier attempts, other groups and a
+    /// missing attempt ts never match.
+    #[test]
+    fn prior_run_rows_finds_this_attempts_latest_run_of_the_group() {
+        let since = "2026-09-11T00:56:24Z";
+        let details = vec![
+            row(0, "request", "2026-09-09T17:46:00Z", "…"),
+            row(1, "log_header", "2026-09-10T16:56:04Z", "Test run 2026-09-10T16:56:04Z — testgroup \"pdy-core-intake-test\" in x"),
+            row(2, "log_detail", "2026-09-10T16:56:04Z", "## failing"),
+            row(34, "log_header", "2026-09-11T00:58:27Z", "Test run 2026-09-11T00:58:27Z — testgroup \"pdy-core-intake-test\" in x"),
+            row(35, "log_header", "2026-09-11T00:59:05Z", "Test run 2026-09-11T00:59:05Z — testgroup \"pdy-core-intake-test\" in x"),
+            row(36, "log_detail", "2026-09-11T00:59:05Z", "## failing"),
+            row(39, "log_header", "2026-09-11T01:00:31Z", "Test run 2026-09-11T01:00:31Z — testgroup \"pdy-core-intake-dev\" in y"),
+        ];
+        assert_eq!(local::prior_run_rows(&details, "pdy-core-intake-test", since), Some((35, Some(36))), "latest header this attempt, with its detail");
+        assert_eq!(local::prior_run_rows(&details, "pdy-core-intake-dev", since), Some((39, None)), "green run had no detail row");
+        assert_eq!(local::prior_run_rows(&details, "other-group", since), None);
+        assert_eq!(local::prior_run_rows(&details, "pdy-core-intake-test", "2026-09-11T01:30:00Z"), None, "a new attempt starts fresh");
+        assert_eq!(local::prior_run_rows(&details, "pdy-core-intake-test", ""), None, "no attempt ts = append as before");
+    }
+
+    /// `iter wait`: links are added once each, existing ones kept, self refused.
+    #[test]
+    fn merge_blockers_adds_once_and_refuses_self() {
+        let out = merge_blockers(&["a".into()], &["b".into(), "a".into(), "b".into()], "me").unwrap();
+        assert_eq!(out, vec!["a", "b"]);
+        assert!(merge_blockers(&[], &["me".into()], "me").is_err());
+    }
+
+    /// Case 10: for a stage-1 repeat `iter add` prints "already open: <id>"
+    /// (and returns normally, exit 0); a new row still prints "added <id>".
+    #[test]
+    fn add_prints_already_open_for_a_repeat() {
+        let twin = json!({"id": "f2a3c1e4-9b1c-4d3e-8f7a-f89259cb05e0", "state": "queued", "priority": 38, "repeats": 1, "agent": "code", "already_open": true});
+        let line = add_outcome_line(&twin);
+        assert!(line.starts_with("already open: f2a3c1e4-9b1c-4d3e-8f7a-f89259cb05e0 (f89259cb05e0)"), "{line}");
+        assert!(line.contains("P38") && line.contains("repeats=1"));
+        assert!(already_open(&twin));
+        let fresh = json!({"id": "0b7e1c2d-1111-4d3e-8f7a-aaaaaaaaaaaa", "state": "queued", "priority": 40, "agent": "code"});
+        assert_eq!(add_outcome_line(&fresh), "added 0b7e1c2d-1111-4d3e-8f7a-aaaaaaaaaaaa (aaaaaaaaaaaa) state=queued agent=code");
+        assert!(!already_open(&fresh));
+    }
+}

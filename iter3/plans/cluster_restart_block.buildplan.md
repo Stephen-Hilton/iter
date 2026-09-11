@@ -140,7 +140,7 @@ Until the above ships:
    This parks the item and puts that sentence in `lasterror`, which the next run
    reads back.
 3. The nightly window re-queues it. `requeue_after_restart.sh` takes a repeatable `--tag TEXT`
-   (`requeue_after_restart.sh:146-159`; its default is `awaiting-cluster-restart`),
+   (`requeue_after_restart.sh:146-159`; its default is `blocked-until-cluster-restart`),
    so the window passes it a second time for `blocked-by-cluster-restart`; it moves `parked` and `paused` items to
    `queued`, removes the tag, and appends a `doc` row naming the window's time and
    the env-status exit code.

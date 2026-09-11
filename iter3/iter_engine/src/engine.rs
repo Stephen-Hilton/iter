@@ -27,6 +27,12 @@ pub struct EngineRuntime {
     /// ELI5 runs in flight (spec: Explain / ELI5): outside the cap, never in
     /// `running`, so they neither count toward maxagents nor delay a drain
     explaining: Vec<(String, std::thread::JoinHandle<()>)>,
+    /// stage-2 dedup triages in flight (crate::dedup, 2026-09-10): the item
+    /// is held out of dispatch while its judge runs on its own thread
+    triaging: Vec<(String, std::thread::JoinHandle<()>)>,
+    /// items whose triage finished this process (the cache may not show the
+    /// stamp for a tick; never start a second judge on the same item)
+    triaged: std::collections::HashSet<String>,
     running_count: Arc<AtomicUsize>,
     pub max_ticks: Option<u64>,
     /// test_requested value already answered (never run the same nudge twice)
@@ -71,6 +77,9 @@ struct Wait {
     holders: Vec<(String, String)>,
 }
 
+/// The wait reason while the stage-2 dedup judge runs (renders "blocked by: dedup triage").
+const DEDUP_TRIAGE_REASON: &str = "dedup triage";
+
 /// "2026-09-07T14:05:31Z" -> "14:05Z" for the retry-after tag
 fn hhmm(iso: &str) -> String {
     if iso.len() >= 16 { format!("{}Z", &iso[11..16]) } else { iso.to_string() }
@@ -98,6 +107,8 @@ impl EngineRuntime {
             deferred: HashMap::new(),
             running: Vec::new(),
             explaining: Vec::new(),
+            triaging: Vec::new(),
+            triaged: std::collections::HashSet::new(),
             running_count: Arc::new(AtomicUsize::new(0)),
             max_ticks: None,
             last_test_handled: String::new(),
@@ -147,7 +158,10 @@ impl EngineRuntime {
             if let Some(max) = self.max_ticks {
                 if ticks >= max {
                     println!("[engine] max ticks reached, draining running work");
-                    while self.prune_running() > 0 || { self.explaining.retain(|(_, h)| !h.is_finished()); !self.explaining.is_empty() } {
+                    while self.prune_running() > 0
+                        || { self.explaining.retain(|(_, h)| !h.is_finished()); !self.explaining.is_empty() }
+                        || { self.triaging.retain(|(_, h)| !h.is_finished()); !self.triaging.is_empty() }
+                    {
                         std::thread::sleep(Duration::from_millis(200));
                     }
                     return;
@@ -192,7 +206,7 @@ impl EngineRuntime {
         println!("[engine] connectivity test {}", if result["ok"].as_bool().unwrap_or(false) { "OK" } else { "FAILED" });
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
-            &json!({"test_result": result, "clear_test": true,
+            &json!({"test_result": result, "clear_test": true, "account": account,
                     "usage": usage::snapshot_json(account, chrono::Utc::now())}),
         );
     }
@@ -339,7 +353,9 @@ impl EngineRuntime {
 
         // heartbeat: actual state + account + the account's usage snapshot,
         // every tick (every claude session's rate_limit_event line and the
-        // idle probe refresh it, so a run's cost shows up on the next tick)
+        // idle probe refresh it, so a run's cost shows up on the next tick).
+        // The account is sent even when "" (holding: nothing pickable) so the
+        // record's label and its usage always describe the same account.
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
             &json!({"state": "Running", "account": chosen_account,
@@ -667,9 +683,21 @@ impl EngineRuntime {
         for i in items.iter().filter(|i| i.state == "parked" && cluster::blocks(i, cluster_healthy)) {
             waits.insert(i.id.clone(), Wait { reason: Some(CLUSTER_RESTART_REASON.into()), holders: vec![] });
         }
+        // finished triages: remember them (the cache may lag the stamp a tick)
+        self.triaging.retain(|(id, h)| {
+            if h.is_finished() {
+                self.triaged.insert(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let in_triage = |i: &WorkItem| self.triaging.iter().any(|(id, _)| id == &i.id);
         for i in items.iter().filter(|i| i.state == "queued") {
             let mut w = Wait::default();
-            if i.needs_approval {
+            if in_triage(i) {
+                w.reason = Some(DEDUP_TRIAGE_REASON.into());
+            } else if i.needs_approval {
                 w.reason = Some("needs approval".into());
             } else if !i.retry_after.is_empty() && i.retry_after > now_iso {
                 w.reason = Some(format!("retry after {}", hhmm(&i.retry_after)));
@@ -689,6 +717,40 @@ impl EngineRuntime {
             self.reconcile_waits(project, &items, &waits);
             return;
         }
+
+        // stage-2 dedup triage (crate::dedup, 2026-09-10): every newly created
+        // queued item is judged against its open neighbours BEFORE its first
+        // dispatch — on its own thread, one tick of hold, never when the
+        // project is held (the judge spends).  A judge failure stamps the
+        // item and it dispatches next tick as today.
+        let awaiting_triage: Vec<&WorkItem> = items
+            .iter()
+            .filter(|i| crate::dedup::needs_triage(i) && !self.triaged.contains(&i.id) && !in_triage(i))
+            .collect();
+        for i in awaiting_triage {
+            let api = self.api.clone();
+            let project_c = project.clone();
+            let topdir_c = topdir.to_string();
+            let snapshot = items.clone();
+            let item = i.clone();
+            let account = account_name.clone();
+            let agent_def = self.agents.get(iter_core::dedup::JUDGE_AGENT).cloned().unwrap_or(Value::Null);
+            let handle = std::thread::spawn(move || {
+                let judge = crate::dedup::ClaudeJudge {
+                    api: &api, project: &project_c, topdir: &topdir_c, account: &account, agent_def: &agent_def, workid: &item.id,
+                };
+                crate::dedup::triage(&api, &project_c, &snapshot, &item, &judge);
+            });
+            self.triaging.push((i.id.clone(), handle));
+            if let Some(w) = waits.get_mut(&i.id) {
+                w.reason.get_or_insert_with(|| DEDUP_TRIAGE_REASON.into());
+            }
+        }
+        let held_for_triage: std::collections::HashSet<String> = items
+            .iter()
+            .filter(|i| self.triaging.iter().any(|(id, _)| id == &i.id) || (crate::dedup::needs_triage(i) && !self.triaged.contains(&i.id)))
+            .map(|i| i.id.clone())
+            .collect();
 
         // Run Now (operator override, 2026-09-04): a queued item flagged run_now
         // starts as soon as its dependencies are complete and no lock overlaps,
@@ -722,6 +784,7 @@ impl EngineRuntime {
         let mut queued: Vec<&WorkItem> = items
             .iter()
             .filter(|i| i.state == "queued" && !i.needs_approval && !started_now.contains(&i.id))
+            .filter(|i| !held_for_triage.contains(&i.id)) // stage-2 dedup: judged before the first dispatch
             .filter(|i| i.retry_after.is_empty() || i.retry_after <= now_iso) // failure backoff
             .filter(|i| !cluster::blocks(i, cluster_healthy)) // cluster-restart block
             .filter(|i| {

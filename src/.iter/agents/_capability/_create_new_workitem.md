@@ -185,6 +185,57 @@ judgment lives and run mechanical work cheap.
 A plan agent filing a programme sets this per child, because it is the one agent that
 knows which slices are typing and which are thinking.
 
+## When YOUR item cannot finish until another item lands: `iter wait`
+
+Sometimes the work you are running turns out to need something another item must
+build first — an operation in a container outside your lock, a client that a
+different lineage generates. Do not re-measure and re-explain that block every
+attempt, and do not describe the dependency only in prose. Link it:
+
+    "$ITER_BIN" wait --on <workid-or-suffix> [--on <another>] --reason "<what must land first>"
+
+That makes the named items dependencies of YOUR item (deep: they and everything
+they create must close complete). Then finish what you can and end your turn
+listing what still waits on them as `NOT DONE:` lines. The close gate sees the
+links and queues your item BEHIND them — no bounce is counted and no human is
+asked — and the engine re-runs your item once they close, with the open list as
+your "previous attempt" feedback. Use `iter add` first when the blocking work has
+no item yet, then `iter wait --on` the id it prints.
+
+## `check:` and `container:` tags — the engine merges repeats (built 2026-09-10)
+
+A work item may sit in the queue for hours, and the thing that made you file it can
+fire again in every later run or in another agent's session. The engine looks for a
+repeat BEFORE it makes a second row, in two stages, and you feed the first one with two
+tags:
+
+    "$ITER_BIN" add --project "$ITER_PROJECT" --type code \
+      --tag "check:<the rule or check that fired>" --tag "container:<the component or container it fired on>" \
+      --title "..." --mainwork "..."
+
+- **`container:<name>`** — the component, service, container or module the item is
+  about. SHOULD be set whenever the item is about one identifiable thing.
+- **`check:<label>`** — the short fixed label of the rule, test group or check that
+  raised it (`check:rollingupdate-guarded-analysis`, `check:tests-non-green`). MAY be
+  set when a named rule fired; leave it off for a defect you found by reading.
+
+**Stage 1, exact, at create:** when BOTH tags are present and an OPEN item already
+carries the same two, no new item is made. `iter add` prints
+`already open: <workid> …` and exits 0: the open item was told (a `doc` row with your
+request text, its `repeats` count up by one, its priority halved so repeats climb the
+queue, and the `repeated` tag once repeats reach the project's threshold). Treat that
+line as success: reference the workid it names, do not retry with different words. A
+CLOSED twin does not block — the fault has recurred, and the new item carries a
+`doc` row naming the closed one.
+
+**Stage 2, judged, before dispatch:** every new item is compared by a short read-only
+Sonnet session against open items that share its container, its check, or its lock
+scope. A confident match closes the NEWER item `complete` with the tag
+`dup of: <last 12 of the survivor's id>` and books the repeat on the survivor; an
+unsure match leaves a "may overlap with <id>" note on both and runs both. So an item
+you filed may close within a minute of being created without any agent running it —
+that is the merge, not a failure; the survivor's id is in the tag.
+
 ## `source_testgroup` — carry the provenance
 
 When you create an item because a testgroup is red — or you are escalating an item

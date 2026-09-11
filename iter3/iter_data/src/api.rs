@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
-use iter_core::{LockRow, Project, WebuiUser, WorkItem, check_lockshape, lockshape_for, now_utc, widget, pick_unused_priority, usecase_tags, PRIO_BAND_HUMAN, PRIO_BAND_MAINT, PRIO_BAND_USECASE, PRIO_MAX, USECASE_TAG_COLOR, USECASE_TAG_PREFIX};
+use iter_core::{BLOCKED_TAG_PREFIX, LockRow, dedup, Project, WebuiUser, WorkItem, check_lockshape, lockshape_for, now_utc, widget, pick_unused_priority, usecase_tags, PRIO_BAND_HUMAN, PRIO_BAND_MAINT, PRIO_BAND_USECASE, PRIO_MAX, USECASE_TAG_COLOR, USECASE_TAG_PREFIX};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,6 +164,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{name}/workitems/{id}/reopen", post(workitem_reopen))
         .route("/api/projects/{name}/workitems/{id}/explain", post(workitem_explain).delete(workitem_explained))
         .route("/api/projects/{name}/workitems/{id}/explain/claim", post(workitem_explain_claim))
+        .route("/api/projects/{name}/workitems/{id}/duplicate_of", post(workitem_duplicate_of))
         // locks
         .route("/api/projects/{name}/locks", get(locks_list))
         .route("/api/projects/{name}/locks/acquire", post(lock_acquire))
@@ -422,9 +423,33 @@ async fn project_put(
     if !["Running", "Draining", "Stopped"].contains(&parsed.state.as_str()) {
         return Err(bad("project state must be Running|Draining|Stopped"));
     }
+    check_pinned_tags(&parsed.pinned_tags)?;
+    // an emptied settings box arrives as null (fixed 2026-09-10): drop such
+    // keys so the stored row reads as "absent = default" on every reader,
+    // engines running an older build included
+    let mut body = body;
+    if let Some(o) = body.as_object_mut() {
+        o.retain(|_, v| !v.is_null());
+    }
     st.store.put("project", &name, NOSK, &body).await?;
     st.store.bump_seq(&name, "project").await?;
     Ok(Json(body))
+}
+
+/// `project.pinned_tags` (decided 2026-09-09): plain tag texts the webui
+/// offers first.  Blank entries are a typo, and an engine-owned `blocked by: `
+/// tag would be deleted by the next tick's `reconcile_waits`, so both are
+/// refused here rather than silently ignored.
+fn check_pinned_tags(tags: &[String]) -> Result<(), ApiError> {
+    for t in tags {
+        if t.trim().is_empty() {
+            return Err(bad("pinned_tags: blank entry"));
+        }
+        if t.starts_with(BLOCKED_TAG_PREFIX) {
+            return Err(bad(format!("pinned_tags: \"{t}\" is engine-owned (\"{BLOCKED_TAG_PREFIX}…\" tags are derived every tick and would be removed)")));
+        }
+    }
+    Ok(())
 }
 
 async fn project_delete(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -642,8 +667,13 @@ async fn engine_put(
 struct HeartbeatReq {
     #[serde(default)]
     state: String,
+    /// the account the engine picked this tick; "" = none pickable (holding,
+    /// or a single-account setup on the ambient CLI login) and is STORED, so
+    /// the label always names the account whose `usage` rides with it.
+    /// Absent = leave the label alone (2026-09-10: an ignored "" left the last
+    /// real name on the record while the default login's usage replaced it).
     #[serde(default)]
-    account: String,
+    account: Option<String>,
     /// latest usage snapshot for the active account (engine-owned)
     #[serde(default)]
     usage: Option<Value>,
@@ -706,8 +736,8 @@ async fn engine_heartbeat(
     if !req.state.is_empty() {
         row["state"] = json!(req.state);
     }
-    if !req.account.is_empty() {
-        row["account"] = json!(req.account);
+    if let Some(a) = req.account {
+        row["account"] = json!(a);
     }
     if let Some(u) = req.usage {
         row["usage"] = u;
@@ -1001,12 +1031,209 @@ async fn workitem_create(
         ));
     }
     let mut body = body;
+    // the request text may ride in the create body (decided 2026-09-10): it
+    // becomes detail row 0 ("request"), and a create refused as a repeat can
+    // still leave what it observed on the survivor
+    let request = body.get("request").and_then(|r| r.as_str()).map(String::from).unwrap_or_default();
+    if let Some(o) = body.as_object_mut() {
+        o.remove("request");
+    }
     let mut warnings = place_new_item(&st, &name, &mut body).await?;
+    // stage 1 repeat detection (iter_core::dedup, built 2026-09-10): a
+    // request carrying both `check:` and `container:` tags is a repeat of any
+    // OPEN item with the same two — no second row; the twin is told (doc row,
+    // repeats, priority) and returned with `already_open`.  A CLOSED twin
+    // does not block: the fault has recurred, and the new item says so.
+    let mut recurrence: Option<(String, String)> = None;
+    if let Some(key) = dedup::key_of_row(&body) {
+        let rows = st.store.query("workitem", &name).await?;
+        let twins: Vec<&Value> = rows.iter().filter(|r| dedup::key_of_row(r).as_ref() == Some(&key)).collect();
+        let received = |r: &Value| r.get("ts").map(|t| body_str(t, "receive")).unwrap_or_default();
+        if let Some(open) = twins.iter().filter(|r| dedup::is_open_row(r)).min_by_key(|r| received(r)) {
+            let source = repeat_source(&body);
+            let mut survivor = record_repeat(&st, &user, &name, open, &source, "a create request refused as a repeat", &request).await?;
+            survivor["already_open"] = json!(true);
+            return Ok(Json(survivor));
+        }
+        let completed = |r: &Value| r.get("ts").map(|t| body_str(t, "complete")).unwrap_or_default();
+        if let Some(closed) = twins.iter().filter(|r| is_closed(&body_str(r, "state"))).max_by_key(|r| completed(r)) {
+            recurrence = Some((body_str(closed, "id"), completed(closed)));
+        }
+    }
     let (id, body) = normalize_new_item(&name, body)?;
     warnings.extend(lockshape_findings(&st, &name, &body).await?);
     st.store.put_versioned("workitem", &name, &id, &body, 0).await?;
     st.store.bump_seq(&name, "workitem").await?;
+    if !request.is_empty() {
+        let row = prepare_detail(&user, &id, 0, json!({"key": "request", "valuetype": "text", "value": request}))?;
+        st.store.put("workitem_detail", &id, &detail_sk(0), &row).await?;
+        st.store.bump_seq(&name, "workitem_detail").await?;
+    }
+    if let Some((closed_id, when)) = recurrence {
+        let note = format!("recurrence of {closed_id}, which closed {}", if when.is_empty() { "earlier".to_string() } else { when });
+        let _ = append_detail(&st, &user, &name, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
+    }
     Ok(Json(with_warnings(body, warnings)))
+}
+
+/// Who a repeat came from, for the survivor's "seen again" row.
+fn repeat_source(row: &Value) -> String {
+    let r = body_str(row, "requestedby");
+    if !r.is_empty() {
+        return r;
+    }
+    body_str(row, "createdby")
+}
+
+/// The survivor's bookkeeping for one observed repeat (iter_core::dedup,
+/// 2026-09-10) — every time, in both stages: a "doc" row "seen again <UTC>
+/// by <source>" carrying the repeat's request text (a repeat is evidence),
+/// `repeats` + 1, priority halved (floor 1), and the `repeated` tag once
+/// `repeats` reaches the project's `dedup.repeated_threshold`.  A versioned
+/// write, re-read and retried on a lost race.  Returns the written row.
+async fn record_repeat(
+    st: &Arc<AppState>,
+    user: &AuthUser,
+    project: &str,
+    survivor: &Value,
+    source: &str,
+    via: &str,
+    request: &str,
+) -> Result<Value, ApiError> {
+    let threshold = st
+        .store
+        .get("project", project, NOSK)
+        .await?
+        .and_then(|p| serde_json::from_value::<Project>(p).ok())
+        .map(|p| p.dedup.repeated_threshold)
+        .unwrap_or_else(|| dedup::DedupConfig::default().repeated_threshold);
+    let id = body_str(survivor, "id");
+    let mut row = survivor.clone();
+    for attempt in 0..6 {
+        if attempt > 0 {
+            row = st.store.get("workitem", project, &id).await?.ok_or_else(notfound)?;
+        }
+        let expect = body_u64(&row, "version");
+        let out = dedup::apply_repeat(&mut row, threshold);
+        row["version"] = json!(expect + 1);
+        match st.store.put_versioned("workitem", project, &id, &row, expect).await {
+            Ok(()) => {
+                st.store.bump_seq(project, "workitem").await?;
+                let now = now_utc();
+                let note = format!(
+                    "{}\n\n(repeat #{}; priority P{} -> P{}{})",
+                    dedup::seen_again_note(&now, source, via, request),
+                    out.repeats, out.priority_from, out.priority_to,
+                    if out.newly_repeated { format!("; tagged `{}`", dedup::REPEATED_TAG) } else { String::new() }
+                );
+                let _ = append_detail(st, user, project, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
+                return Ok(row);
+            }
+            Err(StorageError::Conflict(_)) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(ApiError::Status(StatusCode::CONFLICT, "could not record the repeat on the survivor (contention)".into()))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DuplicateReq {
+    survivor: String,
+    /// one sentence from the judge, or "same check and container"
+    #[serde(default)]
+    reason: String,
+    /// other open items the judge also called the same fault (noted on the survivor)
+    #[serde(default)]
+    others: Vec<String>,
+}
+
+/// Merge (iter_core::dedup, 2026-09-10): close THIS item as a duplicate of
+/// `survivor` — state `complete` (never a new state), the tag
+/// `dup of: <last 12 of the survivor>`, a "doc" row naming the survivor and
+/// the reason — and run the survivor's repeat bookkeeping with this item's
+/// request text.  Refused when either side is closed or in progress: a
+/// running item is never closed under its agent, and a running or finished
+/// item never absorbs new evidence unseen.
+async fn workitem_duplicate_of(
+    user: AuthUser,
+    State(st): Ctx,
+    Path((name, id)): Path<(String, String)>,
+    Json(req): Json<DuplicateReq>,
+) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let dup = st.store.get("workitem", &name, &id).await?.ok_or_else(notfound)?;
+    let refuse = |what: &str, why: String| ApiError::Status(StatusCode::CONFLICT, format!("{what} {why}: nothing merged"));
+    let dstate = body_str(&dup, "state");
+    if !dedup::is_open_row(&dup) {
+        return Err(refuse("the duplicate", format!("is {dstate}")));
+    }
+    if dstate == "in-progress" {
+        return Err(refuse("the duplicate", "is in progress".into()));
+    }
+    let survivor_id = req.survivor.trim().to_string();
+    if survivor_id.is_empty() || survivor_id == id {
+        return Err(bad("survivor must name another workitem"));
+    }
+    let survivor = st
+        .store
+        .get("workitem", &name, &survivor_id)
+        .await?
+        .ok_or_else(|| ApiError::Status(StatusCode::NOT_FOUND, "survivor not found".into()))?;
+    let sstate = body_str(&survivor, "state");
+    if !dedup::is_open_row(&survivor) {
+        return Err(refuse("the survivor", format!("is {sstate}")));
+    }
+    if sstate == "in-progress" {
+        return Err(refuse("the survivor", "is in progress".into()));
+    }
+    let reason = if req.reason.trim().is_empty() { "same check and container".to_string() } else { req.reason.trim().to_string() };
+    // close the duplicate
+    let now = now_utc();
+    let expect = body_u64(&dup, "version");
+    let mut closed = dup.clone();
+    closed["state"] = json!("complete");
+    closed["ts"]["complete"] = json!(now);
+    closed["dedup_checked"] = json!(now);
+    closed["version"] = json!(expect + 1);
+    let dup_tag = dedup::dup_of_tag(&survivor_id);
+    let mut tags: Vec<Value> = closed
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !t.get("text").and_then(|x| x.as_str()).map(|x| x.starts_with(BLOCKED_TAG_PREFIX)).unwrap_or(false))
+        .collect();
+    if !tags.iter().any(|t| t.get("text").and_then(|x| x.as_str()) == Some(dup_tag.text.as_str())) {
+        tags.push(json!({"text": dup_tag.text, "color": dup_tag.color}));
+    }
+    closed["tags"] = json!(tags);
+    match st.store.put_versioned("workitem", &name, &id, &closed, expect).await {
+        Ok(()) => {}
+        Err(StorageError::Conflict(_)) => {
+            return Err(ApiError::Status(StatusCode::CONFLICT, "the duplicate changed underneath the merge: re-read and retry".into()));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    st.store.bump_seq(&name, "workitem").await?;
+    let _ = append_detail(&st, &user, &name, &id, json!({"key": DOC_KEY, "valuetype": "text",
+        "value": format!("Duplicate of {survivor_id}: {reason}")})).await?;
+    // the survivor: seen again, with everything the duplicate observed
+    let request = st
+        .store
+        .query("workitem_detail", &id)
+        .await?
+        .iter()
+        .find(|d| body_str(d, "key") == "request")
+        .map(|d| body_str(d, "value"))
+        .unwrap_or_default();
+    let via = if req.others.is_empty() {
+        format!("duplicate {id} merged here")
+    } else {
+        format!("duplicate {id} merged here; also judged the same fault: {}", req.others.join(", "))
+    };
+    let survivor = record_repeat(&st, &user, &name, &survivor, &repeat_source(&dup), &via, &request).await?;
+    Ok(Json(json!({"duplicate": closed, "survivor": survivor})))
 }
 
 async fn workitem_get(
@@ -1550,5 +1777,235 @@ mod tests {
         let reopened = json!({"id":"a","state":"queued","priority":5,"tags":[],"version":3});
         assert!(!tags_only_change(&cur, &reopened));
         assert!(is_closed("complete") && is_closed("failed") && !is_closed("question"));
+    }
+
+    /// An emptied settings box (null) is accepted and never stored.
+    #[tokio::test]
+    async fn project_put_accepts_and_strips_null_settings() {
+        let st = mem();
+        let body = json!({"name": "p", "state": "Running", "gitrepo": "", "dedup": null, "cluster_restart": null, "pinned_tags": null, "maxdailycost": 5});
+        let out = match project_put(admin(), State(st.clone()), Path("p".into()), Json(body)).await {
+            Ok(Json(v)) => v,
+            Err(ApiError::Status(c, m)) => panic!("refused: {c} {m}"),
+            Err(_) => panic!("conflict"),
+        };
+        assert!(out.get("dedup").is_none() && out.get("cluster_restart").is_none() && out.get("pinned_tags").is_none());
+        let stored = st.store.get("project", "p", NOSK).await.unwrap().unwrap();
+        assert!(!stored.as_object().unwrap().values().any(|v| v.is_null()), "no null is ever stored: {stored}");
+        assert_eq!(stored["maxdailycost"], json!(5));
+    }
+
+    #[test]
+    fn pinned_tags_round_trip_and_refuse_engine_owned() {
+        // absent = empty, present = kept verbatim, in order
+        let p: Project = serde_json::from_value(json!({"name":"x","state":"Running"})).unwrap();
+        assert!(p.pinned_tags.is_empty());
+        let p: Project = serde_json::from_value(json!({"name":"x","state":"Running",
+            "pinned_tags":["blocked-by-cluster-restart","blocked-until-cluster-restart"]})).unwrap();
+        assert_eq!(p.pinned_tags, vec!["blocked-by-cluster-restart", "blocked-until-cluster-restart"]);
+        assert!(check_pinned_tags(&p.pinned_tags).is_ok());
+        // refusals: blank, and the engine-owned prefix
+        assert!(check_pinned_tags(&["ok".into(), "  ".into()]).is_err());
+        assert!(check_pinned_tags(&["blocked by: cluster restart".into()]).is_err());
+    }
+
+    // ---------- dedup (iter3/plans/!iter_dedup_spec.md, 2026-09-10) ----------
+    // Handlers called directly on an in-memory sqlite store: no server, no model.
+
+    fn mem() -> Arc<AppState> {
+        Arc::new(AppState { store: Arc::new(crate::sqlite::SqliteBackend::open(":memory:").unwrap()), secret: b"test".to_vec() })
+    }
+    fn admin() -> AuthUser {
+        AuthUser { sub: "tester".into(), role: "admin".into() }
+    }
+    async fn create(st: &Arc<AppState>, body: Value) -> Value {
+        match workitem_create(admin(), State(st.clone()), Path("p".into()), Json(body)).await {
+            Ok(Json(v)) => v,
+            Err(ApiError::Status(code, msg)) => panic!("create failed: {code} {msg}"),
+            Err(ApiError::Conflict(v)) => panic!("create conflict: {v}"),
+        }
+    }
+    fn keyed(name: &str, prio: i64, check: &str, container: &str, request: &str) -> Value {
+        json!({"name": name, "agent": "code", "priority": prio, "requestedby": "user", "request": request,
+               "tags": [{"text": format!("check:{check}"), "color": ""}, {"text": format!("container:{container}"), "color": ""}]})
+    }
+    async fn rows(st: &Arc<AppState>) -> Vec<Value> {
+        st.store.query("workitem", "p").await.unwrap()
+    }
+    async fn details(st: &Arc<AppState>, id: &str) -> Vec<Value> {
+        let mut d = st.store.query("workitem_detail", id).await.unwrap();
+        d.sort_by_key(|r| r.get("order").and_then(|o| o.as_i64()).unwrap_or(0));
+        d
+    }
+    fn tag_texts(row: &Value) -> Vec<String> {
+        row["tags"].as_array().unwrap().iter().map(|t| body_str(t, "text")).collect()
+    }
+    /// a fresh row carries no `repeats` field at all (the create body is stored as sent)
+    fn repeats(row: &Value) -> u64 {
+        row.get("repeats").and_then(|r| r.as_u64()).unwrap_or(0)
+    }
+
+    /// Case 1: same check + container, open twin → the twin comes back with
+    /// `already_open`, no new row, repeats 1, priority halved, doc row with
+    /// the repeat's request text.
+    #[tokio::test]
+    async fn stage1_open_twin_is_returned_not_duplicated() {
+        let st = mem();
+        let a = create(&st, keyed("clearing cannot be measured", 77, "rollingupdate-guarded-analysis", "pdy_core_clearing", "first report")).await;
+        assert!(a.get("already_open").is_none());
+        let b = create(&st, keyed("clearing cannot be measured (again)", 77, "rollingupdate-guarded-analysis", "pdy_core_clearing", "second report, run 2")).await;
+        assert_eq!(b["already_open"], json!(true));
+        assert_eq!(b["id"], a["id"]);
+        assert_eq!(b["repeats"], json!(1));
+        assert_eq!(b["priority"], json!(38));
+        assert_eq!(rows(&st).await.len(), 1, "no second row");
+        let d = details(&st, a["id"].as_str().unwrap()).await;
+        assert_eq!(body_str(&d[0], "key"), "request");
+        assert_eq!(body_str(&d[0], "value"), "first report");
+        assert_eq!(body_str(&d[1], "key"), "doc");
+        let note = body_str(&d[1], "value");
+        assert!(note.starts_with("seen again ") && note.contains("by user") && note.contains("second report, run 2"), "{note}");
+    }
+
+    /// Case 2: same check, different container → a new row.
+    #[tokio::test]
+    async fn stage1_same_check_different_container_is_new() {
+        let st = mem();
+        let a = create(&st, keyed("clearing", 77, "rollingupdate-guarded-analysis", "pdy_core_clearing", "")).await;
+        let b = create(&st, keyed("authority", 77, "rollingupdate-guarded-analysis", "pdy_core_authority", "")).await;
+        assert!(b.get("already_open").is_none());
+        assert_ne!(a["id"], b["id"]);
+        assert_eq!(rows(&st).await.len(), 2);
+        assert_eq!(repeats(&a), 0);
+    }
+
+    /// Case 3: same key, twin closed complete → a new row carrying the
+    /// recurrence doc row; the closed twin is untouched.
+    #[tokio::test]
+    async fn stage1_closed_twin_recurs_as_new_item() {
+        let st = mem();
+        let a = create(&st, keyed("clearing", 77, "rule", "pdy_core_clearing", "")).await;
+        let aid = a["id"].as_str().unwrap().to_string();
+        let mut closed = a.clone();
+        closed["state"] = json!("complete");
+        closed["ts"]["complete"] = json!("2026-09-10T07:00:00Z");
+        st.store.put("workitem", "p", &aid, &closed).await.unwrap();
+        let b = create(&st, keyed("clearing again", 77, "rule", "pdy_core_clearing", "it is back")).await;
+        assert!(b.get("already_open").is_none());
+        assert_ne!(b["id"], a["id"]);
+        assert_eq!(rows(&st).await.len(), 2);
+        let d = details(&st, b["id"].as_str().unwrap()).await;
+        let doc = d.iter().find(|r| body_str(r, "key") == "doc").expect("recurrence doc row");
+        assert_eq!(body_str(doc, "value"), format!("recurrence of {aid}, which closed 2026-09-10T07:00:00Z"));
+        let still = st.store.get("workitem", "p", &aid).await.unwrap().unwrap();
+        assert_eq!(repeats(&still), 0);
+        assert_eq!(still["state"], json!("complete"));
+    }
+
+    /// Case 4: no key tags → a new row every time, no lookup, response shape unchanged.
+    #[tokio::test]
+    async fn no_key_tags_creates_as_today() {
+        let st = mem();
+        let body = json!({"name": "same words", "agent": "code", "priority": 50, "requestedby": "user",
+                          "tags": [{"text": "container:pdy_core_clearing", "color": ""}]});
+        let a = create(&st, body.clone()).await;
+        let b = create(&st, body).await;
+        assert_ne!(a["id"], b["id"]);
+        assert_eq!(rows(&st).await.len(), 2);
+        assert!(b.get("already_open").is_none() && b.get("warnings").is_none());
+        assert_eq!(repeats(&b), 0);
+    }
+
+    /// Case 5 (through the service): the halving chain on a real row, and
+    /// priority 1 stays 1.
+    #[tokio::test]
+    async fn stage1_repeats_halve_priority_down_to_one() {
+        let st = mem();
+        let a = create(&st, keyed("x", 77, "r", "c", "")).await;
+        let mut want = vec![38, 19, 9, 4, 2, 1, 1];
+        want.reverse();
+        while let Some(p) = want.pop() {
+            let r = create(&st, keyed("x", 77, "r", "c", "")).await;
+            assert_eq!(r["priority"], json!(p));
+            assert_eq!(r["id"], a["id"]);
+        }
+        assert_eq!(rows(&st).await.len(), 1);
+    }
+
+    /// Case 6 (through the service): `repeated` appears at the project's
+    /// `dedup.repeated_threshold` and not before.
+    #[tokio::test]
+    async fn repeated_tag_follows_project_threshold() {
+        let st = mem();
+        st.store.put("project", "p", NOSK, &json!({"name": "p", "state": "Running", "dedup": {"repeated_threshold": 2}})).await.unwrap();
+        create(&st, keyed("x", 60, "r", "c", "")).await;
+        let r1 = create(&st, keyed("x", 60, "r", "c", "")).await;
+        assert!(!tag_texts(&r1).contains(&"repeated".to_string()), "not before the threshold");
+        let r2 = create(&st, keyed("x", 60, "r", "c", "")).await;
+        assert!(tag_texts(&r2).contains(&"repeated".to_string()), "at the threshold");
+        assert_eq!(r2["repeats"], json!(2));
+    }
+
+    /// Case 8 (service half): the merge closes the newer item complete with
+    /// `dup of:` and a doc row, and the survivor is seen again with the
+    /// duplicate's request text.
+    #[tokio::test]
+    async fn duplicate_of_merges_newer_into_survivor() {
+        let st = mem();
+        let old = create(&st, json!({"name": "clearing red", "agent": "code", "priority": 40, "requestedby": "user", "request": "older report"})).await;
+        let new = create(&st, json!({"name": "clearing cannot be measured", "agent": "code", "priority": 40, "requestedby": "agent:code", "request": "newer report with a stack trace"})).await;
+        let (oid, nid) = (old["id"].as_str().unwrap().to_string(), new["id"].as_str().unwrap().to_string());
+        let out = workitem_duplicate_of(admin(), State(st.clone()), Path(("p".into(), nid.clone())),
+            Json(DuplicateReq { survivor: oid.clone(), reason: "both describe the unmeasurable clearing release".into(), others: vec![] })).await
+            .map(|j| j.0).unwrap_or_else(|_| panic!("merge refused"));
+        assert_eq!(out["duplicate"]["state"], json!("complete"));
+        assert_eq!(out["duplicate"]["id"], json!(nid));
+        assert!(tag_texts(&out["duplicate"]).contains(&format!("dup of: {}", &oid[oid.len() - 12..])));
+        assert_eq!(out["survivor"]["repeats"], json!(1));
+        assert_eq!(out["survivor"]["priority"], json!(20));
+        let dd = details(&st, &nid).await;
+        assert!(dd.iter().any(|r| body_str(r, "key") == "doc" && body_str(r, "value") == format!("Duplicate of {oid}: both describe the unmeasurable clearing release")));
+        let sd = details(&st, &oid).await;
+        let seen = sd.iter().find(|r| body_str(r, "key") == "doc").expect("seen-again row");
+        let v = body_str(seen, "value");
+        assert!(v.contains("by agent:code") && v.contains(&format!("duplicate {nid} merged here")) && v.contains("newer report with a stack trace"), "{v}");
+        assert_eq!(rows(&st).await.len(), 2, "a merge closes, never deletes");
+    }
+
+    /// Case 9 (service half): never into an in-progress or closed survivor;
+    /// never closes an in-progress duplicate.
+    #[tokio::test]
+    async fn duplicate_of_refuses_in_progress_and_closed() {
+        let st = mem();
+        let a = create(&st, json!({"name": "a", "agent": "code", "priority": 40})).await;
+        let b = create(&st, json!({"name": "b", "agent": "code", "priority": 40})).await;
+        let (aid, bid) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
+        let set_state = |st: Arc<AppState>, id: String, state: &'static str| async move {
+            let mut r = st.store.get("workitem", "p", &id).await.unwrap().unwrap();
+            r["state"] = json!(state);
+            st.store.put("workitem", "p", &id, &r).await.unwrap();
+        };
+        let merge = |st: Arc<AppState>, dup: String, surv: String| async move {
+            workitem_duplicate_of(admin(), State(st), Path(("p".into(), dup)), Json(DuplicateReq { survivor: surv, reason: String::new(), others: vec![] })).await.map(|j| j.0)
+        };
+        // survivor in progress
+        set_state(st.clone(), aid.clone(), "in-progress").await;
+        assert!(merge(st.clone(), bid.clone(), aid.clone()).await.is_err());
+        // survivor closed
+        set_state(st.clone(), aid.clone(), "complete").await;
+        assert!(merge(st.clone(), bid.clone(), aid.clone()).await.is_err());
+        // duplicate in progress
+        set_state(st.clone(), aid.clone(), "queued").await;
+        set_state(st.clone(), bid.clone(), "in-progress").await;
+        assert!(merge(st.clone(), bid.clone(), aid.clone()).await.is_err());
+        // nothing changed
+        let b_now = st.store.get("workitem", "p", &bid).await.unwrap().unwrap();
+        assert_eq!(b_now["state"], json!("in-progress"));
+        assert!(tag_texts(&b_now).is_empty());
+        let a_now = st.store.get("workitem", "p", &aid).await.unwrap().unwrap();
+        assert_eq!(repeats(&a_now), 0);
+        // and the happy path still works once both are open
+        set_state(st.clone(), bid.clone(), "queued").await;
+        assert!(merge(st.clone(), bid.clone(), aid.clone()).await.is_ok());
     }
 }
