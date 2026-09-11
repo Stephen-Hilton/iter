@@ -732,12 +732,22 @@ impl EngineRuntime {
                 w.reason = Some(format!("retry after {}", hhmm(&i.retry_after)));
             } else if cluster::blocks(i, cluster_healthy) {
                 w.reason = Some(CLUSTER_RESTART_REASON.into()); // renders "blocked by: cluster restart"
-            } else if deps_satisfied(i) {
-                w.holders = lock_holders(i);
-                if let Some((_, path)) = w.holders.first() {
-                    w.reason = Some(format!("lock {path}"));
-                } else if let Some(h) = &hold {
-                    w.reason = Some(h.clone());
+            } else {
+                match dependency_status(i, &by_id, &kids) {
+                    DepStatus::Satisfied => {
+                        w.holders = lock_holders(i);
+                        if let Some((_, path)) = w.holders.first() {
+                            w.reason = Some(format!("lock {path}"));
+                        } else if let Some(h) = &hold {
+                            w.reason = Some(h.clone());
+                        }
+                    }
+                    // a declared loop can never start: say so on the item
+                    // (renders "blocked by: dependency cycle with <id12>")
+                    DepStatus::Cycle(other) => {
+                        w.reason = Some(format!("dependency cycle with {}", &other[other.len().saturating_sub(12)..]));
+                    }
+                    DepStatus::Waiting(_) | DepStatus::Failed(_) => {}
                 }
             }
             waits.insert(i.id.clone(), w);

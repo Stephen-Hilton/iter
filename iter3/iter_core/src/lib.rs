@@ -735,6 +735,74 @@ pub enum DepStatus {
     /// this blocker (or a descendant) closed failed: the dependent stays queued
     /// underneath it until the failed item is reopened and completes
     Failed(String),
+    /// this open blocker is itself waiting on the item (directly or through
+    /// its own blockers): neither can ever start.  Named so the engine can
+    /// tag it and the webui can show it; the write layer refuses new ones
+    /// (2026-09-11, from pdy-dev 3822952ce442 <-> 6832b938a004).
+    Cycle(String),
+}
+
+/// True when `target` is reachable from `from` by following `blockedby`
+/// links — i.e. `from` cannot start until `target` has.  Bounded by a seen
+/// set, so a cyclic graph terminates.
+pub fn waits_on(from: &str, target: &str, by_id: &std::collections::HashMap<String, &WorkItem>) -> bool {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = vec![from];
+    while let Some(cur) = stack.pop() {
+        if cur == target {
+            return true;
+        }
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let Some(i) = by_id.get(cur) {
+            stack.extend(i.blockedby.iter().map(|b| b.as_str()));
+        }
+    }
+    false
+}
+
+/// The cycle a new set of blockers would close, as the path of ids from
+/// `item_id` back to itself (`[item, b, …, item]`), or None when the graph
+/// stays acyclic.  `blockers` are the links being written; the rest of the
+/// graph comes from `by_id`.  Shared by the API create/PUT refusal
+/// (workitem_dependency.md: "refusal names the cycle path").
+pub fn blockedby_cycle(item_id: &str, blockers: &[String], by_id: &std::collections::HashMap<String, &WorkItem>) -> Option<Vec<String>> {
+    for b in blockers {
+        if b == item_id {
+            return Some(vec![item_id.to_string(), item_id.to_string()]);
+        }
+        // depth-first with the path kept, so the refusal can name it
+        let mut path: Vec<String> = vec![item_id.to_string(), b.clone()];
+        let mut stack: Vec<(String, usize)> = vec![(b.clone(), 2)];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some((cur, depth)) = stack.pop() {
+            path.truncate(depth);
+            if cur == item_id {
+                return Some(path);
+            }
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(i) = by_id.get(cur.as_str()) {
+                for next in &i.blockedby {
+                    if next == item_id {
+                        path.truncate(depth);
+                        path.push(next.clone());
+                        return Some(path);
+                    }
+                    if !seen.contains(next) {
+                        stack.push((next.clone(), depth + 1));
+                    }
+                }
+            }
+            if let Some((next, d)) = stack.last() {
+                path.truncate(*d - 1);
+                path.push(next.clone());
+            }
+        }
+    }
+    None
 }
 
 /// creator id -> items it created (createdby)
@@ -750,6 +818,15 @@ pub fn children_index(items: &[WorkItem]) -> std::collections::HashMap<String, V
 
 /// Deep by default: every blocker must be complete and so must every item it
 /// created, transitively. Unknown ids (deleted) count as satisfied. Cycle-safe.
+///
+/// Two rules keep the deep walk from manufacturing a deadlock (2026-09-11,
+/// pdy-dev: 42 of 100 queued items sat in loops nobody had declared):
+/// - an open blocker that is itself waiting on the item is a `Cycle`, not a
+///   `Waiting` — the item can never start and the engine says so;
+/// - a descendant of a complete blocker that is waiting on the item (the
+///   follow-up a code agent filed under the finished blocker, linked to the
+///   item it serves) is NOT waited on: the explicit link wins over the
+///   implicit "and everything it created".
 pub fn dependency_status(
     item: &WorkItem,
     by_id: &std::collections::HashMap<String, &WorkItem>,
@@ -762,6 +839,9 @@ pub fn dependency_status(
             return DepStatus::Failed(d.id.clone());
         }
         if d.state != "complete" {
+            if waits_on(&d.id, &item.id, by_id) {
+                return DepStatus::Cycle(d.id.clone());
+            }
             return DepStatus::Waiting(d.id.clone());
         }
         if item.blockedby_shallow {
@@ -771,6 +851,9 @@ pub fn dependency_status(
         while let Some(c) = stack.pop() {
             if c.id == item.id || !seen.insert(c.id.clone()) {
                 continue;
+            }
+            if c.state != "complete" && waits_on(&c.id, &item.id, by_id) {
+                continue; // it waits on us: we do not wait on it
             }
             if c.state == "failed" {
                 return DepStatus::Failed(c.id.clone());
@@ -871,6 +954,66 @@ mod tests {
         assert_eq!(dependency_status(&failed[3], &by2, &kids2), DepStatus::Failed("child".into()));
         let ghost = wi("g", "queued", "", &["nope"]);
         assert_eq!(dependency_status(&ghost, &by_id, &kids), DepStatus::Satisfied);
+    }
+
+    /// pdy-dev 2026-09-11: a follow-up filed under a COMPLETE blocker and
+    /// linked to the very item waiting on that blocker must not deadlock —
+    /// the item waits on its other blockers only; the follow-up waits on it.
+    #[test]
+    fn deep_gate_skips_a_descendant_that_waits_on_the_item() {
+        let items = vec![
+            wi("c", "complete", "user", &[]),            // the finished blocker
+            wi("y", "queued", "user", &["c", "z"]),      // waits on c (deep) and z
+            wi("x", "queued", "c", &["y"]),              // c's follow-up, serves y
+            wi("z", "queued", "user", &[]),
+            wi("x2", "queued", "c", &["w"]),             // transitively waits on y
+            wi("w", "queued", "user", &["y"]),
+        ];
+        let by_id: std::collections::HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
+        let kids = children_index(&items);
+        assert!(waits_on("x", "y", &by_id) && waits_on("x2", "y", &by_id) && !waits_on("z", "y", &by_id));
+        assert_eq!(dependency_status(&items[1], &by_id, &kids), DepStatus::Waiting("z".into()));
+        assert_eq!(dependency_status(&items[2], &by_id, &kids), DepStatus::Waiting("y".into()));
+        // z closes: y runs, x still waits on y
+        let mut done = items.clone();
+        done[3].state = "complete".into();
+        let by2: std::collections::HashMap<String, &WorkItem> = done.iter().map(|i| (i.id.clone(), i)).collect();
+        assert_eq!(dependency_status(&done[1], &by2, &kids), DepStatus::Satisfied);
+        assert_eq!(dependency_status(&done[2], &by2, &kids), DepStatus::Waiting("y".into()));
+        // an open descendant that does NOT wait on the item is still waited on
+        let mut plain = items.clone();
+        plain[2].blockedby = vec![];
+        plain[3].state = "complete".into();
+        let by3: std::collections::HashMap<String, &WorkItem> = plain.iter().map(|i| (i.id.clone(), i)).collect();
+        assert_eq!(dependency_status(&plain[1], &by3, &kids), DepStatus::Waiting("x".into()));
+    }
+
+    /// A declared loop is a Cycle verdict, never a silent Waiting; and the
+    /// write-layer check names the path that would close it.
+    #[test]
+    fn declared_cycles_are_named_and_refusable() {
+        let items = vec![
+            wi("a", "queued", "user", &["b"]),
+            wi("b", "queued", "user", &["c"]),
+            wi("c", "queued", "user", &["a"]),
+            wi("d", "queued", "user", &["a"]),
+            wi("e", "complete", "user", &["a"]),
+        ];
+        let by_id: std::collections::HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
+        let kids = children_index(&items);
+        assert_eq!(dependency_status(&items[0], &by_id, &kids), DepStatus::Cycle("b".into()));
+        assert_eq!(dependency_status(&items[1], &by_id, &kids), DepStatus::Cycle("c".into()));
+        // d waits on the loop but is not in it: plain Waiting
+        assert_eq!(dependency_status(&items[3], &by_id, &kids), DepStatus::Waiting("a".into()));
+        // write-layer: adding d -> a is fine, a -> d would close a loop, self is a loop
+        assert_eq!(blockedby_cycle("d", &["a".into()], &by_id), None);
+        let acyclic = vec![wi("a", "queued", "", &[]), wi("b", "queued", "", &["a"]), wi("c", "queued", "", &["b"])];
+        let by2: std::collections::HashMap<String, &WorkItem> = acyclic.iter().map(|i| (i.id.clone(), i)).collect();
+        assert_eq!(blockedby_cycle("c", &["a".into()], &by2), None);
+        assert_eq!(blockedby_cycle("a", &["c".into()], &by2), Some(vec!["a".into(), "c".into(), "b".into(), "a".into()]));
+        assert_eq!(blockedby_cycle("a", &["a".into()], &by2), Some(vec!["a".into(), "a".into()]));
+        // a closed item in the loop still closes it (reopen would deadlock)
+        assert!(blockedby_cycle("a", &["e".into()], &by_id).is_some());
     }
 
     #[test]

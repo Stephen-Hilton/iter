@@ -1123,7 +1123,11 @@ fn wait(e: &Env, on: Vec<String>, reason: Option<String>) {
     item["blockedby"] = json!(merged);
     e.api
         .put(&format!("/api/projects/{}/workitems/{}?expect_version={}", e.project, e.workid, version), &item)
-        .unwrap_or_else(|err| die(format!("wait failed: {err}")));
+        .unwrap_or_else(|err| {
+            // iter_data refuses a link that closes a loop (400 naming the path)
+            let msg = serde_json::from_str::<Value>(&err.body).ok().and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from)).unwrap_or_else(|| err.to_string());
+            die(format!("wait {}", if msg.starts_with("refused") { msg } else { format!("failed: {msg}") }))
+        });
     let _ = e.api.post(
         &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
         &json!({"key": "doc", "valuetype": "text", "value": format!(

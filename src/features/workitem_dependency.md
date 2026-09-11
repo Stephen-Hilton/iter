@@ -93,3 +93,24 @@ One new optional field on a work item:
    queue and the closed archive, and a DESCENDANT that closed failed, are treated like a
    failed dependency (flip to todo with the reason) — never a silent hang, never a
    silent run on a broken foundation.
+
+## Cycles — V3 build (2026-09-11)
+
+Found on pdy-dev: 42 of 100 queued items sat in loops nobody had declared, and the
+webui's run-order view dumped them unsorted at the bottom (the "never drop an item"
+fallback). Two shapes:
+
+- a declared loop — the code agent on A ran `iter wait --on B` while the plan had B
+  blocked on A. Now REFUSED at the write layer (`iter_data` create + PUT, so `iter add
+  --depends-on`, `iter wait --on` and the webui all inherit it): 400 "refused:
+  dependency cycle — … (a -> b -> a)". A loop that predates the refusal is not frozen:
+  edits that leave `blockedby` alone still go through, and the gate reports it as
+  `DepStatus::Cycle` — the engine tags "blocked by: dependency cycle with <id12>", the
+  webui sorts it after the blocked group with a "⟲ cycle with …" marker.
+- a loop the DEEP gate manufactured — C completes; a follow-up X filed under C is
+  linked `blockedby Y`, and Y is blocked on C, so Y waited on "C and everything it
+  created" (X) while X waited on Y. Rule: a descendant of a complete blocker that is
+  itself waiting on the item (over `blockedby`, transitively) is NOT waited on — the
+  explicit link wins over the implicit one. `iter_core::dependency_status` and the
+  webui's mirror both apply it.
+

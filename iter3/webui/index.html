@@ -600,16 +600,26 @@ function renderCounts(){
    it created (createdby, transitively) closed complete; blockedby_shallow opts out */
 let kidsIndex={};
 function buildKids(items){kidsIndex={};items.forEach(i=>{if(i.createdby)(kidsIndex[i.createdby]=kidsIndex[i.createdby]||[]).push(i);});}
+/* target reachable from `from` over blockedby links (iter_core::waits_on) */
+function waitsOn(from,target,byId){
+  const seen=new Set(),stack=[from];
+  while(stack.length){const cur=stack.pop();if(cur===target)return true;if(seen.has(cur))continue;seen.add(cur);const x=byId[cur];if(x)(x.blockedby||[]).forEach(b=>stack.push(b));}
+  return false;
+}
+/* mirrors iter_core::dependency_status (2026-09-11): an open blocker that waits on
+   this item is a {cycle} — neither can ever start; a descendant of a complete
+   blocker that waits on this item is skipped — the explicit link wins */
 function depStatus(i,byId){
   const seen=new Set();
   for(const d of (i.blockedby||[])){
     const dep=byId[d];if(!dep)continue;
     if(dep.state==="failed")return {failed:dep.id};
-    if(dep.state!=="complete")return {waiting:dep.id};
+    if(dep.state!=="complete")return waitsOn(dep.id,i.id,byId)?{cycle:dep.id}:{waiting:dep.id};
     if(i.blockedby_shallow)continue;
     const stack=[...(kidsIndex[d]||[])];
     while(stack.length){
       const c=stack.pop();if(c.id===i.id||seen.has(c.id))continue;seen.add(c.id);
+      if(c.state!=="complete"&&waitsOn(c.id,i.id,byId))continue;
       if(c.state==="failed")return {failed:c.id,via:d};
       if(c.state!=="complete")return {waiting:c.id,via:d};
       (kidsIndex[c.id]||[]).forEach(x=>stack.push(x));
@@ -623,12 +633,12 @@ function runGroup(i,byId){
   if(i.state==="in-progress")return 0;                       // running now
   if(i.state==="queued"&&!i.needs_approval&&depsSatisfied(i,byId))return 1; // next up
   if(i.state==="question")return 2;
-  if(i.state==="queued")return 3;                            // blocked / needs approval
-  if(i.state==="paused")return 4;
-  if(i.state==="parked")return 5;
-  if(i.state==="scheduled")return 6;
-  if(i.state==="failed")return 7;
-  return 8;                                                  // complete
+  if(i.state==="queued")return depStatus(i,byId).cycle?4:3;  // blocked / needs approval; a declared loop last
+  if(i.state==="paused")return 5;
+  if(i.state==="parked")return 6;
+  if(i.state==="scheduled")return 7;
+  if(i.state==="failed")return 8;
+  return 9;                                                  // complete
 }
 /* tree parent = the item this one is actually WAITING ON (deep gate): the open
    blocker, or the open descendant of a complete blocker — or, for a queued item
@@ -684,8 +694,9 @@ function comparator(mode,byId){
 
 /* depth = how far down the dependency/creation tree this item sits; 22px per level,
    no cap — a deep chain is supposed to look deep */
+let cycleMap={}; // id -> the open blocker it loops with, for the tiles of the current render
 function tileHtml(i,depth){
-  const att=(i.attempt>0?` <span class="att">(A${esc(i.attempt)})</span>`:"")+(i.run_now&&i.state==="queued"?` <span class="att" title="run-now override requested">▶ run now</span>`:"")+(i.stop_requested&&i.state==="in-progress"?` <span class="att" style="color:var(--bad)">■ stopping</span>`:"")+(i.explain_requested?` <span class="att" title="ELI5 requested — the engine is writing a plain-language explanation">✎ explaining…</span>`:"");
+  const att=(cycleMap[i.id]?` <span class="att" style="color:var(--bad)" title="this item and ${esc(cycleMap[i.id])} each wait on the other: neither can ever start — remove one link">⟲ cycle with ${esc(cycleMap[i.id].slice(-12))}</span>`:"")+(i.attempt>0?` <span class="att">(A${esc(i.attempt)})</span>`:"")+(i.run_now&&i.state==="queued"?` <span class="att" title="run-now override requested">▶ run now</span>`:"")+(i.stop_requested&&i.state==="in-progress"?` <span class="att" style="color:var(--bad)">■ stopping</span>`:"")+(i.explain_requested?` <span class="att" title="ELI5 requested — the engine is writing a plain-language explanation">✎ explaining…</span>`:"");
   return `
   <div class="tile" data-depth="${depth}" style="--d:${depth};margin-left:${depth*22}px" data-id="${esc(i.id)}">
     <div class="left">
@@ -719,6 +730,7 @@ function renderItems(){
   /* every view nests: an item sits under what it is waiting on, as deep as the chain goes */
   {
     if(!(mode==="runorder"&&filters.size===0))parentCache={};
+    cycleMap={};shown.forEach(i=>{if(i.state==="queued"){const ds=depStatus(i,byId);if(ds.cycle)cycleMap[i.id]=ds.cycle;}});
     const ids=new Set(shown.map(i=>i.id));
     const children={},roots=[];
     shown.forEach(i=>{const p=parentOf(i,ids);if(p){(children[p]=children[p]||[]).push(i);}else roots.push(i);});
@@ -726,7 +738,9 @@ function renderItems(){
     const seen=new Set();
     const emit=(i,depth)=>{if(seen.has(i.id))return "";seen.add(i.id);return tileHtml(i,depth)+((children[i.id]||[]).sort(cmp).map(c=>emit(c,depth+1)).join(""));};
     html=roots.map(r=>emit(r,0)).join("");
-    shown.forEach(i=>{if(!seen.has(i.id))html+=emit(i,0);}); // cycles: never drop an item
+    // never drop an item: whatever no root reaches (a loop the gate does not
+    // name) still renders, in the view's own order rather than fetch order
+    shown.filter(i=>!seen.has(i.id)).sort(cmp).forEach(i=>{html+=emit(i,0);});
   }
   $("#items").innerHTML=html||"<span class='kv'>no workitems</span>";
   document.querySelectorAll("#items .tile").forEach(t=>{

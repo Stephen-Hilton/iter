@@ -1101,6 +1101,36 @@ async fn lockshape_findings(
     Ok(findings.into_iter().map(|f| f.msg).collect())
 }
 
+/// workitem_dependency.md: a `blockedby` that closes a loop is refused with
+/// the path named (last-12 ids, the way the webui shows them).  Shared by
+/// create and PUT, so `iter add --depends-on`, `iter wait --on` and the
+/// webui all inherit it (2026-09-11: pdy-dev item 3822952ce442 waited on
+/// 6832b938a004, which the plan had blocked on 3822952ce442 — both sat
+/// queued forever, and 40 more items nested under the pair).
+async fn refuse_dependency_cycle(st: &Arc<AppState>, project: &str, id: &str, body: &Value) -> Result<(), ApiError> {
+    let blockers: Vec<String> = body
+        .get("blockedby")
+        .and_then(|b| b.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    let rows = st.store.query("workitem", project).await?;
+    let items: Vec<WorkItem> = rows.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect();
+    let by_id: HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
+    if let Some(path) = iter_core::blockedby_cycle(id, &blockers, &by_id) {
+        let short = |x: &String| x[x.len().saturating_sub(12)..].to_string();
+        let shown: Vec<String> = path.iter().map(short).collect();
+        return Err(bad(format!(
+            "refused: dependency cycle — {} would wait on itself ({}); an item cannot wait on something that waits on it",
+            short(&id.to_string()),
+            shown.join(" -> ")
+        )));
+    }
+    Ok(())
+}
+
 fn with_warnings(mut body: Value, warnings: Vec<String>) -> Value {
     if !warnings.is_empty() {
         body["warnings"] = json!(warnings);
@@ -1157,6 +1187,7 @@ async fn workitem_create(
     }
     let (id, body) = normalize_new_item(&name, body)?;
     warnings.extend(lockshape_findings(&st, &name, &body).await?);
+    refuse_dependency_cycle(&st, &name, &id, &body).await?;
     st.store.put_versioned("workitem", &name, &id, &body, 0).await?;
     st.store.bump_seq(&name, "workitem").await?;
     if !request.is_empty() {
@@ -1379,6 +1410,12 @@ async fn workitem_put(
         .map(|c| c.get("lockdirs") != body.get("lockdirs") || body_str(c, "agent") != body_str(&body, "agent"))
         .unwrap_or(true);
     let warnings = if lockdirs_changed { lockshape_findings(&st, &name, &body).await? } else { vec![] };
+    // dependency cycles: only when the links change, so an item already in a
+    // loop (before this refusal existed) can still be edited out of it
+    let blockedby_changed = current.as_ref().map(|c| c.get("blockedby") != body.get("blockedby")).unwrap_or(true);
+    if blockedby_changed {
+        refuse_dependency_cycle(&st, &name, &id, &body).await?;
+    }
     st.store.put_versioned("workitem", &name, &id, &body, expect).await?;
     st.store.bump_seq(&name, "workitem").await?;
     Ok(Json(with_warnings(body, warnings)))
@@ -1978,6 +2015,51 @@ mod tests {
             Err(ApiError::Status(code, msg)) => panic!("create failed: {code} {msg}"),
             Err(ApiError::Conflict(v)) => panic!("create conflict: {v}"),
         }
+    }
+
+    /// workitem_dependency.md cycle refusal (built 2026-09-11): a PUT or
+    /// create whose `blockedby` closes a loop is refused with the path
+    /// named; unrelated edits of an item already in a loop still go through.
+    #[tokio::test]
+    async fn dependency_cycles_are_refused_with_the_path_named() {
+        let st = mem();
+        let a = create(&st, json!({"name": "a", "agent": "code", "state": "queued", "priority": 5})).await;
+        let aid = a["id"].as_str().unwrap().to_string();
+        let b = create(&st, json!({"name": "b", "agent": "code", "state": "queued", "priority": 5, "blockedby": [aid]})).await;
+        let bid = b["id"].as_str().unwrap().to_string();
+        let c = create(&st, json!({"name": "c", "agent": "code", "state": "queued", "priority": 5, "blockedby": [bid]})).await;
+        let cid = c["id"].as_str().unwrap().to_string();
+        let put = |st: Arc<AppState>, id: String, body: Value| async move {
+            let q: HashMap<String, String> = [("expect_version".to_string(), body["version"].as_u64().unwrap().to_string())].into();
+            workitem_put(admin(), State(st), Path(("p".into(), id)), Query(q), Json(body)).await
+        };
+        // a -> c would close a -> c -> b -> a
+        let mut bad_a = a.clone();
+        bad_a["blockedby"] = json!([cid.clone()]);
+        match put(st.clone(), aid.clone(), bad_a).await {
+            Err(ApiError::Status(code, msg)) => {
+                assert_eq!(code, StatusCode::BAD_REQUEST);
+                assert!(msg.contains("dependency cycle"), "{msg}");
+                for id in [&aid, &cid, &bid] {
+                    assert!(msg.contains(&id[id.len() - 12..]), "path names {id}: {msg}");
+                }
+            }
+            Ok(_) => panic!("cycle accepted"),
+            Err(ApiError::Conflict(v)) => panic!("conflict: {v}"),
+        }
+        // a create that would wait on itself is refused too
+        let dup = json!({"name": "self", "agent": "code", "state": "queued", "priority": 5, "id": "self-id", "blockedby": ["self-id"]});
+        assert!(matches!(workitem_create(admin(), State(st.clone()), Path("p".into()), Json(dup)).await, Err(ApiError::Status(_, _))));
+        // an acyclic link is fine, and a tag edit on a looped item (data
+        // from before the refusal) is not blocked by the loop it is in
+        let mut fine = a.clone();
+        fine["tags"] = json!([{"text": "x", "color": ""}]);
+        let a2 = match put(st.clone(), aid.clone(), fine).await {
+            Ok(Json(v)) => v,
+            Err(ApiError::Status(c, m)) => panic!("acyclic edit refused: {c} {m}"),
+            Err(ApiError::Conflict(v)) => panic!("conflict: {v}"),
+        };
+        assert_eq!(a2["version"], json!(2));
     }
     fn keyed(name: &str, prio: i64, check: &str, container: &str, request: &str) -> Value {
         json!({"name": name, "agent": "code", "priority": prio, "requestedby": "user", "request": request,
