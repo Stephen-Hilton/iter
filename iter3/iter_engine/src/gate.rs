@@ -49,6 +49,26 @@ pub struct Evidence {
     pub diffstat: String,
     pub children: usize,
     pub open_reviews: usize,
+    /// scoped end-of-run commit (2026-09-12): what the diffstat was limited
+    /// to — "lock scope (k paths)" or "whole tree (item has no lockdirs)"
+    pub commit_scope: String,
+    /// paths another item left dirty in the shared checkout, never listed
+    pub outside_scope_dirty: usize,
+    /// (short hash, subject) of the commits between the heads whose subject
+    /// ends in this item's `(<id8>)` — its own, not its siblings'
+    pub commits: Vec<(String, String)>,
+}
+
+/// The commits in `git log --format=%h%x09%s <before>..<after>` output that
+/// carry this item's id: subject ends in `(<id8>)`.  Several agents commit
+/// to one checkout concurrently, so the range holds siblings' commits too.
+pub fn commits_with_id(log: &str, id8: &str) -> Vec<(String, String)> {
+    let tail = format!("({id8})");
+    log.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(_, subject)| subject.trim_end().ends_with(&tail))
+        .map(|(h, s)| (h.trim().to_string(), s.trim().to_string()))
+        .collect()
 }
 
 impl Evidence {
@@ -63,15 +83,34 @@ impl Evidence {
             "diffstat": self.diffstat,
             "children": self.children,
             "open_reviews": self.open_reviews,
+            "commit_scope": self.commit_scope,
+            "outside_scope_dirty": self.outside_scope_dirty,
+            "commits": self.commits.iter().map(|(h, s)| json!({"hash": h, "subject": s})).collect::<Vec<_>>(),
         })
+    }
+
+    /// The one sentence the verifier cannot miss: the tree is shared, the
+    /// diffstat is scoped, and which commits are this item's.
+    fn scope_sentence(&self) -> String {
+        let list = if self.commits.is_empty() {
+            "none".to_string()
+        } else {
+            self.commits.iter().map(|(h, s)| format!("{h} \"{s}\"")).collect::<Vec<_>>().join(", ")
+        };
+        format!(
+            "Several agents commit to this checkout concurrently. The diffstat below is limited to this item's lock scope ({}); \
+{} path(s) outside that scope were left uncommitted and are not this item's. Commits carrying this item's id: {}.",
+            if self.commit_scope.is_empty() { "unknown scope" } else { &self.commit_scope },
+            self.outside_scope_dirty, list
+        )
     }
     fn describe(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("- worker session ended with result subtype '{}' after {} turn(s)\n",
             if self.result_subtype.is_empty() { "unknown" } else { &self.result_subtype }, self.num_turns));
         if self.committed() {
-            s.push_str(&format!("- git: new commit {}\n{}\n", &self.head_after[..12.min(self.head_after.len())],
-                indent(&self.diffstat)));
+            s.push_str(&format!("- git: {}\n- git: new head {}\n{}\n", self.scope_sentence(),
+                &self.head_after[..12.min(self.head_after.len())], indent(&self.diffstat)));
         } else if self.head_after.is_empty() {
             s.push_str("- git: not a repository (no commit evidence)\n");
         } else {
@@ -94,7 +133,9 @@ pub fn verifier_prompt(item_name: &str, request: &str, response: &str, ev: &Evid
         "You are the {marker}. You judge DONE-NESS, not quality: did the worker's final message claim to \
 finish EVERY obligation in the request, and does the evidence support that claim?  Persuasive summaries \
 that skip an obligation, \"I'm waiting for X to finish\", \"next step is to ...\", or a plan that was written \
-but whose items were never filed are all INCOMPLETE.  You may read files to check a claim, but do not modify anything.\n\n\
+but whose items were never filed are all INCOMPLETE.  You may read files to check a claim, but do not modify anything.  \
+Several agents share this checkout: a file outside the item's lock scope is NOT evidence about this item unless the worker's \
+own message claims it — never call a report dishonest over a path the evidence marks as outside the scope.\n\n\
 Answer with exactly one json object and nothing else:\n\
 {{\"verdict\": \"complete\" | \"incomplete\" | \"unclear\", \"open\": [\"each obligation still open, one per entry\"], \"reason\": \"one or two sentences\"}}\n\n\
 # Workitem: {item_name}\n\n## Request\n{request}\n\n## Worker's final message\n{response}\n\n## Engine evidence\n{evidence}",
@@ -362,6 +403,37 @@ pub fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only commits whose subject ends in this item's id are its own; a
+    /// sibling's sweep in the same range is not attributed to it.
+    #[test]
+    fn commits_with_id_keeps_only_this_items_commits() {
+        let log = "abc1234\titer: bundle loader (aca51627)\ndef5678\titer: fixture cell (a180b52e)\n0000000\tagent commit with (aca51627) in the middle\n";
+        assert_eq!(commits_with_id(log, "aca51627"), vec![("abc1234".to_string(), "iter: bundle loader (aca51627)".to_string())]);
+        assert!(commits_with_id(log, "ffffffff").is_empty());
+    }
+
+    /// The evidence text tells the verifier the tree is shared, the scope the
+    /// diffstat was limited to, the leftover count, and this item's commits.
+    #[test]
+    fn evidence_describes_the_shared_checkout_and_scope() {
+        let ev = Evidence {
+            result_subtype: "success".into(), num_turns: 3,
+            head_before: "1111111111111".into(), head_after: "2222222222222".into(),
+            diffstat: " a/x.rs | 1 +".into(), children: 0, open_reviews: 0,
+            commit_scope: "lock scope (1 paths)".into(), outside_scope_dirty: 2,
+            commits: vec![("abc1234".into(), "iter: thing (deadbeef)".into())],
+        };
+        let d = ev.describe();
+        assert!(d.contains("limited to this item's lock scope (lock scope (1 paths))"), "{d}");
+        assert!(d.contains("2 path(s) outside that scope were left uncommitted and are not this item's"), "{d}");
+        assert!(d.contains("abc1234 \"iter: thing (deadbeef)\""), "{d}");
+        let j = ev.to_json();
+        assert_eq!(j["commit_scope"], "lock scope (1 paths)");
+        assert_eq!(j["outside_scope_dirty"], 2);
+        assert_eq!(j["commits"][0]["hash"], "abc1234");
+        assert!(verifier_prompt("n", "r", "m", &ev).contains("outside the item's lock scope is NOT evidence"));
+    }
 
     fn wi(id: &str, state: &str, createdby: &str, blockedby: &[&str]) -> iter_core::WorkItem {
         iter_core::WorkItem {

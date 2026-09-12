@@ -1157,6 +1157,7 @@ const PROJECT_FIELDS=[
   {key:"pinned_tags",label:"pinned tags",type:"json",rows:2,emptyValue:[],help:'tag texts the Add tag… picker offers first, before the tags already in use on this project — the tags this project\'s agents and scripts react to, e.g. ["blocked-by-cluster-restart","blocked-until-cluster-restart"]; engine-owned "blocked by: …" tags are refused'},
   {key:"engines",emptyValue:[],type:"json",rows:2,help:'engine names serving this project, e.g. ["Engine01"]'},
   {key:"accounts",emptyValue:[],type:"json",rows:5,help:'Claude accounts by env-var NAME (never the token): [{"name":"Dev1","token_envar":"DEV1_TOKEN","order":1,"switch":80,"stop":99}]'},
+  {key:"commit_extra_paths",label:"commit extra paths",type:"json",rows:2,emptyValue:[],help:'the engine\'s end-of-run commit (and the close-gate evidence) is limited to an item\'s lock scope so it never sweeps another agent\'s unfinished files; list here the paths agents write OUTSIDE their scope by design — git pathspecs relative to the checkout, globs allowed: ["Agent_Recommendations.md","*.agentmemory.iter.md"]'},
 ];
 const ENGINE_FIELDS=[
   {key:"name",type:"readonly"},{key:"state",type:"readonly",help:"engine-reported (actual)"},{key:"last_seen",type:"readonly"},{key:"account",type:"readonly"},

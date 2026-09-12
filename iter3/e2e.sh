@@ -622,6 +622,10 @@ case "$name" in
       emit success "Filed the disk guard item. I'm waiting for the review to finish."
     fi ;;
   gate-crash) emit success "DONE-MARKER: all obligations done, live proof attached" ;;
+  gate-scope1|gate-scope2)
+    # two agents on one checkout (bugfix 2026-09-12): every session dirties BOTH lock scopes
+    T="${ITER_TOPDIR:-.}"; mkdir -p "$T/scope1" "$T/scope2"; echo "$name $$" >> "$T/scope1/work.txt"; echo "$name $$" >> "$T/scope2/work.txt"
+    emit success "DONE-MARKER: wrote my own scope only" ;;
   gate-cluster)
     # attempt 1 needs the cluster during the restart window and blocks; the
     # re-run reads the block back as its "previous attempt" and finishes
@@ -977,6 +981,40 @@ grep -q "env_file reloaded: -DEV9_TOKEN" "$SCRATCH/engine-hot3.log" || { cat "$S
 [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -r '.tags[0].text')" = "blocked by: no account token" ] || { cat "$SCRATCH/engine-hot3.log"; fail "item not tagged after the token was removed: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -c .tags)"; }
 curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=0' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
 pass "account hot reload: +DEV9_TOKEN picked up without a restart (run billed to it, record says set), -DEV9_TOKEN stops picks and names the reason"
+
+# ---- scoped end-of-run commit (bugfix 2026-09-12): two items with disjoint lockdirs share one checkout; each fake session
+#      dirties both directories; each item's commit and evidence must hold only its own scope, and neither may bounce ----
+export FAKE_TOKEN="tok-test-1yr"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}] | .commit_extra_paths=["Agent_Recommendations.md"]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "scope project update"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq -c .commit_extra_paths)" = '["Agent_Recommendations.md"]' ] || fail "commit_extra_paths not stored"
+snap TestAcct 10 5
+(cd "$SAMPLE" && git add -A >/dev/null 2>&1 && git -c user.email=e2e@iter -c user.name=e2e commit -qm "e2e: settle before the scope test" >/dev/null 2>&1) || true
+echo "shared note" > "$SAMPLE/Agent_Recommendations.md"
+SC1=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-scope1","agent":"gatetest","priority":0,"lockdirs":["{topdir}/scope1/"]}' | jq -r .id)
+SC2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-scope2","agent":"gatetest","priority":0,"lockdirs":["{topdir}/scope2/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 12 > "$SCRATCH/engine-scope.log" 2>&1) || true
+[ "$(st_of "$SC1")" = complete ] || { cat "$SCRATCH/engine-scope.log"; fail "gate-scope1 state=$(st_of "$SC1") (expected complete)"; }
+[ "$(st_of "$SC2")" = complete ] || { cat "$SCRATCH/engine-scope.log"; fail "gate-scope2 state=$(st_of "$SC2") (expected complete)"; }
+[ "$(gb_of "$SC1")" = 0 ] && [ "$(gb_of "$SC2")" = 0 ] || fail "a scope item bounced (gate_bounces $(gb_of "$SC1") / $(gb_of "$SC2")): the other agent's files leaked into its evidence"
+C1=$(cd "$SAMPLE" && git log --format=%H --grep="(${SC1:0:8})" | head -1); C2=$(cd "$SAMPLE" && git log --format=%H --grep="(${SC2:0:8})" | head -1)
+[ -n "$C1" ] && [ -n "$C2" ] || fail "end-of-run commits missing: '$C1' '$C2'"
+F1=$(cd "$SAMPLE" && git show --format= --name-only "$C1"); F2=$(cd "$SAMPLE" && git show --format= --name-only "$C2")
+grep -q "^scope1/work.txt" <<<"$F1" && ! grep -q "^scope2/" <<<"$F1" || fail "gate-scope1's commit is not limited to its lock scope: $(echo "$F1" | tr '\n' ' ')"
+grep -q "^scope2/work.txt" <<<"$F2" && ! grep -q "^scope1/" <<<"$F2" || fail "gate-scope2's commit is not limited to its lock scope: $(echo "$F2" | tr '\n' ' ')"
+printf '%s\n%s\n' "$F1" "$F2" | grep -q "^Agent_Recommendations.md" || fail "the project's commit_extra_paths file was not committed by either item"
+grep -q "left [0-9]* uncommitted path(s) outside its lock scope untouched" "$SCRATCH/engine-scope.log" || { cat "$SCRATCH/engine-scope.log"; fail "leftover count not logged"; }
+grep -q "left [0-9]* uncommitted path(s).*scope[12]/work.txt" "$SCRATCH/engine-scope.log" && fail "the leftover line named another item's file"
+[ -f "$GATE_PROMPTS/verifier-gate-scope1.txt" ] && [ -f "$GATE_PROMPTS/verifier-gate-scope2.txt" ] || fail "verifier prompts not recorded"
+grep -q "limited to this item's lock scope" "$GATE_PROMPTS/verifier-gate-scope1.txt" || { cat "$GATE_PROMPTS/verifier-gate-scope1.txt"; fail "verifier not told the diffstat is scoped"; }
+grep -q "scope2/" "$GATE_PROMPTS/verifier-gate-scope1.txt" && fail "gate-scope1's verifier evidence names the other item's directory"
+grep -q "scope1/" "$GATE_PROMPTS/verifier-gate-scope2.txt" && fail "gate-scope2's verifier evidence names the other item's directory"
+grep -q "(${SC1:0:8})" "$GATE_PROMPTS/verifier-gate-scope1.txt" || fail "verifier not shown this item's own commit"
+grep -q "(${SC2:0:8})" "$GATE_PROMPTS/verifier-gate-scope1.txt" && fail "gate-scope1's evidence lists the sibling's commit"
+grep -q "outside the item's lock scope is NOT evidence" "$GATE_PROMPTS/verifier-gate-scope1.txt" || fail "verifier prompt lacks the shared-checkout rule"
+grep -E "(${SC1:0:8}|${SC2:0:8}) left [1-9][0-9]* uncommitted path" "$SCRATCH/engine-scope.log" >/dev/null || { cat "$SCRATCH/engine-scope.log"; fail "neither scope item reported the other's dirty files as left untouched"; }
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.commit_extra_paths=[]' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+pass "scoped end-of-run commit: each item committed its own lock scope (+ commit_extra_paths), the sibling's files stayed uncommitted and unnamed, evidence and verifier prompt scoped, no bounces"
 curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}]' \
   | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
 snap TestAcct 10 5

@@ -45,6 +45,25 @@ thread_local! {
     static CURRENT_WORKID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
+thread_local! {
+    /// what the end-of-run commit did for the item running on this thread
+    /// (scoped commit, 2026-09-12); read by the close gate's evidence
+    static LAST_COMMIT: std::cell::RefCell<Option<CommitOutcome>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What the end-of-run commit did (bugfix 2026-09-12: it used to `git add -A`
+/// the whole shared checkout, sweeping other agents' unfinished files into a
+/// commit titled with this item's name, and the verifier then bounced the
+/// finished work over files it never touched).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CommitOutcome {
+    pub committed: bool,
+    /// paths still dirty in the checkout afterwards — another item's, never listed
+    pub outside_scope_dirty: usize,
+    /// "lock scope (k paths)" or "whole tree (item has no lockdirs)"
+    pub scope_label: String,
+}
+
 impl RunOut {
     fn plain(text: String) -> Self {
         Self { text, subtype: "success".into(), ..Default::default() }
@@ -290,10 +309,15 @@ fn run_all(
     };
 
     // git postwork is engine-enforced: changes are ALWAYS committed (and
-    // pushed when a remote exists)
+    // pushed when a remote exists) — limited to the item's lock scope plus
+    // the project's commit_extra_paths, so a sibling agent's unfinished
+    // files are never committed under this item's name (2026-09-12)
     if is_repo {
-        let _ = run_shell(topdir, "git add -A", 60);
-        let _ = run_shell(topdir, &format!("git commit -m 'iter: {} ({})'", sanitize(&item.name), short(&item.id)), 60);
+        let outcome = commit_scoped(topdir, item, &project.commit_extra_paths)?;
+        if outcome.committed {
+            println!("[engine] {} committed its {}", short(&item.id), outcome.scope_label);
+        }
+        LAST_COMMIT.with(|c| *c.borrow_mut() = Some(outcome));
         if has_remote {
             run_shell(topdir, "git push", 180)?;
         }
@@ -306,6 +330,122 @@ fn run_all(
 
 fn sanitize(s: &str) -> String {
     s.replace('\'', "").chars().take(120).collect()
+}
+
+/// A path relative to `topdir` when it lies under it (the git pathspec form),
+/// `.` for topdir itself, else the path as given.
+fn rel_to_topdir(path: &str, topdir: &str) -> String {
+    let top = topdir.trim_end_matches('/');
+    let p = path.trim_end_matches('/');
+    if p == top {
+        return ".".into();
+    }
+    match p.strip_prefix(&format!("{top}/")) {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => p.to_string(),
+    }
+}
+
+/// The git pathspecs an item's end-of-run commit — and its close-gate
+/// evidence — is limited to: its `lockdirs` with `{topdir}` expanded and
+/// made relative to the checkout, plus the project's `commit_extra_paths`.
+/// A lock entry naming a single file is a valid pathspec as it is.  Empty
+/// means the whole tree: the item has no lockdirs.  An entry outside the
+/// checkout cannot be committed here and is dropped.
+pub(crate) fn commit_scope(topdir: &str, item: &WorkItem, extra_paths: &[String]) -> Vec<String> {
+    if item.lockdirs.is_empty() {
+        return Vec::new();
+    }
+    let top = std::path::Path::new(topdir);
+    let mut scope: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        if !p.is_empty() && !scope.contains(&p) {
+            scope.push(p);
+        }
+    };
+    for d in &item.lockdirs {
+        let expanded = crate::prompt::expand_topdir_token(d, top);
+        let rel = rel_to_topdir(&expanded, topdir);
+        if rel.starts_with('/') || rel.starts_with("../") {
+            continue; // not inside this checkout
+        }
+        push(rel);
+    }
+    for e in extra_paths {
+        let e = e.trim().trim_start_matches("{topdir}/").trim_start_matches("./");
+        if !e.is_empty() && !e.starts_with('/') && !e.starts_with("../") {
+            push(e.trim_end_matches('/').to_string());
+        }
+    }
+    scope
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The engine's one log line about what the scoped commit did not touch:
+/// a count, never the paths — they belong to other items.
+fn leftover_line(id8: &str, n: usize) -> String {
+    format!("[engine] {id8} left {n} uncommitted path(s) outside its lock scope untouched")
+}
+
+/// The end-of-run commit, limited to `commit_scope`: stage only the scope,
+/// commit only the paths that staged (an explicit list via
+/// `--pathspec-from-file`, so a lock dir with nothing to commit cannot fail
+/// the whole commit), then count what is still dirty.  An item with no
+/// lockdirs keeps the whole-tree commit and says so in `scope_label`.
+pub(crate) fn commit_scoped(topdir: &str, item: &WorkItem, extra_paths: &[String]) -> Result<CommitOutcome, String> {
+    let scope = commit_scope(topdir, item, extra_paths);
+    let msg = format!("iter: {} ({})", sanitize(&item.name), short(&item.id));
+    let (scope_label, committed) = if scope.is_empty() {
+        let _ = run_shell(topdir, "git add -A", 60);
+        let ok = run_shell(topdir, &format!("git commit -m '{msg}'"), 60).is_ok();
+        ("whole tree (item has no lockdirs)".to_string(), ok)
+    } else {
+        let spec = scope.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
+        let _ = run_shell(topdir, &format!("git add -A -- {spec}"), 60);
+        // renames off: the commit's pathspec must name both the old and the new path
+        let staged = run_shell(topdir, &format!("git diff --cached --name-only --no-renames -z -- {spec}"), 30).unwrap_or_default();
+        let ok = if staged.trim_matches('\0').trim().is_empty() {
+            false
+        } else {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let list = std::env::temp_dir().join(format!(
+                "iter3-commit-{}-{}-{}.paths", short(&item.id), std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            ));
+            std::fs::write(&list, staged.as_bytes()).map_err(|e| format!("cannot write the commit path list: {e}"))?;
+            let r = run_shell(
+                topdir,
+                &format!("git commit -m '{msg}' --pathspec-from-file={} --pathspec-file-nul", shell_quote(&list.to_string_lossy())),
+                60,
+            );
+            let _ = std::fs::remove_file(&list);
+            r.is_ok()
+        };
+        (format!("lock scope ({} paths)", scope.len()), ok)
+    };
+    let outside_scope_dirty = run_shell(topdir, "git status --porcelain", 30)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+    println!("{}", leftover_line(short(&item.id), outside_scope_dirty));
+    Ok(CommitOutcome { committed, outside_scope_dirty, scope_label })
+}
+
+/// The close gate's git evidence for one run, limited to `scope` (whole tree
+/// when empty): the diffstat between the heads over the scope only, and the
+/// commits in that range that carry this item's id.
+pub(crate) fn git_run_evidence(topdir: &str, head_before: &str, head_after: &str, scope: &[String], id8: &str) -> (String, Vec<(String, String)>) {
+    let spec = if scope.is_empty() {
+        String::new()
+    } else {
+        format!(" -- {}", scope.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" "))
+    };
+    let diffstat = run_shell(topdir, &format!("git diff --stat {head_before} {head_after}{spec}"), 30)
+        .map(|s| gate::clip(s.trim(), 4_000))
+        .unwrap_or_default();
+    let log = run_shell(topdir, &format!("git log --format=%h%x09%s {head_before}..{head_after}"), 30).unwrap_or_default();
+    (diffstat, gate::commits_with_id(&log, id8))
 }
 
 /// Session timeout: the project's per-agent override, else the agent record's
@@ -977,12 +1117,14 @@ enum GateOutcome {
 /// when they all pass and a verify model is configured.
 fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &GateCtx) -> (GateOutcome, Evidence) {
     let head_after = git_head(&ctx.topdir);
-    let diffstat = if !head_after.is_empty() && head_after != ctx.head_before && !ctx.head_before.is_empty() {
-        run_shell(&ctx.topdir, &format!("git diff --stat {} {}", ctx.head_before, head_after), 30)
-            .map(|s| gate::clip(s.trim(), 4_000))
-            .unwrap_or_default()
+    // the evidence is limited to the same scope the end-of-run commit was:
+    // the range between the heads holds every sibling's commits too
+    let scope = commit_scope(&ctx.topdir, item, &project.commit_extra_paths);
+    let commit = LAST_COMMIT.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    let (diffstat, commits) = if !head_after.is_empty() && head_after != ctx.head_before && !ctx.head_before.is_empty() {
+        git_run_evidence(&ctx.topdir, &ctx.head_before, &head_after, &scope, short(&item.id))
     } else {
-        String::new()
+        (String::new(), Vec::new())
     };
     // always counted (2026-09-07): the verifier reads this line as engine
     // fact, and a 0 printed for an item whose gate never asked for children
@@ -996,6 +1138,13 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
         diffstat,
         children,
         open_reviews: gate::open_reviews(&ctx.details),
+        commit_scope: if commit.scope_label.is_empty() {
+            if scope.is_empty() { "whole tree (item has no lockdirs)".into() } else { format!("lock scope ({} paths)", scope.len()) }
+        } else {
+            commit.scope_label.clone()
+        },
+        outside_scope_dirty: commit.outside_scope_dirty,
+        commits,
     };
 
     let mut open: Vec<String> = Vec::new();
@@ -1255,6 +1404,133 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A throwaway git repo with one seed commit; returns its path.
+    fn temp_repo(tag: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("iter3-scoped-commit-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("README"), "seed\n").unwrap();
+        std::fs::write(dir.join("a/.keep"), "").unwrap();
+        std::fs::write(dir.join("b/.keep"), "").unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        run_shell(&d, "git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm seed && git config user.email t@t && git config user.name t", 30).unwrap();
+        d
+    }
+    fn dirty(d: &str, rel: &str) {
+        let p = std::path::Path::new(d).join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, format!("work {}\n", rel)).unwrap();
+    }
+    fn head_files(d: &str) -> Vec<String> {
+        run_shell(d, "git show --format= --name-only HEAD", 15).unwrap().lines().map(String::from).filter(|l| !l.is_empty()).collect()
+    }
+    fn item_with(lockdirs: &[&str]) -> WorkItem {
+        WorkItem { id: "11112222-3333-4444-5555-666677778888".into(), name: "scoped".into(), lockdirs: lockdirs.iter().map(|s| s.to_string()).collect(), ..Default::default() }
+    }
+
+    /// The end-of-run commit stays inside the item's lockdirs: a sibling's
+    /// dirty file in another directory is neither committed nor listed.
+    #[test]
+    fn end_of_run_commit_stays_inside_lockdirs() {
+        let d = temp_repo("t1");
+        dirty(&d, "a/x.rs");
+        dirty(&d, "b/y.rs");
+        let item = item_with(&["{topdir}/a"]);
+        let out = commit_scoped(&d, &item, &[]).unwrap();
+        assert!(out.committed);
+        assert_eq!(head_files(&d), vec!["a/x.rs".to_string()]);
+        let status = run_shell(&d, "git status --porcelain", 15).unwrap();
+        assert!(status.contains("b/y.rs"), "b/y.rs must still be dirty: {status}");
+        assert_eq!(out.outside_scope_dirty, 1);
+        assert!(out.scope_label.starts_with("lock scope"), "{}", out.scope_label);
+        assert!(run_shell(&d, "git log -1 --format=%s", 15).unwrap().trim().ends_with("(11112222)"));
+    }
+
+    #[test]
+    fn a_single_file_lockdir_is_a_valid_pathspec() {
+        let d = temp_repo("t2");
+        dirty(&d, "a/only.tsv");
+        dirty(&d, "a/other.tsv");
+        let item = item_with(&["{topdir}/a/only.tsv"]);
+        let out = commit_scoped(&d, &item, &[]).unwrap();
+        assert!(out.committed);
+        assert_eq!(head_files(&d), vec!["a/only.tsv".to_string()]);
+        assert_eq!(out.outside_scope_dirty, 1);
+    }
+
+    #[test]
+    fn extra_paths_are_committed_with_the_scope() {
+        let d = temp_repo("t3");
+        dirty(&d, "a/x.rs");
+        dirty(&d, "Agent_Recommendations.md");
+        dirty(&d, "b/y.rs");
+        dirty(&d, "b/deep/notes.agentmemory.iter.md");
+        let item = item_with(&["{topdir}/a/"]);
+        let out = commit_scoped(&d, &item, &["Agent_Recommendations.md".into(), "*.agentmemory.iter.md".into()]).unwrap();
+        assert!(out.committed);
+        let mut files = head_files(&d);
+        files.sort();
+        assert_eq!(files, vec!["Agent_Recommendations.md".to_string(), "a/x.rs".into(), "b/deep/notes.agentmemory.iter.md".into()]);
+        assert_eq!(out.outside_scope_dirty, 1);
+    }
+
+    #[test]
+    fn no_lockdirs_sweeps_and_says_so() {
+        let d = temp_repo("t4");
+        dirty(&d, "a/x.rs");
+        dirty(&d, "b/y.rs");
+        let item = item_with(&[]);
+        let out = commit_scoped(&d, &item, &[]).unwrap();
+        let mut files = head_files(&d);
+        files.sort();
+        assert_eq!(files, vec!["a/x.rs".to_string(), "b/y.rs".into()]);
+        assert_eq!(out.scope_label, "whole tree (item has no lockdirs)");
+        assert_eq!(out.outside_scope_dirty, 0);
+    }
+
+    #[test]
+    fn leftover_paths_are_counted_not_listed() {
+        let line = leftover_line("11112222", 1);
+        assert!(line.contains("left 1 uncommitted path(s) outside its lock scope untouched"), "{line}");
+        assert!(!line.contains("b/y.rs"));
+        // nothing to commit inside the scope: not committed, the sibling's file counted
+        let d = temp_repo("t5");
+        dirty(&d, "b/y.rs");
+        let out = commit_scoped(&d, &item_with(&["{topdir}/a"]), &[]).unwrap();
+        assert!(!out.committed);
+        assert_eq!(out.outside_scope_dirty, 1);
+    }
+
+    /// The evidence between two heads names only this item's scope and only
+    /// the commits carrying its id, even when a sibling committed in between.
+    #[test]
+    fn evidence_diffstat_ignores_sibling_commits() {
+        let d = temp_repo("t6");
+        let before = git_head(&d);
+        dirty(&d, "a/x.rs");
+        run_shell(&d, "git add -A && git commit -qm 'iter: mine (11112222)'", 30).unwrap();
+        dirty(&d, "b/y.rs");
+        run_shell(&d, "git add -A && git commit -qm 'iter: sibling (99998888)'", 30).unwrap();
+        let after = git_head(&d);
+        let (diffstat, commits) = git_run_evidence(&d, &before, &after, &["a".into()], "11112222");
+        assert!(diffstat.contains("a/x.rs"), "{diffstat}");
+        assert!(!diffstat.contains("b/y.rs"), "{diffstat}");
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].1, "iter: mine (11112222)");
+        // whole tree when the item has no lockdirs
+        let (all, _) = git_run_evidence(&d, &before, &after, &[], "11112222");
+        assert!(all.contains("b/y.rs"));
+    }
+
+    #[test]
+    fn commit_scope_is_relative_and_drops_outside_entries() {
+        let item = WorkItem { lockdirs: vec!["{topdir}/src/".into(), "{topdir}/data/one.tsv".into(), "/elsewhere/x".into(), "{topdir}/src".into()], ..Default::default() };
+        assert_eq!(commit_scope("/repo", &item, &["./Agent_Recommendations.md".into(), "{topdir}/*.agentmemory.iter.md".into(), "".into()]),
+            vec!["src".to_string(), "data/one.tsv".into(), "Agent_Recommendations.md".into(), "*.agentmemory.iter.md".into()]);
+        assert!(commit_scope("/repo", &WorkItem::default(), &["x".into()]).is_empty(), "no lockdirs = whole tree, extras irrelevant");
+    }
 
     /// A named account whose variable is unset is an error naming the
     /// variable and the file — never another account's token (2026-09-11).

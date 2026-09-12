@@ -407,6 +407,13 @@ pub struct Project {
     /// still on the 0–10 scale); read by the migration endpoint only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_scale: Option<u32>,
+    /// scoped end-of-run commit (bugfix 2026-09-12): the engine commits, and
+    /// shows the verifier, only an item's lock scope — plus these paths,
+    /// which agents write outside their scope by design.  Git pathspecs
+    /// relative to the checkout, globs allowed (pdy-dev:
+    /// ["Agent_Recommendations.md", "*.agentmemory.iter.md"]).
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub commit_extra_paths: Vec<String>,
 }
 fn default_session_chain_max() -> u32 { 3 }
 fn default_mainfile() -> String { "{topdir}/main.iter.md".into() }
