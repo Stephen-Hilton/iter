@@ -6,6 +6,7 @@ mod client;
 mod cli;
 mod dedup;
 mod engine;
+mod envstore;
 mod gate;
 mod prompt;
 mod usage;
@@ -80,23 +81,6 @@ struct EngineConfig {
 fn default_token_envar() -> String { "ITER_ENGINE_TOKEN".into() }
 fn default_env_file() -> String { "./.env".into() }
 
-fn load_env_file(path: &str) {
-    let Ok(content) = std::fs::read_to_string(path) else { return };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim().trim_matches('"').trim_matches('\'');
-            if !k.is_empty() && !k.contains(char::is_whitespace) && std::env::var(k).is_err() {
-                unsafe { std::env::set_var(k, v) };
-            }
-        }
-    }
-}
-
 fn main() {
     let args = Args::parse();
     if let Some(Cmd::Cli(cli_args)) = args.cmd {
@@ -118,7 +102,10 @@ fn main() {
             std::process::exit(2);
         }
     };
-    load_env_file(&cfg.env_file);
+    // seed the env store (and, once, the process environment) from the
+    // env_file; token reads from here on go through envstore::get, and the
+    // file is re-read while running (spec: account hot reload, 2026-09-11)
+    envstore::init(&cfg.env_file, &[cfg.token_envar.as_str()]);
     let token = std::env::var(&cfg.token_envar).unwrap_or_default();
     let api = Api::new(&cfg.data_url, &token);
 
@@ -142,7 +129,7 @@ fn main() {
         eprintln!("no engine token: set {} (mint via POST /api/users/<engine-user>/token as admin)", cfg.token_envar);
         std::process::exit(2);
     }
-    let mut rt = engine::EngineRuntime::new(api, cfg.engine_name.clone());
+    let mut rt = engine::EngineRuntime::new(api, cfg.engine_name.clone(), cfg.env_file.clone());
     if args.ticks > 0 {
         rt.max_ticks = Some(args.ticks);
     }
@@ -351,7 +338,7 @@ fn accounts(api: &Api, probe: bool) {
         for a in p.get("accounts").and_then(|a| a.as_array()).cloned().unwrap_or_default() {
             let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let envar = a.get("token_envar").and_then(|n| n.as_str()).unwrap_or("");
-            let tok = std::env::var(envar).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            let tok = envstore::get(envar);
             println!(
                 "  {name}: {envar} = {}",
                 if tok.is_some() { "SET" } else { "NOT SET (add to your .env)" }

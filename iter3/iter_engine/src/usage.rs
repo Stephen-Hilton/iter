@@ -343,6 +343,9 @@ pub fn accounts_json(accounts: &[iter_core::Account], in_use: &[String], now: Da
             let row = json!({
                 "name": a.name, "order": a.order, "switch": a.switch, "stop": a.stop,
                 "in_use": in_use.contains(&a.name),
+                // is the account's token set in the engine's env_file right now
+                // (spec: account hot reload, 2026-09-11) — the webui marks "unset"
+                "token": if crate::envstore::get(&a.token_envar).is_some() { "set" } else { "unset" },
                 "five_hour_pct": u.as_ref().map(|u| (u.five_hour_pct * 10.0).round() / 10.0),
                 "seven_day_pct": u.as_ref().map(|u| (u.seven_day_pct * 10.0).round() / 10.0),
                 "five_hour_resets_at": u.as_ref().and_then(|u| u.five_hour_resets_at),
@@ -374,6 +377,22 @@ pub fn next_json(accounts: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every heartbeat row says whether the account's token is set
+    /// (2026-09-11), so the webui can mark an account the engine cannot use.
+    #[test]
+    fn accounts_json_carries_the_token_flag() {
+        crate::envstore::set_for_test("USAGE_T11_SET_TOKEN", "tok");
+        crate::envstore::unset_for_test("USAGE_T11_UNSET_TOKEN");
+        let accounts = vec![
+            iter_core::Account { name: "Has".into(), token_envar: "USAGE_T11_SET_TOKEN".into(), order: 1, ..Default::default() },
+            iter_core::Account { name: "Not".into(), token_envar: "USAGE_T11_UNSET_TOKEN".into(), order: 2, ..Default::default() },
+        ];
+        let rows = accounts_json(&accounts, &[], Utc::now());
+        let flag = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap()["token"].as_str().unwrap().to_string();
+        assert_eq!(flag("Has"), "set");
+        assert_eq!(flag("Not"), "unset");
+    }
 
     #[test]
     fn expired_window_zeroes_out() {

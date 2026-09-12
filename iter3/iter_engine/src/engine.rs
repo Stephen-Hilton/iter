@@ -47,6 +47,9 @@ pub struct EngineRuntime {
     /// heartbeats then carry no usage snapshot — the ambient login's numbers
     /// would describe an account this engine is not running on
     holding: bool,
+    /// the env_file path from .iter/config.json — named in every
+    /// "no token" error so the reader knows which file to edit
+    env_file: String,
 }
 
 use crate::usage;
@@ -98,11 +101,62 @@ fn expand_topdir(topdir: &str) -> String {
     topdir.to_string()
 }
 
+/// The accounts whose token is not set in the engine's env_file right now
+/// (spec: account hot reload, 2026-09-11): never picked, never probed,
+/// never substituted.
+fn tokenless_accounts(accounts: &[iter_core::Account]) -> Vec<String> {
+    accounts.iter().filter(|a| crate::envstore::get(&a.token_envar).is_none()).map(|a| a.name.clone()).collect()
+}
+
+/// The project-wide hold reason when the ladder picks nothing (renders as the
+/// "blocked by: …" tag on every queued item): every account is missing its
+/// token, or every account is at its stop%.
+fn hold_reason(all_tokenless: bool) -> &'static str {
+    if all_tokenless { "no account token" } else { "accounts at stop%" }
+}
+
+/// The connectivity-test result for the engine record.  `token` is the R2
+/// resolution for `account`: an error means the nudge is NOT run — the
+/// result is red and names the variable — because a nudge with no token
+/// falls back to the machine's ambient login and would report that login's
+/// health and usage under the account's name (the 2026-09-11 false green).
+/// An empty account IS the ambient login, and the result says so.
+fn test_outcome(
+    token: Result<Option<String>, String>,
+    account: &str,
+    envar: &str,
+    requested: &str,
+    run: impl FnOnce(Option<String>) -> Result<(crate::work::RunOut, u128), String>,
+) -> Value {
+    let label = if account.is_empty() { "default (ambient CLI login)".to_string() } else { account.to_string() };
+    let token = match token {
+        Ok(t) => t,
+        Err(_) => {
+            return json!({
+                "requested": requested, "ts": now_utc(), "ok": false, "model": "haiku", "account": label,
+                "error": format!("no token for account '{account}' ({envar} unset)"),
+            });
+        }
+    };
+    match run(token) {
+        Ok((out, ms)) => json!({
+            "requested": requested, "ts": now_utc(), "ok": out.subtype == "success",
+            "ms": ms, "model": "haiku", "account": label,
+            "text": out.text.chars().take(200).collect::<String>(), "subtype": out.subtype,
+        }),
+        Err(e) => json!({
+            "requested": requested, "ts": now_utc(), "ok": false, "model": "haiku",
+            "account": label, "error": e.chars().take(500).collect::<String>(),
+        }),
+    }
+}
+
 impl EngineRuntime {
-    pub fn new(api: Api, name: String) -> Self {
+    pub fn new(api: Api, name: String, env_file: String) -> Self {
         Self {
             api,
             name,
+            env_file,
             seen_seq: HashMap::new(),
             last_full_refresh: Instant::now() - Duration::from_secs(86400 * 365),
             projects: HashMap::new(),
@@ -178,16 +232,44 @@ impl EngineRuntime {
 
     /// `claude -p "."` on haiku for the active account; the result and the
     /// refreshed usage snapshot go back on the engine record.
-    fn run_test(&mut self, engine: &Engine, account: &str) {
-        // token: the active account's env var, from whichever project defines it
-        let token = self
-            .projects
-            .values()
-            .flat_map(|p| p.accounts.iter())
-            .find(|a| a.name == account)
-            .and_then(|a| std::env::var(&a.token_envar).ok())
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty());
+    fn run_test(&mut self, engine: &Engine, chosen: &str) {
+        // which account to test: the engine's chosen one; while holding (no
+        // account pickable) the chosen one is "" but accounts ARE configured,
+        // and the ambient CLI login must not stand in for them — test the
+        // first account by order that has a token, else fail naming the first
+        // account without one.  "" is the ambient login only when no project
+        // configures any account.
+        let mut configured: Vec<iter_core::Account> = Vec::new();
+        for pn in engine.projects.keys() {
+            if let Some(p) = self.projects.get(pn) {
+                for a in &p.accounts {
+                    if !configured.iter().any(|x| x.name == a.name) {
+                        configured.push(a.clone());
+                    }
+                }
+            }
+        }
+        configured.sort_by_key(|a| a.order);
+        let tested: String = if !chosen.is_empty() || configured.is_empty() {
+            chosen.to_string()
+        } else {
+            configured
+                .iter()
+                .find(|a| crate::envstore::get(&a.token_envar).is_some())
+                .or(configured.first())
+                .map(|a| a.name.clone())
+                .unwrap_or_default()
+        };
+        let account = tested.as_str();
+        // token: the one resolution rule (work::resolve_account_token), from
+        // whichever project defines the account; a missing token fails the
+        // test outright — nudging without it would test the ambient login
+        let owner = self.projects.values().find(|p| p.accounts.iter().any(|a| a.name == account));
+        let token = match owner {
+            Some(p) => crate::work::resolve_account_token(p, account, &self.env_file),
+            None => crate::work::resolve_account_token(&Project::default(), account, &self.env_file),
+        };
+        let envar = owner.and_then(|p| crate::work::account_envar(p, account)).unwrap_or_else(|| "no token_envar configured".into());
         let cwd = engine
             .projects
             .values()
@@ -197,22 +279,18 @@ impl EngineRuntime {
             .filter(|t| std::path::Path::new(t).is_dir())
             .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
         println!("[engine] connectivity test requested at {} (account '{}')", engine.test_requested, if account.is_empty() { "default" } else { account });
-        let result = match crate::work::nudge(token, account, &cwd) {
-            Ok((out, ms)) => json!({
-                "requested": engine.test_requested, "ts": now_utc(), "ok": out.subtype == "success",
-                "ms": ms, "model": "haiku", "account": account,
-                "text": out.text.chars().take(200).collect::<String>(), "subtype": out.subtype,
-            }),
-            Err(e) => json!({
-                "requested": engine.test_requested, "ts": now_utc(), "ok": false, "model": "haiku",
-                "account": account, "error": e.chars().take(500).collect::<String>(),
-            }),
-        };
-        println!("[engine] connectivity test {}", if result["ok"].as_bool().unwrap_or(false) { "OK" } else { "FAILED" });
+        let result = test_outcome(token, account, &envar, &engine.test_requested, |tok| crate::work::nudge(tok, account, &cwd));
+        if result["ok"].as_bool().unwrap_or(false) {
+            println!("[engine] connectivity test OK");
+        } else {
+            println!("[engine] connectivity test FAILED{}", result["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default());
+        }
+        // the record keeps the engine's CHOSEN account label and usage; the
+        // tested account is named inside test_result
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
-            &json!({"test_result": result, "clear_test": true, "account": account,
-                    "usage": if self.holding { Value::Null } else { usage::snapshot_json(account, chrono::Utc::now()).unwrap_or(Value::Null) }}),
+            &json!({"test_result": result, "clear_test": true, "account": chosen,
+                    "usage": if self.holding { Value::Null } else { usage::snapshot_json(chosen, chrono::Utc::now()).unwrap_or(Value::Null) }}),
         );
     }
 
@@ -224,16 +302,17 @@ impl EngineRuntime {
         let stale_sec = (engine.probe_stale_min * 60) as i64;
         let mut any_accounts = false;
         let mut targets: Vec<(String, String)> = Vec::new(); // (account, token)
+        let mut skipped: Vec<(String, String)> = Vec::new(); // (account, envar) — no token set
         for project_name in engine.projects.keys() {
             if let Some(p) = self.projects.get(project_name) {
                 for a in &p.accounts {
                     any_accounts = true;
-                    if targets.iter().any(|(n, _)| n == &a.name) {
+                    if targets.iter().any(|(n, _)| n == &a.name) || skipped.iter().any(|(n, _)| n == &a.name) {
                         continue;
                     }
-                    let tok = std::env::var(&a.token_envar).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-                    if let Some(tok) = tok {
-                        targets.push((a.name.clone(), tok));
+                    match crate::envstore::get(&a.token_envar) {
+                        Some(tok) => targets.push((a.name.clone(), tok)),
+                        None => skipped.push((a.name.clone(), a.token_envar.clone())),
                     }
                 }
             }
@@ -263,6 +342,27 @@ impl EngineRuntime {
                 ),
                 Err(e) => eprintln!("[engine] usage probe '{name}' failed: {e}"),
             }
+        }
+        // an account with no token cannot be probed: say so, once per stale
+        // period (the same `due` rule as a real probe), instead of silently
+        // never reporting its usage
+        for (name, envar) in skipped {
+            if !due(self, &name) {
+                continue;
+            }
+            self.last_probe.insert(name.clone(), Instant::now());
+            println!("[engine] usage probe '{name}' skipped: {envar} not set");
+        }
+    }
+
+    /// Re-read the env_file when it changed (or `force`), refreshing every
+    /// `*_TOKEN` key plus each `token_envar` the served projects name; one
+    /// log line per reload that changed something, key names only.
+    fn reload_env(&self, force: bool) {
+        let declared: std::collections::HashSet<String> =
+            self.projects.values().flat_map(|p| p.accounts.iter().map(|a| a.token_envar.clone())).collect();
+        if let Some(ch) = crate::envstore::reload_if_changed(&declared, force) {
+            println!("[engine] {}", ch.log_line());
         }
     }
 
@@ -315,6 +415,9 @@ impl EngineRuntime {
 
     fn tick(&mut self, engine: &Engine) {
         self.prune_running();
+        // the env_file may have changed since the last tick: an account token
+        // added, rotated or removed takes effect here, without a restart
+        self.reload_env(false);
 
         // account selection: exclusion-with-fallback against other LIVE engines —
         // "Running" per the record AND heartbeated within three ticks (fixed
@@ -349,7 +452,8 @@ impl EngineRuntime {
         for project_name in engine.projects.keys() {
             if let Some(p) = self.projects.get(project_name) {
                 let map = usage::usage_map(&p.accounts, now);
-                if let Some(acct) = pick_account(&p.accounts, &map, &in_use) {
+                let tokenless = tokenless_accounts(&p.accounts);
+                if let Some(acct) = pick_account(&p.accounts, &map, &in_use, &tokenless) {
                     chosen_account = acct.name.clone();
                     break;
                 }
@@ -381,22 +485,18 @@ impl EngineRuntime {
             v
         };
         self.holding = chosen_account.is_empty() && !all_accounts.is_empty();
+        // the hold names its cause: no token set anywhere is not "no usage left"
+        let all_tokenless = !all_accounts.is_empty() && all_accounts.iter().all(|a| crate::envstore::get(&a.token_envar).is_none());
         let accounts = usage::accounts_json(&all_accounts, &in_use, now);
         let next = usage::next_json(&accounts);
         let _ = self.api.post(
             &format!("/api/engines/{}/heartbeat", self.name),
             &json!({"state": "Running", "account": chosen_account,
-                    "hold": if self.holding { "all accounts at stop%" } else { "" },
+                    "hold": if !self.holding { "" } else if all_tokenless { "no account token" } else { "all accounts at stop%" },
                     "usage": if self.holding { Value::Null } else { usage::snapshot_json(&chosen_account, now).unwrap_or(Value::Null) },
                     "accounts": accounts, "next": next}),
         );
 
-        // connectivity test requested from the webui: one haiku nudge, then
-        // report the outcome (and the refreshed usage) via heartbeat
-        if !engine.test_requested.is_empty() && engine.test_requested != self.last_test_handled {
-            self.last_test_handled = engine.test_requested.clone();
-            self.run_test(engine, &chosen_account);
-        }
         // stop requests for items THIS engine is running (workitem_stop.md)
         for items in self.items.values() {
             for i in items.iter().filter(|i| i.stop_requested && i.state == "in-progress" && i.engine == self.name) {
@@ -414,6 +514,9 @@ impl EngineRuntime {
             > Duration::from_secs(engine.full_refresh_minutes.max(1) * 60);
         if full_refresh {
             self.last_full_refresh = Instant::now();
+            // a stamp can lie (clock moved, a file restored with an old
+            // mtime): the periodic refresh re-reads the env_file regardless
+            self.reload_env(true);
         }
 
         for project_name in engine.projects.keys() {
@@ -447,6 +550,11 @@ impl EngineRuntime {
                 if let Ok(v) = self.api.get(&format!("/api/projects/{project_name}")) {
                     if let Ok(p) = serde_json::from_value::<Project>(v) {
                         self.projects.insert(project_name.clone(), p);
+                        // a new or renamed account may name a variable the
+                        // file already holds: re-read it against the new set
+                        if !full_refresh {
+                            self.reload_env(true);
+                        }
                     }
                 }
             }
@@ -503,6 +611,15 @@ impl EngineRuntime {
             let Some(dirs) = engine.projects.get(project_name) else { continue };
             let topdir = expand_topdir(dirs.dirs.get("topdir").map(String::as_str).unwrap_or("."));
             self.dispatch(engine, &project, &topdir, &in_use);
+        }
+
+        // connectivity test requested from the webui: one haiku nudge, then
+        // report the outcome (and the refreshed usage) via heartbeat.  After
+        // the sync, so a request handled on a fresh process's first tick sees
+        // the projects' accounts (before: none known -> the ambient login)
+        if !engine.test_requested.is_empty() && engine.test_requested != self.last_test_handled {
+            self.last_test_handled = engine.test_requested.clone();
+            self.run_test(engine, &chosen_account);
         }
     }
 
@@ -590,20 +707,33 @@ impl EngineRuntime {
             account = None;
         } else {
             let map = usage::usage_map(&project.accounts, now);
-            match pick_account(&project.accounts, &map, in_use) {
+            // an account with no token in the env_file is never picked — the
+            // item is not claimed, so it can never be billed to another
+            // account's token by the spawn path (2026-09-11)
+            let tokenless = tokenless_accounts(&project.accounts);
+            match pick_account(&project.accounts, &map, in_use, &tokenless) {
                 Some(a) => {
                     usage_pct = map.get(&a.name).copied().unwrap_or(0);
                     account = Some(a.clone());
                 }
                 None => {
-                    // all accounts at/over their stop%: stop all activity and
-                    // monitor for the usage refresh (expiry zeroes windows)
-                    println!(
-                        "[engine] {project_name}: all accounts at stop% — holding until a usage window resets"
-                    );
+                    // every account is missing its token, or all accounts are
+                    // at/over their stop%: stop all activity and monitor (a
+                    // token appears on the next reload; expiry zeroes windows)
+                    let all_tokenless = tokenless.len() == project.accounts.len();
+                    if all_tokenless {
+                        println!(
+                            "[engine] {project_name}: no account token is set — {} accounts configured, none usable",
+                            project.accounts.len()
+                        );
+                    } else {
+                        println!(
+                            "[engine] {project_name}: all accounts at stop% — holding until a usage window resets"
+                        );
+                    }
                     usage_pct = 100;
                     account = None;
-                    hold = Some("accounts at stop%".into());
+                    hold = Some(hold_reason(all_tokenless).into());
                 }
             }
         }
@@ -1118,6 +1248,41 @@ impl EngineRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hold_reason_names_the_missing_token() {
+        assert_eq!(hold_reason(true), "no account token");
+        assert_eq!(hold_reason(false), "accounts at stop%");
+    }
+
+    /// A tokenless account's test is red and never nudges (a nudge with no
+    /// token tests the ambient login and files its usage under the account's
+    /// name); an empty account is the ambient login and the result says so.
+    #[test]
+    fn test_result_for_a_tokenless_account_is_not_ok() {
+        let ok_run = |text: &str| crate::work::RunOut { subtype: "success".into(), text: text.into(), ..Default::default() };
+        let r = test_outcome(
+            Err("account 'Dev4' has no token: DEV4_TOKEN is not set in /x/.env".into()),
+            "Dev4", "DEV4_TOKEN", "2026-09-11T10:00:00Z",
+            |_| panic!("must not nudge without the account's token"),
+        );
+        assert_eq!(r["ok"], false);
+        assert_eq!(r["account"], "Dev4");
+        assert_eq!(r["error"], "no token for account 'Dev4' (DEV4_TOKEN unset)");
+        let r = test_outcome(Ok(None), "", "", "t", |tok| {
+            assert!(tok.is_none());
+            Ok((ok_run("hi"), 5))
+        });
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["account"], "default (ambient CLI login)");
+        let r = test_outcome(Ok(Some("tok".into())), "Dev1", "DEV1_TOKEN", "t", |tok| {
+            assert_eq!(tok.as_deref(), Some("tok"));
+            Ok((ok_run("hi"), 5))
+        });
+        assert_eq!((r["ok"].as_bool(), r["account"].as_str()), (Some(true), Some("Dev1")));
+        let r = test_outcome(Ok(Some("tok".into())), "Dev1", "DEV1_TOKEN", "t", |_| Err("claude exited 1".into()));
+        assert_eq!((r["ok"].as_bool(), r["error"].as_str()), (Some(false), Some("claude exited 1")));
+    }
 
     #[test]
     fn retry_after_tag_shows_hhmm() {

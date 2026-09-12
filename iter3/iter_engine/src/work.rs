@@ -633,6 +633,30 @@ pub(crate) fn parse_claude_stream(account: &str, raw: &str) -> (String, RunOut) 
     (sid, parse_claude_json(raw))
 }
 
+/// The token a session billed to `account` runs with (spec: account hot
+/// reload, 2026-09-11).  `""` is the ambient CLI login (no accounts
+/// configured): `Ok(None)`.  A named account resolves through the env store
+/// — never `std::env`, never another account's variable — and a missing
+/// value is an error the caller propagates, so the run fails loudly instead
+/// of being billed to whichever other account happened to be set.
+pub(crate) fn resolve_account_token(project: &Project, account: &str, env_file: &str) -> Result<Option<String>, String> {
+    if account.is_empty() {
+        return Ok(None);
+    }
+    match project.accounts.iter().find(|a| a.name == account) {
+        Some(a) => match crate::envstore::get(&a.token_envar) {
+            Some(tok) => Ok(Some(tok)),
+            None => Err(format!("account '{account}' has no token: {} is not set in {env_file}", a.token_envar)),
+        },
+        None => Err(format!("account '{account}' has no token: (no token_envar configured) is not set in {env_file}")),
+    }
+}
+
+/// The variable a named account reads its token from, if the project names it.
+pub(crate) fn account_envar(project: &Project, account: &str) -> Option<String> {
+    project.accounts.iter().find(|a| a.name == account).map(|a| a.token_envar.clone())
+}
+
 /// Spawn with an explicit environment (the multi-turn session path).
 fn spawn_claude_env(
     project: &Project,
@@ -652,13 +676,7 @@ fn spawn_claude_env(
     for f in extra_args {
         cmd.arg(f);
     }
-    let token = project
-        .accounts
-        .iter()
-        .filter(|a| account.is_empty() || a.name == account)
-        .chain(project.accounts.iter())
-        .find_map(|a| std::env::var(&a.token_envar).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()));
-    if let Some(tok) = token {
+    if let Some(tok) = resolve_account_token(project, account, &crate::envstore::env_file())? {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", tok);
     }
     cmd.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -691,16 +709,9 @@ pub(crate) fn spawn_claude(
         cmd.arg(f);
     }
     // route billing to the CHOSEN account's token (ladder + exclusion picked
-    // it); fall back to the first configured token that is set
-    let token = project
-        .accounts
-        .iter()
-        .filter(|a| account.is_empty() || a.name == account)
-        .chain(project.accounts.iter())
-        .find_map(|a| {
-            std::env::var(&a.token_envar).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
-        });
-    if let Some(tok) = token {
+    // it); a named account whose token is not set is an error, never a
+    // fallback to some other account's token (2026-09-11)
+    if let Some(tok) = resolve_account_token(project, account, &crate::envstore::env_file())? {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", tok);
     }
     cmd.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -775,8 +786,13 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
 /// Connectivity nudge (spec: engine chip "test"): `claude -p "."` on haiku
 /// with no other context, billed to `account`'s token when one is configured.
 /// Proves the CLI + token work; its rate_limit_event line refreshes the
-/// account's usage snapshot as a side effect.
+/// account's usage snapshot as a side effect.  A named account always comes
+/// with its token (the caller resolved it, or refused to nudge); with no
+/// token the run is the ambient CLI login and its numbers are filed under
+/// the default snapshot, never under a real account's name (2026-09-11).
 pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut, u128), String> {
+    debug_assert!(token.is_some() || account.is_empty(), "a named account must not nudge without its token");
+    let usage_key = if token.is_some() { account } else { "" };
     let started = Instant::now();
     let mut cmd = Command::new("claude");
     cmd.arg("-p").arg(".").arg("--output-format").arg("stream-json").arg("--verbose").arg("--model").arg("haiku").arg("--max-turns").arg("1");
@@ -786,7 +802,7 @@ pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut,
     cmd.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
     cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let raw = wait_with_timeout(cmd, 120)?;
-    Ok((parse_claude_stream(account, &raw).1, started.elapsed().as_millis()))
+    Ok((parse_claude_stream(usage_key, &raw).1, started.elapsed().as_millis()))
 }
 
 /// The result object — the last line of stream-json, or all of
@@ -1239,6 +1255,28 @@ fn close(api: &Api, _engine_name: &str, project: &Project, item: WorkItem, resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A named account whose variable is unset is an error naming the
+    /// variable and the file — never another account's token (2026-09-11).
+    #[test]
+    fn a_named_account_without_a_token_is_an_error() {
+        crate::envstore::set_for_test("WORK_T7_A_TOKEN", "tok-a");
+        crate::envstore::unset_for_test("WORK_T7_B_TOKEN");
+        let p = Project {
+            accounts: vec![
+                iter_core::Account { name: "A".into(), token_envar: "WORK_T7_A_TOKEN".into(), order: 1, ..Default::default() },
+                iter_core::Account { name: "B".into(), token_envar: "WORK_T7_B_TOKEN".into(), order: 2, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let f = "/x/.iter/.env";
+        assert_eq!(resolve_account_token(&p, "A", f), Ok(Some("tok-a".into())));
+        assert_eq!(resolve_account_token(&p, "B", f), Err("account 'B' has no token: WORK_T7_B_TOKEN is not set in /x/.iter/.env".into()));
+        assert_eq!(resolve_account_token(&p, "", f), Ok(None), "no account = the ambient login");
+        assert_eq!(resolve_account_token(&p, "Ghost", f), Err("account 'Ghost' has no token: (no token_envar configured) is not set in /x/.iter/.env".into()));
+        assert_eq!(account_envar(&p, "B").as_deref(), Some("WORK_T7_B_TOKEN"));
+        assert_eq!(account_envar(&p, "Ghost"), None);
+    }
 
     #[test]
     fn claude_json_result_is_parsed_and_text_falls_back() {

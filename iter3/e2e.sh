@@ -509,6 +509,8 @@ python3 "$SCRATCH/probe_server.py" "$PROBE_PORT" "$PROBE_LOG" "$FUTURE" &
 PROBE_PID=$!
 export ITER_USAGE_PROBE_URL="http://127.0.0.1:$PROBE_PORT/v1/messages"
 ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT")
+# an account with no token is never picked (2026-09-11), so the fake token must exist before the account does
+export FAKE_TOKEN="tok-test-1yr"
 echo "$ITEM" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}]' \
   | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "project accounts update"
 cat > "$ITER_USAGE_DIR/iter3-usage-TestAcct.json" <<EOF
@@ -923,6 +925,58 @@ R3=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{
 [ ! -f "$SAMPLE/out_rot3.txt" ] || fail "engine ran with every account at stop%"
 grep -q "all accounts at stop%" "$SCRATCH/engine-rot3.log" || fail "stop-hold not logged"
 pass "account rotation: A over switch -> B's token used and reported; both over switch -> lowest order under stop; all at stop -> hold"
+
+# ---- account token hot reload (2026-09-11): a named account with no token is never substituted; the env_file is re-read while running ----
+# one account whose variable is set nowhere: nothing runs, the probe says why, the item says why, the test is red
+unset DEV9_TOKEN
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"Dev9","token_envar":"DEV9_TOKEN","order":1,"switch":80,"stop":99}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "Dev9 account update"
+rm -f "$ITER_USAGE_DIR/iter3-usage-Dev9.json"
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=1' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null || fail "engine probe_stale_min (hot reload)"
+: > "$GATE_PROMPTS/tokens.txt"
+HR=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-hot1","agent":"gatetest","priority":0,"lockdirs":["{topdir}/hot1/"]}' | jq -r .id)
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/engines/Engine01/test" -d '{}' >/dev/null || fail "engine test request (tokenless)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-hot1.log" 2>&1) || true
+grep -q "usage probe 'Dev9' skipped: DEV9_TOKEN not set" "$SCRATCH/engine-hot1.log" || { cat "$SCRATCH/engine-hot1.log"; fail "tokenless account: probe skip not logged"; }
+grep -q "no account token is set — 1 accounts configured, none usable" "$SCRATCH/engine-hot1.log" || { cat "$SCRATCH/engine-hot1.log"; fail "tokenless hold not logged"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR" | jq -r '.tags[0].text')" = "blocked by: no account token" ] || fail "tokenless-held item not tagged: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR" | jq -c .tags)"
+[ "$(st_of "$HR")" = queued ] || fail "tokenless account: item left queued state ($(st_of "$HR"))"
+grep -q "token=" "$GATE_PROMPTS/tokens.txt" && fail "a run happened with no account token: $(cat "$GATE_PROMPTS/tokens.txt")"
+ENG=$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01")
+[ "$(echo "$ENG" | jq -r .hold)" = "no account token" ] || fail "heartbeat hold is not 'no account token': $(echo "$ENG" | jq -c '{hold,account}')"
+[ "$(echo "$ENG" | jq -r '.accounts[]|select(.name=="Dev9").token')" = unset ] || fail "heartbeat does not flag Dev9's token as unset: $(echo "$ENG" | jq -c .accounts)"
+[ "$(echo "$ENG" | jq -r .test_result.ok)" = false ] || fail "connectivity test on a tokenless account was not red: $(echo "$ENG" | jq -c .test_result)"
+[ "$(echo "$ENG" | jq -r .test_result.error)" = "no token for account 'Dev9' (DEV9_TOKEN unset)" ] || fail "test error text: $(echo "$ENG" | jq -c .test_result)"
+grep -q "connectivity test FAILED: no token for account 'Dev9' (DEV9_TOKEN unset)" "$SCRATCH/engine-hot1.log" || fail "test failure not logged"
+[ ! -f "$ITER_USAGE_DIR/iter3-usage-Dev9.json" ] || fail "a snapshot was written for an account that never ran: $(cat "$ITER_USAGE_DIR/iter3-usage-Dev9.json")"
+pass "tokenless account: never picked (blocked by: no account token), probe skip logged, test red and named, no snapshot written"
+# the token appears in the env_file WHILE the engine runs (a fresh process would read it at startup):
+# picked up on the next tick, the held item runs billed to it, the record says set
+: > "$GATE_PROMPTS/tokens.txt"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 10 > "$SCRATCH/engine-hot2.log" 2>&1) &
+HOTPID=$!
+sleep 3
+echo 'DEV9_TOKEN=tok-dev9' >> "$SAMPLE/.env"
+wait $HOTPID || true
+grep -q "env_file reloaded: +DEV9_TOKEN" "$SCRATCH/engine-hot2.log" || { cat "$SCRATCH/engine-hot2.log"; fail "env_file reload not logged"; }
+grep -q "tok-dev9" "$SCRATCH/engine-hot2.log" && fail "the reload line printed a token value"
+grep -q "token=tok-dev9 name=gate-hot1" "$GATE_PROMPTS/tokens.txt" || { cat "$GATE_PROMPTS/tokens.txt"; cat "$SCRATCH/engine-hot2.log"; fail "the run was not billed to the hot-loaded token"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r '.accounts[]|select(.name=="Dev9").token')" = set ] || fail "heartbeat does not show Dev9's token as set"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .hold)" = "" ] || fail "hold not cleared after the token appeared"
+[ "$(jq -r .source "$ITER_USAGE_DIR/iter3-usage-Dev9.json")" = stream ] || fail "the run's rate_limit_event did not land in Dev9's own snapshot"
+# the line is deleted again while the engine runs: removed on the next tick, nothing picked, the reason named
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 9 > "$SCRATCH/engine-hot3.log" 2>&1) &
+HOTPID=$!
+sleep 2
+grep -v '^DEV9_TOKEN=' "$SAMPLE/.env" > "$SAMPLE/.env.new" && mv "$SAMPLE/.env.new" "$SAMPLE/.env"
+sleep 2
+HR2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"hot2 work","agent":"exec","exec_shell":"echo h > out_hot2.txt","priority":0,"lockdirs":["{topdir}/hot2/"]}' | jq -r .id)
+wait $HOTPID || true
+grep -q "env_file reloaded: -DEV9_TOKEN" "$SCRATCH/engine-hot3.log" || { cat "$SCRATCH/engine-hot3.log"; fail "token removal not logged"; }
+[ ! -f "$SAMPLE/out_hot2.txt" ] || fail "engine ran work after its only token was removed"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -r '.tags[0].text')" = "blocked by: no account token" ] || { cat "$SCRATCH/engine-hot3.log"; fail "item not tagged after the token was removed: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -c .tags)"; }
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=0' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
+pass "account hot reload: +DEV9_TOKEN picked up without a restart (run billed to it, record says set), -DEV9_TOKEN stops picks and names the reason"
 curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}]' \
   | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
 snap TestAcct 10 5

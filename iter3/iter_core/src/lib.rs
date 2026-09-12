@@ -886,15 +886,20 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 /// `usage` maps account name -> max(5hr%, 7d%); missing = 0 (unknown usage
 /// never blocks). `in_use` are accounts other Running engines currently hold.
 /// Pass 1 uses `switch` thresholds, pass 2 `stop`; None = all accounts stopped.
+/// `tokenless` are accounts whose token is not set in the engine's env_file
+/// (2026-09-11): never picked, in either pass — a named account is never
+/// substituted with another account's token.
 pub fn pick_account<'a>(
     accounts: &'a [Account],
     usage: &BTreeMap<String, u8>,
     in_use: &[String],
+    tokenless: &[String],
 ) -> Option<&'a Account> {
     for threshold in ["switch", "stop"] {
         for exclusion_active in [true, false] {
             let mut sorted: Vec<&Account> = accounts
                 .iter()
+                .filter(|a| !tokenless.contains(&a.name))
                 .filter(|a| !exclusion_active || !in_use.contains(&a.name))
                 .collect();
             sorted.sort_by_key(|a| a.order);
@@ -1122,7 +1127,7 @@ mod tests {
     fn ladder_prefers_unused_account() {
         let accounts = vec![acct("Dev1", 1, 80, 99), acct("Dev2", 2, 80, 99)];
         let usage = BTreeMap::new();
-        let picked = pick_account(&accounts, &usage, &["Dev1".into()]).unwrap();
+        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[]).unwrap();
         assert_eq!(picked.name, "Dev2");
     }
 
@@ -1130,7 +1135,7 @@ mod tests {
     fn ladder_falls_back_to_shared_when_exclusion_empties() {
         let accounts = vec![acct("Dev1", 1, 80, 99)];
         let usage = BTreeMap::new();
-        let picked = pick_account(&accounts, &usage, &["Dev1".into()]).unwrap();
+        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[]).unwrap();
         assert_eq!(picked.name, "Dev1");
     }
 
@@ -1140,13 +1145,28 @@ mod tests {
         let mut usage = BTreeMap::new();
         usage.insert("Dev1".to_string(), 85u8);
         // Dev1 over switch, Dev2 under: pick Dev2
-        assert_eq!(pick_account(&accounts, &usage, &[]).unwrap().name, "Dev2");
+        assert_eq!(pick_account(&accounts, &usage, &[], &[]).unwrap().name, "Dev2");
         usage.insert("Dev2".to_string(), 90u8);
         // both over switch, both under stop: pass 2 picks Dev1 (order)
-        assert_eq!(pick_account(&accounts, &usage, &[]).unwrap().name, "Dev1");
+        assert_eq!(pick_account(&accounts, &usage, &[], &[]).unwrap().name, "Dev1");
         usage.insert("Dev1".to_string(), 99u8);
         usage.insert("Dev2".to_string(), 99u8);
         // both at stop: nothing
-        assert!(pick_account(&accounts, &usage, &[]).is_none());
+        assert!(pick_account(&accounts, &usage, &[], &[]).is_none());
+    }
+
+    /// An account with no token in the engine's env_file is never picked
+    /// (2026-09-11): the ladder steps over it in both passes, and when every
+    /// account is tokenless nothing is picked at all.
+    #[test]
+    fn pick_account_skips_a_tokenless_account() {
+        let accounts = vec![acct("Dev1", 1, 80, 99), acct("Dev2", 2, 80, 99)];
+        let usage = BTreeMap::new();
+        assert_eq!(pick_account(&accounts, &usage, &[], &["Dev1".into()]).unwrap().name, "Dev2");
+        // pass 2 (stop) must skip it too
+        let mut over = BTreeMap::new();
+        over.insert("Dev2".to_string(), 85u8);
+        assert_eq!(pick_account(&accounts, &over, &[], &["Dev1".into()]).unwrap().name, "Dev2");
+        assert!(pick_account(&accounts, &usage, &[], &["Dev1".into(), "Dev2".into()]).is_none());
     }
 }

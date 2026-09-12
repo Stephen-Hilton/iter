@@ -481,8 +481,10 @@ async function load(){
     // every account's windows + when it is next under its stop% (engine-owned, soonest first)
     const accts=Array.isArray(e.accounts)?e.accounts:[];
     const acctTitle=a=>`${a.name}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
-      +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate");
-    const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${esc(a.name)} ${esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
+      +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
+      +(a.token==="unset"?" · NO TOKEN in the engine's env_file":"");
+    // an account whose token is not set in the engine's env_file (a.token==="unset", engines since 2026-09-11) is marked, not timed
+    const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${a.token==="unset"?"⚠ "+esc(a.name)+" no token":esc(a.name)+" "+esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
     const nx=e.next&&e.next.account?e.next:null;
     const usage=holding?`<br>• 5h <b>--</b><br>• 7d <b>--</b>`
       +(nx?`<br>• next: <b>${esc(nx.account)}</b> <span title="at ${esc(at(nx.available_at))}">${esc(nx.available_at>Date.now()/1000?"in "+fmtDur(nx.available_at):"resetting…")}</span>`:`<br>• next: <span class="kv">no reset time on record</span>`)
@@ -494,7 +496,7 @@ async function load(){
     const t=e.test_result;
     const test=e.test_requested?`<span class="kv" data-testing="${esc(e.name)}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
-    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b> ${holding?`<span title="${esc(e.hold)}">Suspended, no usage left</span>`:esc(e.state)}${alive?"":" (offline)"}${acctLabel}${usage}
+    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b> ${holding?`<span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:esc(e.state)}${alive?"":" (offline)"}${acctLabel}${usage}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")} · ${esc(e.host||"?")}
       <br>serves: ${esc(Object.keys(e.projects||{}).join(", ")||"—")}
       <br><button class="ghost sm" data-test="${esc(e.name)}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
