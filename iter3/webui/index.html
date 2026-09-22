@@ -28,6 +28,20 @@ body.viewer .docbox,body.viewer #newitem,body.viewer .actbtn,body.viewer #doc-ad
 .count span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .count.zero{opacity:.38}
 .count.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+/* use-case progress row: pills under the counts bar, wrapping on laptops and scrolling sideways on phones, each pill filled to its done/total share */
+#ucrow{display:flex;gap:10px;align-items:center;padding:0 18px 10px}
+#ucrow.empty{display:none}
+#ucrow .uclabel{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);flex:none}
+#ucchips{display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-width:0}
+/* depth ruler: one short tick per nesting level, hung under the header at the x where tiles of that depth start (--tick-x from JS, --tick-step 22px / 10px on phones) */
+#depthticks{position:absolute;left:var(--tick-x,0px);bottom:-6px;height:6px;width:calc(var(--tick-n,0) * var(--tick-step,22px) + 1px);pointer-events:none;
+  background:repeating-linear-gradient(90deg,#4b5261 0 1px,transparent 1px var(--tick-step,22px))}
+#depthticks.hide{display:none}
+.count.uc{padding:2px 10px;gap:7px;border-radius:6px;background-color:var(--bg)}
+.count.uc b{font-size:13px}
+.count.uc span{text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)}
+.count.uc span .ucprio{color:var(--dim);font-size:11px;margin-right:5px}
+.count.uc.done b{color:var(--ok)}
 .count.total b{color:var(--text)}
 .count.c-in-progress b{color:#f2d24b}.count.c-queued b{color:var(--accent)}
 .count.c-question b{color:var(--q)}.count.c-failed b{color:var(--bad)}
@@ -171,6 +185,12 @@ a{color:var(--accent)}
   #counts .tools{margin-left:0;width:100%;justify-content:space-between}
   #counts .tools button{padding:5px 10px;font-size:13px}
   #counts .tools select{max-width:140px;padding:4px 6px;font-size:13px}
+  #ucrow{padding:0 12px 6px;gap:6px;min-width:0}
+  #ucrow .uclabel{display:none}
+  #ucchips{flex-wrap:nowrap;overflow-x:auto;width:100%;padding-bottom:2px;scrollbar-width:none}
+  #ucchips::-webkit-scrollbar{display:none}
+  .count.uc{padding:1px 7px;gap:5px;flex:none}
+  #depthticks{--tick-step:10px}
   #brandrow button{padding:4px 10px;font-size:13px}
   #layout{display:block !important;min-height:0}
   #aside-grip{display:none}
@@ -226,7 +246,6 @@ a{color:var(--accent)}
   </div>
   <div id="counts">
     <div id="chips" style="display:flex;gap:8px;align-items:center"></div>
-    <div id="ucchips" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" title="usecase progress: complete / total items carrying the usecase tag — click to filter"></div>
     <div class="tools">
       <button id="newitem">+ New workitem</button>
       <label class="kv">sort
@@ -243,6 +262,11 @@ a{color:var(--accent)}
       <button class="ghost" id="refresh">refresh</button>
     </div>
   </div>
+  <div id="ucrow" class="empty" title="usecase progress: complete / total items carrying the usecase tag — click to filter">
+    <span class="uclabel">use cases</span>
+    <div id="ucchips"></div>
+  </div>
+  <div id="depthticks" aria-hidden="true"></div>
 </div>
 
 <div id="login">
@@ -403,10 +427,10 @@ async function boot(){
   (()=>{const grip=$("#aside-grip"),aside=document.querySelector("aside");if(!grip||!aside)return;
     grip.onpointerdown=e=>{e.preventDefault();grip.setPointerCapture(e.pointerId);grip.classList.add("dragging");document.body.classList.add("resizing");
       const x0=e.clientX,w0=aside.getBoundingClientRect().width;
-      grip.onpointermove=ev=>{const w=Math.max(160,Math.min(window.innerWidth*0.6,w0+ev.clientX-x0));document.documentElement.style.setProperty("--aside-w",w+"px");};
+      grip.onpointermove=ev=>{const w=Math.max(160,Math.min(window.innerWidth*0.6,w0+ev.clientX-x0));document.documentElement.style.setProperty("--aside-w",w+"px");placeDepthTicks(lastMaxDepth);};
       grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;grip.classList.remove("dragging");document.body.classList.remove("resizing");
         try{localStorage.setItem("iter_aside_w",String(Math.round(aside.getBoundingClientRect().width)));}catch(e){}};};
-    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter_aside_w");}catch(e){}};})();
+    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter_aside_w");}catch(e){}placeDepthTicks(lastMaxDepth);};})();
   try{token=localStorage.getItem("iter_token");me=localStorage.getItem("iter_user");myRole=localStorage.getItem("iter_role")||"";
       const s=localStorage.getItem("iter_sort");if(s)$("#sort").value=s;}catch(e){}
   if(token){try{await load();return;}catch(e){token=null;}}
@@ -593,7 +617,9 @@ function renderCounts(){
   itemsCache.forEach(i=>ucOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
   const names=Object.keys(uc).sort((a,b)=>(uc[a].prio-uc[b].prio)||a.localeCompare(b));
   if(ucFilter&&!uc[ucFilter])ucFilter="";
-  $("#ucchips").innerHTML=names.map(n=>`<div class="count ${ucFilter===n?"active":""}" data-uc="${esc(n)}" style="border-left:3px solid ${UC_COLOR}"><b>${uc[n].done}/${uc[n].total}</b><span>P${uc[n].prio} ${esc(n)}</span></div>`).join("");
+  $("#ucrow").classList.toggle("empty",names.length===0);
+  $("#ucchips").innerHTML=names.map(n=>{const u=uc[n],pct=u.total?Math.round(100*u.done/u.total):0;
+    return `<div class="count uc ${ucFilter===n?"active":""} ${u.done===u.total?"done":""}" data-uc="${esc(n)}" title="${u.done} of ${u.total} items complete (${pct}%) — click to filter" style="background:linear-gradient(90deg,${UC_COLOR}55 ${pct}%,var(--bg) ${pct}%)"><b>${u.done}/${u.total}</b><span><em class="ucprio">P${u.prio}</em>${esc(n)}</span></div>`;}).join("");
   document.querySelectorAll("#ucchips .count").forEach(c=>c.onclick=()=>{ucFilter=(ucFilter===c.dataset.uc)?"":c.dataset.uc;renderCounts();renderItems();});
 }
 
@@ -716,6 +742,21 @@ function tileHtml(i,depth){
   </div>`;
 }
 
+/* depth ruler: line the header ticks up with where tiles of each depth start */
+let lastMaxDepth=-1;
+function placeDepthTicks(maxDepth){
+  const el=$("#depthticks");if(!el)return;
+  lastMaxDepth=maxDepth;
+  const main=document.querySelector("main"),layout=$("#layout");
+  const hidden=maxDepth<0||!main||!layout||getComputedStyle(layout).display==="none";
+  el.classList.toggle("hide",hidden);
+  if(hidden)return;
+  el.style.setProperty("--tick-n",String(maxDepth+1));
+  const x=main.getBoundingClientRect().left+parseFloat(getComputedStyle(main).paddingLeft)-$("#top").getBoundingClientRect().left;
+  el.style.setProperty("--tick-x",x+"px");
+}
+window.addEventListener("resize",()=>placeDepthTicks(lastMaxDepth));
+
 function renderItems(){
   const mode=$("#sort").value;
   const byId={};itemsCache.forEach(i=>{byId[i.id]=i;});
@@ -730,6 +771,7 @@ function renderItems(){
     $("#viewnote").textContent=(filters.size||ucFilter)?`${shown.length} shown (${[...filters,...(ucFilter?["usecase "+ucFilter]:[])].join(" + ")})`:"";
   }
   /* every view nests: an item sits under what it is waiting on, as deep as the chain goes */
+  let maxDepth=-1;
   {
     if(!(mode==="runorder"&&filters.size===0))parentCache={};
     cycleMap={};shown.forEach(i=>{if(i.state==="queued"){const ds=depStatus(i,byId);if(ds.cycle)cycleMap[i.id]=ds.cycle;}});
@@ -738,13 +780,15 @@ function renderItems(){
     shown.forEach(i=>{const p=parentOf(i,ids);if(p){(children[p]=children[p]||[]).push(i);}else roots.push(i);});
     roots.sort(cmp);
     const seen=new Set();
-    const emit=(i,depth)=>{if(seen.has(i.id))return "";seen.add(i.id);return tileHtml(i,depth)+((children[i.id]||[]).sort(cmp).map(c=>emit(c,depth+1)).join(""));};
+    const emit=(i,depth)=>{if(seen.has(i.id))return "";seen.add(i.id);if(depth>maxDepth)maxDepth=depth;
+      return tileHtml(i,depth)+((children[i.id]||[]).sort(cmp).map(c=>emit(c,depth+1)).join(""));};
     html=roots.map(r=>emit(r,0)).join("");
     // never drop an item: whatever no root reaches (a loop the gate does not
     // name) still renders, in the view's own order rather than fetch order
     shown.filter(i=>!seen.has(i.id)).sort(cmp).forEach(i=>{html+=emit(i,0);});
   }
   $("#items").innerHTML=html||"<span class='kv'>no workitems</span>";
+  placeDepthTicks(maxDepth);
   document.querySelectorAll("#items .tile").forEach(t=>{
     t.onclick=e=>{
       if(e.target.classList.contains("actbtn")){e.stopPropagation();openMenu(t.dataset.id,e.target);return;}
