@@ -265,7 +265,7 @@ a{color:var(--accent)}
       <button class="ghost" id="refresh">refresh</button>
     </div>
   </div>
-  <div id="ucrow" class="empty" title="usecase progress: complete / total items carrying the usecase tag — click to filter">
+  <div id="ucrow" class="empty" title="usecase progress: complete / total items carrying the usecase tag, scheduled items not counted — click to filter">
     <span class="uclabel">use cases</span>
     <div id="ucchips"></div>
   </div>
@@ -657,9 +657,11 @@ function renderCounts(){
     if(!k)filters.clear();else if(filters.has(k))filters.delete(k);else filters.add(k);
     renderCounts();renderItems();
   });
-  /* usecase progress (decided 2026-09-08): N of M items carrying usecase:<name> are complete */
+  /* usecase progress (decided 2026-09-08): N of M items carrying usecase:<name> are complete;
+     scheduled items are left out — a recurring schedule never closes, so counting it held
+     the chip short of M/M forever (Stephen 2026-09-22) */
   const uc={};
-  itemsCache.forEach(i=>chipKeysOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
+  itemsCache.filter(i=>i.state!=="scheduled").forEach(i=>chipKeysOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
   const sumRank=n=>{const x=SUMMARY_TAGS.indexOf(n);return x<0?SUMMARY_TAGS.length:x;}; // summary tags pinned first, in SUMMARY_TAGS order
   const names=Object.keys(uc).sort((a,b)=>(sumRank(a)-sumRank(b))||(uc[a].prio-uc[b].prio)||a.localeCompare(b));
   if(ucFilter&&!uc[ucFilter])ucFilter="";
