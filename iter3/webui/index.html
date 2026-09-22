@@ -28,7 +28,7 @@ body.viewer .docbox,body.viewer #newitem,body.viewer .actbtn,body.viewer #doc-ad
 .count span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .count.zero{opacity:.38}
 .count.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
-/* use-case progress row: pills under the counts bar, wrapping on laptops and scrolling sideways on phones, each pill filled to its done/total share */
+/* use-case progress row: pills under the counts bar (the demo tag's pill pinned first), wrapping on laptops and scrolling sideways on phones, each pill filled to its done/total share */
 #ucrow{display:flex;gap:10px;align-items:center;padding:0 18px 10px}
 #ucrow.empty{display:none}
 #ucrow .uclabel{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);flex:none}
@@ -42,6 +42,7 @@ body.viewer .docbox,body.viewer #newitem,body.viewer .actbtn,body.viewer #doc-ad
 .count.uc span{text-transform:none;letter-spacing:0;font-size:12px;color:var(--text)}
 .count.uc span .ucprio{color:var(--dim);font-size:11px;margin-right:5px}
 .count.uc.done b{color:var(--ok)}
+.count.uc.sum{border-color:#4b5261}
 .count.total b{color:var(--text)}
 .count.c-in-progress b{color:#f2d24b}.count.c-queued b{color:var(--accent)}
 .count.c-question b{color:var(--q)}.count.c-failed b{color:var(--bad)}
@@ -323,8 +324,11 @@ const CLOSED=new Set(["complete","failed"]); // immutable except appended "doc" 
 const ALL_STATES=["queued","in-progress","question","parked","paused","scheduled","complete","failed"]; // Actions -> Change to…
 const UC_PREFIX="usecase:", UC_COLOR="#3b6fb6", PRIO_DEFAULT=40; // priority 0–99 (decided 2026-09-08)
 const BLOCKED_PREFIX="blocked by: "; // engine-owned wait tag (iter_core BLOCKED_TAG_PREFIX); derived, never edited here
-let ucFilter=""; // one usecase name, or ""
+let ucFilter=""; // one chip key: a usecase name or a summary tag, or ""
 const ucOf=i=>(i.tags||[]).filter(t=>t&&t.text&&t.text.startsWith(UC_PREFIX)).map(t=>t.text.slice(UC_PREFIX.length));
+const SUMMARY_TAGS=["demo"]; // plain tags that also get a pinned progress chip, ahead of the use cases (Stephen 2026-09-22)
+const chipKeysOf=i=>[...SUMMARY_TAGS.filter(s=>(i.tags||[]).some(t=>t&&t.text===s)),...ucOf(i)]; // the keys a chip can filter on
+const chipLabel=k=>SUMMARY_TAGS.includes(k)?"tag "+k:"usecase "+k;
 const OPEN_TARGETS=["queued","parked","paused","question"];
 const TAG_PALETTE=["#4da3ff","#39c47f","#e0b341","#b878e6","#e07a52","#4dd0c4","#e05252","#9fd3e8"];
 
@@ -614,12 +618,14 @@ function renderCounts(){
   });
   /* usecase progress (decided 2026-09-08): N of M items carrying usecase:<name> are complete */
   const uc={};
-  itemsCache.forEach(i=>ucOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
-  const names=Object.keys(uc).sort((a,b)=>(uc[a].prio-uc[b].prio)||a.localeCompare(b));
+  itemsCache.forEach(i=>chipKeysOf(i).forEach(n=>{const u=uc[n]=uc[n]||{total:0,done:0,prio:null};u.total++;if(i.state==="complete")u.done++;if(u.prio==null||(i.priority??PRIO_DEFAULT)<u.prio)u.prio=i.priority??PRIO_DEFAULT;}));
+  const sumRank=n=>{const x=SUMMARY_TAGS.indexOf(n);return x<0?SUMMARY_TAGS.length:x;}; // summary tags pinned first, in SUMMARY_TAGS order
+  const names=Object.keys(uc).sort((a,b)=>(sumRank(a)-sumRank(b))||(uc[a].prio-uc[b].prio)||a.localeCompare(b));
   if(ucFilter&&!uc[ucFilter])ucFilter="";
   $("#ucrow").classList.toggle("empty",names.length===0);
   $("#ucchips").innerHTML=names.map(n=>{const u=uc[n],pct=u.total?Math.round(100*u.done/u.total):0;
-    return `<div class="count uc ${ucFilter===n?"active":""} ${u.done===u.total?"done":""}" data-uc="${esc(n)}" title="${u.done} of ${u.total} items complete (${pct}%) — click to filter" style="background:linear-gradient(90deg,${UC_COLOR}55 ${pct}%,var(--bg) ${pct}%)"><b>${u.done}/${u.total}</b><span><em class="ucprio">P${u.prio}</em>${esc(n)}</span></div>`;}).join("");
+    const sum=SUMMARY_TAGS.includes(n),fill=sum?tagColor({text:n}):UC_COLOR;
+    return `<div class="count uc ${sum?"sum":""} ${ucFilter===n?"active":""} ${u.done===u.total?"done":""}" data-uc="${esc(n)}" title="${u.done} of ${u.total} items ${sum?`tagged ${n} `:""}complete (${pct}%) — click to filter" style="background:linear-gradient(90deg,${fill}55 ${pct}%,var(--bg) ${pct}%)"><b>${u.done}/${u.total}</b><span><em class="ucprio">P${u.prio}</em>${esc(n)}</span></div>`;}).join("");
   document.querySelectorAll("#ucchips .count").forEach(c=>c.onclick=()=>{ucFilter=(ucFilter===c.dataset.uc)?"":c.dataset.uc;renderCounts();renderItems();});
 }
 
@@ -762,13 +768,13 @@ function renderItems(){
   const byId={};itemsCache.forEach(i=>{byId[i.id]=i;});
   const cmp=comparator(mode,byId);
   let shown,html="";
-  const base=ucFilter?itemsCache.filter(i=>ucOf(i).includes(ucFilter)):itemsCache;
+  const base=ucFilter?itemsCache.filter(i=>chipKeysOf(i).includes(ucFilter)):itemsCache;
   if(mode==="runorder"&&filters.size===0){
     shown=runView(base);
-    $("#viewnote").textContent=`run order: ${shown.length} of ${base.length} — runnable items and what they are stuck behind${ucFilter?` · usecase ${ucFilter}`:""}`;
+    $("#viewnote").textContent=`run order: ${shown.length} of ${base.length} — runnable items and what they are stuck behind${ucFilter?` · ${chipLabel(ucFilter)}`:""}`;
   }else{
     shown=base.filter(i=>filters.size===0||filters.has(i.state));
-    $("#viewnote").textContent=(filters.size||ucFilter)?`${shown.length} shown (${[...filters,...(ucFilter?["usecase "+ucFilter]:[])].join(" + ")})`:"";
+    $("#viewnote").textContent=(filters.size||ucFilter)?`${shown.length} shown (${[...filters,...(ucFilter?[chipLabel(ucFilter)]:[])].join(" + ")})`:"";
   }
   /* every view nests: an item sits under what it is waiting on, as deep as the chain goes */
   let maxDepth=-1;
