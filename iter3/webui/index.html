@@ -67,6 +67,8 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)
 .eng{padding:6px 4px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
 .eng:first-of-type{border-top:0}
 .eng b{color:var(--text)}
+.acct .hot{color:var(--bad)}
+.acct .warm{color:var(--warn)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
 .dot.on{background:var(--ok)}.dot.off{background:var(--bad)}
 
@@ -290,6 +292,10 @@ a{color:var(--accent)}
       <div id="engines"></div>
     </div>
     <div class="side-section">
+      <h2>Accounts</h2>
+      <div id="accounts"></div>
+    </div>
+    <div class="side-section">
       <h2>Agents <button class="gear" id="agent-add" title="new agent">+</button></h2>
       <div id="agents"></div>
     </div>
@@ -473,6 +479,45 @@ $("#engine-add").onclick=async()=>{
   try{await api("/api/engines/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify({host:"",state:"Stopped",ticksec:5,full_refresh_minutes:360,queuelock:{retryms:50,breaksec:60},projects:{}})});await load();openSettings("engine",name);}catch(e){alert("could not add: "+e.message);}
 };
 
+/* shared by the engine block and the Accounts section: a unix-seconds instant as local time, a percentage, one account's full tooltip */
+const at=s=>s?`${fmtTs(new Date(s*1000).toISOString())} ${tzAbbrev()}`:"";
+const pct=v=>v==null?"—":Math.round(v)+"%";
+const acctTitle=a=>`${a.name}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
+  +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
+  +(a.token==="unset"?" · NO TOKEN in the engine's env_file":"");
+/* one row per distinct account name across every engine; the engine with the newest last_seen owns the snapshot */
+function renderAccounts(engines){
+  const now=Date.now();
+  const seenOf=e=>e.last_seen?Date.parse(e.last_seen):0;
+  const alive=e=>{const s=seenOf(e);return !!s&&(now-s)<3*(e.ticksec||5)*1000+5000;};
+  const best={};
+  (engines||[]).forEach(e=>{(Array.isArray(e.accounts)?e.accounts:[]).forEach(a=>{
+    if(!a||a.name==null)return;
+    const cur=best[a.name];
+    if(!cur||seenOf(e)>seenOf(cur.e))best[a.name]={a:a,e:e};
+  });});
+  const usedBy={};   // account name -> the live engine currently running on it
+  (engines||[]).forEach(e=>{
+    const n=e.usage&&e.usage.account!=null?e.usage.account:e.account;
+    if(n!=null&&alive(e)&&usedBy[n]==null)usedBy[n]=e.name;
+  });
+  const win=(label,a,v,reset)=>{
+    const stop=a.stop==null?99:a.stop;
+    const cls=v==null?"":(v>=stop?' class="hot"':(v>=stop-20?' class="warm"':""));
+    return `<br>• ${label} <b${cls}>${esc(pct(v))}</b>`
+      +(v==null?"":` – <span title="resets ${esc(at(reset))}">${esc(fmtDur(reset))}</span>`);
+  };
+  const names=Object.keys(best).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  $("#accounts").innerHTML=names.map(n=>{
+    const a=best[n].a,src=best[n].e;
+    const status=a.token==="unset"?"⚠ no token":(usedBy[n]?"· in use by "+esc(usedBy[n]):"· idle");
+    return `<div class="eng acct" title="${esc(acctTitle(a)+" · reported by "+src.name)}"><b>${esc(n)}</b> <span class="kv">${status}</span>`
+      +win("5h",a,a.five_hour_pct,a.five_hour_resets_at)+win("7d",a,a.seven_day_pct,a.seven_day_resets_at)
+      +(a.is_using_overage?`<br>• <b title="a window is exhausted and requests are billing as extra usage">OVERAGE</b>`:"")
+      +`</div>`;
+  }).join("")||"<div class='eng kv'>no accounts reported by any engine</div>";
+}
+
 async function load(){
   $("#login").style.display="none";$("#layout").style.display="flex";$("#top").style.display="";
   $("#who").textContent=me||"";
@@ -504,13 +549,8 @@ async function load(){
     const u=e.usage;
     const win=(label,pct,reset)=>`<br>• ${label} <b>${esc(Math.round(pct||0))}%</b> – <span title="resets ${esc(fmtTs(reset?new Date(reset*1000).toISOString():""))} ${esc(tzAbbrev())}">${esc(fmtDur(reset))}</span>`;
     const holding=!!e.hold;   // engine: accounts configured, none under its stop% — nothing runs
-    const at=s=>s?`${fmtTs(new Date(s*1000).toISOString())} ${tzAbbrev()}`:"";
-    const pct=v=>v==null?"—":Math.round(v)+"%";
     // every account's windows + when it is next under its stop% (engine-owned, soonest first)
     const accts=Array.isArray(e.accounts)?e.accounts:[];
-    const acctTitle=a=>`${a.name}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
-      +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
-      +(a.token==="unset"?" · NO TOKEN in the engine's env_file":"");
     // an account whose token is not set in the engine's env_file (a.token==="unset", engines since 2026-09-11) is marked, not timed
     const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${a.token==="unset"?"⚠ "+esc(a.name)+" no token":esc(a.name)+" "+esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
     const nx=e.next&&e.next.account?e.next:null;
@@ -524,11 +564,12 @@ async function load(){
     const t=e.test_result;
     const test=e.test_requested?`<span class="kv" data-testing="${esc(e.name)}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
-    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b> ${holding?`<span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:esc(e.state)}${alive?"":" (offline)"}${acctLabel}${usage}
+    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${usage}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")} · ${esc(e.host||"?")}
       <br>serves: ${esc(Object.keys(e.projects||{}).join(", ")||"—")}
       <br><button class="ghost sm" data-test="${esc(e.name)}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
   }).join("")||"<div class='eng kv'>no engines registered</div>";
+  renderAccounts(engines);
   document.querySelectorAll("[data-test]").forEach(b=>b.onclick=async ev=>{
     ev.stopPropagation();
     const name=b.dataset.test;b.disabled=true;b.textContent="testing…";
