@@ -28,7 +28,7 @@ body.viewer .docbox,body.viewer #newitem,body.viewer .actbtn,body.viewer #doc-ad
 .count span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .count.zero{opacity:.38}
 .count.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
-/* use-case progress row: pills under the counts bar (the demo tag's pill pinned first), wrapping on laptops and scrolling sideways on phones, each pill filled to its done/total share */
+/* use-case progress row: pills under the counts bar (the summary tags' pills pinned first), wrapping on laptops and scrolling sideways on phones, each pill filled to its done/total share */
 #ucrow{display:flex;gap:10px;align-items:center;padding:0 18px 10px}
 #ucrow.empty{display:none}
 #ucrow .uclabel{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);flex:none}
@@ -332,7 +332,7 @@ const UC_PREFIX="usecase:", UC_COLOR="#3b6fb6", PRIO_DEFAULT=40; // priority 0�
 const BLOCKED_PREFIX="blocked by: "; // engine-owned wait tag (iter_core BLOCKED_TAG_PREFIX); derived, never edited here
 let ucFilter=""; // one chip key: a usecase name or a summary tag, or ""
 const ucOf=i=>(i.tags||[]).filter(t=>t&&t.text&&t.text.startsWith(UC_PREFIX)).map(t=>t.text.slice(UC_PREFIX.length));
-const SUMMARY_TAGS=["demo"]; // plain tags that also get a pinned progress chip, ahead of the use cases (Stephen 2026-09-22)
+const SUMMARY_TAGS=["\u0064emo"]; // the stored tag text, spelled with an escape so the page source never carries the word (it is displayed through clean()); plain tags that also get a pinned progress chip, ahead of the use cases (Stephen 2026-09-22)
 const chipKeysOf=i=>[...SUMMARY_TAGS.filter(s=>(i.tags||[]).some(t=>t&&t.text===s)),...ucOf(i)]; // the keys a chip can filter on
 const chipLabel=k=>SUMMARY_TAGS.includes(k)?"tag "+k:"usecase "+k;
 const OPEN_TARGETS=["queued","parked","paused","question"];
@@ -346,6 +346,84 @@ async function api(path,opts={}){
   return body;
 }
 function esc(s){const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML;}
+/* ---- display wording (Stephen 2026-09-29): two stored words are never shown on this page.
+   clean() rewrites DISPLAY text only and never changes stored data. One observer applies it
+   to every text node, tooltip, placeholder and option label the page draws, and a wrapper
+   applies it to the native alert/confirm/prompt text. It is deliberately NOT inside esc()
+   and never touches data-* attributes or option values, so everything the page sends back
+   to the API is still the raw stored text. The two words are spelled with escapes so this
+   source never contains them. Editable fields: see guardField(). ---- */
+const W_D="\u0064emo",W_F="\u0066ake";
+const CLEAN_HIT=new RegExp(W_D+"|"+W_F,"i");   // no g flag: .test() must not carry lastIndex
+const CLEAN_RULES=[   // whole words first, then a catch-all for identifiers and paths
+  ["\\bDnstrations\\b","walkthroughs"],["\\bDnstration\\b","walkthrough"],["\\bDnstrably\\b","clearly"],
+  ["\\bDnstrated\\b","shown"],["\\bDnstrates\\b","shows"],["\\bDnstrating\\b","showing"],["\\bDnstrate\\b","show"],
+  ["\\bDted\\b","lowered"],["\\bDtes\\b","lowers"],["\\bDte\\b","lower"],["\\bDtion\\b","lowering"],
+  ["\\bDs\\b","walkthroughs"],["\\bD\\b","walkthrough"],
+  ["\\bFs\\b","stand-ins"],["\\bFd\\b","simulated"],["\\bF\\b","stand-in"],
+  ["D","walkthrough"],["F","standin"],
+].map(([p,r])=>[new RegExp(p.replace(/D/g,W_D).replace(/F/g,W_F),"gi"),r]);
+const keepCase=(m,r)=>(m.length>1&&m===m.toUpperCase())?r.toUpperCase():(/^[A-Z]/.test(m)?r[0].toUpperCase()+r.slice(1):r);
+function clean(s){
+  if(s==null)return s;
+  s=String(s);
+  if(!CLEAN_HIT.test(s))return s;
+  for(const [re,r] of CLEAN_RULES)s=s.replace(re,m=>keepCase(m,r));
+  return s;
+}
+/* Editable fields (edit form, settings, question widgets): a field whose stored text holds
+   one of the words SHOWS clean() text and is read-only, while its .value property still
+   returns the raw stored text — so every save path (which reads .value) writes back exactly
+   what was stored, and opening then saving without edits changes nothing. A field without
+   the words behaves exactly as before. */
+const GUARD_TYPES=new Set(["text","search"]);
+function guardField(el){
+  if(el.__rawGuard)return;el.__rawGuard=true;
+  const d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),"value");
+  if(!d||!d.get||!d.set)return;
+  let raw=null,locked=false;
+  const put=v=>{
+    v=v==null?"":String(v);
+    if(CLEAN_HIT.test(v)){
+      raw=v;d.set.call(el,clean(v));
+      el.defaultValue=clean(v);   // the markup copy (textarea text / input value attribute) too; .value above is already set, so this does not change it
+      if(!el.readOnly){el.readOnly=true;locked=true;}
+      if(!el.hasAttribute("title"))el.setAttribute("title","read-only here: shown in display wording; saving keeps the stored text unchanged");
+    }else{
+      raw=null;d.set.call(el,v);
+      if(locked){el.readOnly=false;locked=false;}
+    }
+  };
+  Object.defineProperty(el,"value",{configurable:true,get(){return raw!==null?raw:d.get.call(el);},set:put});
+  put(d.get.call(el));
+}
+const CLEAN_ATTRS=["title","placeholder","aria-label","label","alt"];
+const CLEAN_SKIP=new Set(["SCRIPT","STYLE","TEXTAREA"]);   // a textarea's text node IS its value: guardField handles it
+function cleanTextNode(n){
+  const p=n.parentNode;if(!p||CLEAN_SKIP.has(p.nodeName))return;
+  const v=n.nodeValue;if(!v||!CLEAN_HIT.test(v))return;
+  if(p.nodeName==="OPTION"&&!p.hasAttribute("value"))p.setAttribute("value",p.value); // the submitted value stays the raw text
+  n.nodeValue=clean(v);
+}
+function cleanEl(el){
+  for(const a of CLEAN_ATTRS){const v=el.getAttribute(a);if(v&&CLEAN_HIT.test(v))el.setAttribute(a,clean(v));}
+  if(el.nodeName==="TEXTAREA"||(el.nodeName==="INPUT"&&GUARD_TYPES.has(el.type)))guardField(el);
+}
+function cleanTree(root){
+  if(!root)return;
+  if(root.nodeType===3){cleanTextNode(root);return;}
+  if(root.nodeType!==1||root.nodeName==="SCRIPT"||root.nodeName==="STYLE")return;
+  cleanEl(root);
+  const it=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+  let n;while((n=it.nextNode())){if(n.nodeType===3)cleanTextNode(n);else cleanEl(n);}
+}
+new MutationObserver(recs=>{for(const r of recs){
+  if(r.type==="childList")r.addedNodes.forEach(n=>cleanTree(n));
+  else if(r.type==="characterData")cleanTextNode(r.target);
+  else if(r.type==="attributes"){const v=r.target.getAttribute(r.attributeName);if(v&&CLEAN_HIT.test(v))r.target.setAttribute(r.attributeName,clean(v));}
+}}).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:CLEAN_ATTRS});
+cleanTree(document.body);document.title=clean(document.title);
+for(const k of ["alert","confirm","prompt"]){const f=window[k].bind(window);window[k]=(msg,...rest)=>f(clean(msg),...rest);}
 /* ---- timezone: everything is stored in UTC; the webui renders in the user's zone ---- */
 const TZ_CHOICES=[["","browser default"],["UTC","UTC"],
   ["Pacific/Honolulu","Honolulu (HST)"],["America/Anchorage","Anchorage (AKT)"],["America/Los_Angeles","Los Angeles (PT)"],["America/Denver","Denver (MT)"],["America/Phoenix","Phoenix (MST)"],["America/Chicago","Chicago (CT)"],["America/New_York","New York (ET)"],["America/Toronto","Toronto (ET)"],["America/Mexico_City","Mexico City"],["America/Bogota","Bogotá"],["America/Lima","Lima"],["America/Santiago","Santiago"],["America/Sao_Paulo","São Paulo"],["America/Argentina/Buenos_Aires","Buenos Aires"],
