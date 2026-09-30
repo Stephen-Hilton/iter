@@ -1193,6 +1193,80 @@ async fn refuse_dependency_cycle(st: &Arc<AppState>, project: &str, id: &str, bo
     Ok(())
 }
 
+fn has_sched(row: &Value) -> bool {
+    row.get("sched").map(|s| !s.is_null()).unwrap_or(false)
+}
+
+/// The engine-owned test sweep's template (iter_core::TEST_SWEEP): the one
+/// item per project that may be paused but never deleted.
+fn is_test_sweep_template(row: &Value) -> bool {
+    body_str(row, "system") == iter_core::TEST_SWEEP && has_sched(row)
+}
+
+/// Create-time rules for `system` (2026-09-30). Only the test sweep exists.
+/// Its template: `scheduled` or `paused`, and one per project (a second is
+/// refused, naming the first — so the engine's create and a person's
+/// `--install-schedule` can both run without making two). A run cloned from
+/// it (the engine's fire, the webui's Run now) is stamped `system` here, so
+/// every path that clones it gets the timer-run treatment. Returns true when
+/// the body is the template.
+async fn test_sweep_on_create(st: &Arc<AppState>, project: &str, body: &mut Value) -> Result<bool, ApiError> {
+    let system = body_str(body, "system");
+    if !system.is_empty() && system != iter_core::TEST_SWEEP {
+        return Err(bad(format!("unknown system '{system}' (the only one is '{}')", iter_core::TEST_SWEEP)));
+    }
+    if !has_sched(body) {
+        let src = body_str(body, "source_schedule");
+        if system.is_empty() && !src.is_empty() {
+            if let Some(tpl) = st.store.get("workitem", project, &src).await? {
+                if is_test_sweep_template(&tpl) {
+                    body["system"] = json!(iter_core::TEST_SWEEP);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    if system.is_empty() {
+        return Ok(false);
+    }
+    let state = body_str(body, "state");
+    if state != "scheduled" && state != "paused" {
+        return Err(bad(format!("the test sweep is created scheduled or paused, not '{state}'")));
+    }
+    let rows = st.store.query("workitem", project).await?;
+    if let Some(existing) = rows.iter().find(|r| is_test_sweep_template(r)) {
+        return Err(ApiError::Status(
+            StatusCode::CONFLICT,
+            format!("this project already has its test sweep ({}); change that one instead", body_str(existing, "id")),
+        ));
+    }
+    Ok(true)
+}
+
+/// Update rules for the test sweep template (2026-09-30): `system` never
+/// changes (an omitted key keeps the stored value, like `lease`), and the
+/// template stays a schedule, `scheduled` or `paused` — pausing is how it is
+/// turned off. Everything else (interval, name, command flags) is editable.
+fn test_sweep_on_update(current: &Value, body: &mut Value) -> Result<(), ApiError> {
+    let stored = body_str(current, "system");
+    if body.get("system").is_none() && !stored.is_empty() {
+        body["system"] = json!(stored);
+    }
+    if body_str(body, "system") != stored {
+        return Err(bad("`system` is set when an item is created and never changes"));
+    }
+    if is_test_sweep_template(current) {
+        let state = body_str(body, "state");
+        if !has_sched(body) || (state != "scheduled" && state != "paused") {
+            return Err(ApiError::Status(
+                StatusCode::CONFLICT,
+                format!("the test sweep stays a schedule: pause it to turn it off (asked for '{state}')"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn with_warnings(mut body: Value, warnings: Vec<String>) -> Value {
     if !warnings.is_empty() {
         body["warnings"] = json!(warnings);
@@ -1207,9 +1281,14 @@ pub(crate) async fn workitem_create(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
+    let mut body = body;
+    let sweep_template = test_sweep_on_create(&st, &name, &mut body).await?;
     // users-only rule (itersched.md): schedules come from humans via the
-    // webui/API — the engine role (the agents' path) may not create them
+    // webui/API — the engine role (the agents' path) may not create them.
+    // The one exception is the engine-owned test sweep (2026-09-30), which
+    // the engine creates paused, once per project.
     if user.role == "engine"
+        && !sweep_template
         && (body_str(&body, "state") == "scheduled" || body.get("sched").map(|s| !s.is_null()).unwrap_or(false))
     {
         return Err(ApiError::Status(
@@ -1217,7 +1296,6 @@ pub(crate) async fn workitem_create(
             "schedules are users-only: the engine/agent path may not create scheduled items".into(),
         ));
     }
-    let mut body = body;
     // the request text may ride in the create body (decided 2026-09-10): it
     // becomes detail row 0 ("request"), and a create refused as a repeat can
     // still leave what it observed on the survivor
@@ -1458,6 +1536,7 @@ async fn workitem_put(
     // exception is "tags", so finished work can still be organized.
     let current = st.store.get("workitem", &name, &id).await?;
     if let Some(current) = &current {
+        test_sweep_on_update(current, &mut body)?;
         if is_closed(&body_str(current, "state")) && !tags_only_change(current, &body) {
             return Err(closed_err());
         }
@@ -1508,6 +1587,14 @@ async fn workitem_delete(
     Path((name, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
+    if let Some(current) = st.store.get("workitem", &name, &id).await? {
+        if is_test_sweep_template(&current) {
+            return Err(ApiError::Status(
+                StatusCode::CONFLICT,
+                "the test sweep cannot be deleted: pause it to turn it off".into(),
+            ));
+        }
+    }
     let deleted = st.store.delete("workitem", &name, &id).await?;
     st.store.bump_seq(&name, "workitem").await?;
     Ok(Json(json!({"deleted": deleted})))
@@ -2709,5 +2796,53 @@ mod tests {
             _ => panic!("placeholder accepted"),
         }
         assert!(st.store.query("workitem", "p").await.unwrap().is_empty());
+    }
+
+    /// The engine-owned test sweep (2026-09-30): the engine may create the
+    /// template (paused) although schedules are users-only; there is one per
+    /// project; it can be paused and resumed but not deleted, closed, or
+    /// stripped of `system`; a run cloned from it is stamped `system`.
+    #[tokio::test]
+    async fn the_test_sweep_is_one_undeletable_schedule() {
+        let st = mem().await;
+        let tpl = match workitem_create(engine_user(), State(st.clone()), Path("p".into()), Json(iter_core::test_sweep_template_body("paused", 240))).await {
+            Ok(Json(v)) => v,
+            _ => panic!("the engine could not create the test sweep"),
+        };
+        let id = tpl["id"].as_str().unwrap().to_string();
+        assert_eq!(tpl["state"], "paused");
+        // an ordinary schedule from the engine is still refused
+        let other = json!({"name": "s", "agent": "exec", "exec_shell": "true", "state": "scheduled", "sched": {"kind": "every", "every_min": 5}});
+        assert!(matches!(workitem_create(engine_user(), State(st.clone()), Path("p".into()), Json(other)).await, Err(ApiError::Status(StatusCode::FORBIDDEN, _))));
+        // a second template is refused, naming the first
+        match workitem_create(admin(), State(st.clone()), Path("p".into()), Json(iter_core::test_sweep_template_body("scheduled", 60))).await {
+            Err(ApiError::Status(code, msg)) => assert!(code == StatusCode::CONFLICT && msg.contains(&id), "{msg}"),
+            _ => panic!("a second test sweep was accepted"),
+        }
+        let put = |st: Arc<AppState>, body: Value| {
+            let id = body["id"].as_str().unwrap().to_string();
+            let q: HashMap<String, String> = [("expect_version".to_string(), body["version"].as_u64().unwrap().to_string())].into();
+            async move { workitem_put(admin(), State(st), Path(("p".into(), id)), Query(q), Json(body)).await }
+        };
+        // resume, with the `system` key omitted (kept from the stored row)
+        let mut on = tpl.clone();
+        on["state"] = json!("scheduled");
+        on.as_object_mut().unwrap().remove("system");
+        let Json(on) = put(st.clone(), on).await.map_err(|_| "resume refused").unwrap();
+        assert_eq!(on["system"], iter_core::TEST_SWEEP);
+        // not closed, not stripped
+        let mut done = on.clone();
+        done["state"] = json!("complete");
+        assert!(matches!(put(st.clone(), done).await, Err(ApiError::Status(StatusCode::CONFLICT, _))));
+        let mut plain = on.clone();
+        plain["system"] = json!("");
+        assert!(matches!(put(st.clone(), plain).await, Err(ApiError::Status(StatusCode::BAD_REQUEST, _))));
+        // not deleted
+        assert!(matches!(workitem_delete(admin(), State(st.clone()), Path(("p".into(), id.clone()))).await, Err(ApiError::Status(StatusCode::CONFLICT, _))));
+        // a Run-now clone (webui: no `system` in the body) is stamped
+        let run = create(&st, json!({"name": "run", "agent": "test", "exec_shell": "iter sweep", "state": "queued", "source_schedule": id})).await;
+        assert_eq!(run["system"], iter_core::TEST_SWEEP);
+        let rid = run["id"].as_str().unwrap().to_string();
+        assert!(workitem_delete(admin(), State(st.clone()), Path(("p".into(), rid))).await.is_ok(), "a run is an ordinary item");
     }
 }

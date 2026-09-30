@@ -46,7 +46,6 @@
         <button data-flow="both" title="Both flows at once: process steps 1, 2, 3 ... in blue, data steps D1, D2, D3 ... in orange">Both</button>
       </div>
       <select id="g-branch" class="hidden" aria-label="Branch"></select>
-      <label class="chk" title="Draw the use case's numbered process / data steps over its parts (and the actors that take part). Off: the use case is drawn as a hierarchy only - the use case, its top-level parts, and ownership lines down to every part it needs"><input type="checkbox" id="g-steps"> numbered steps</label>
     </div>
     <div class="group">
       <span class="lbl">Edges</span>
@@ -129,7 +128,7 @@
     { label: 'Use case: process step (1, 2, 3 ...)', color: '#1d4ed8', line: 'solid', thick: true },
     { label: 'Use case: data step (D1, D2, D3 ...; * = on a branch, as in 5* or D5*)', color: '#ea580c', line: 'solid', thick: true },
     { label: 'Not built or not working yet', color: BAD, line: 'dashed' },
-    { label: 'Use case → its top-level parts / where its steps start', color: '#f472b6', line: 'solid' },
+    { label: 'Use case starts here / touches', color: '#f472b6', line: 'solid' },
   ];
   /** Statuses that mean the link or step works: 'live' (interface edges) and 'complete' (a flowmap
    *  step or edge marked finished). No status at all also counts as good. Anything else - not-built,
@@ -158,7 +157,7 @@
   // ------------------------------------------------------------------ state (mirrored in the URL hash)
   const DEFAULTS = {
     uc: '', layout: 'cluster', flow: 'process', branch: '', dim: false,
-    showIface: true, showLib: false, showContains: false, showBroken: true, showUsecases: false, steps: false,
+    showIface: true, showLib: false, showContains: false, showBroken: true, showUsecases: false,
   };
   const state = Object.assign({}, DEFAULTS);
   // Demo mode (Stephen, 2026-09-28): the four Edges toggles (interfaces, libraries, contains,
@@ -167,7 +166,7 @@
   const EDGE_TOGGLES_LOCKED = false; // iter4: the edge toggles are part of the tab
   const LOCKED_EDGE_KEYS = ['showIface', 'showLib', 'showContains', 'showBroken'];
   function lockEdges() { if (EDGE_TOGGLES_LOCKED) for (const k of LOCKED_EDGE_KEYS) state[k] = false; }
-  const BOOLS = ['dim', 'showIface', 'showLib', 'showContains', 'showBroken', 'showUsecases', 'steps'];
+  const BOOLS = ['dim', 'showIface', 'showLib', 'showContains', 'showBroken', 'showUsecases'];
   function readHash() {
     const p = new URLSearchParams(location.hash.slice(1));
     Object.assign(state, DEFAULTS);
@@ -209,34 +208,23 @@
   }
   function hideNode(id) { HIDDEN.add(id); saveHidden(); select(null); render(); }
   function showAllHidden() { HIDDEN.clear(); saveHidden(); render(); }
-  /** A use case is drawn hierarchically (iter4, 2026-09-29): the parts its file and steps name,
-   *  plus every owner up to the top of each chain, all tagged on the map by usecase_map() -
-   *  uc.members. The use case links to the top of each chain only (uc.tops); ownership lines lead
-   *  down from there. Numbered steps are an overlay ("numbered steps"), and the Sequence layout. */
-  const stepsOn = () => state.steps || state.layout === 'sequence';
-  /** The actors a use case's steps name (its sequence and every step's ends), in first-seen order. */
-  function ucActors(uc) {
-    const out = [];
-    const add = (id) => { if (id && String(id).startsWith('actor:') && nodesById.has(id) && !HIDDEN.has(id) && !out.includes(id)) out.push(id); };
-    (uc.sequence || []).forEach(add);
-    (flowsByUc.get(uc.id) || []).forEach((e) => { add(e.source); add(e.target); });
-    return out;
-  }
   function currentView() {
     const uc = state.uc ? ucById.get(state.uc) : null;
     const touched = new Set();
     let flowEdges = [];
     if (uc) {
       touched.add(uc.id);
-      (uc.members || []).forEach((id) => touched.add(id));
-      ucActors(uc).forEach((id) => touched.add(id));
+      // Parts on a step hidden by the Process/Data or branch filter leave the view; parts the
+      // sequence lists but no step mentions stay (they are part of the journey as written).
+      const onAnyStep = new Set();
+      (flowsByUc.get(uc.id) || []).forEach((e) => { onAnyStep.add(e.source); onAnyStep.add(e.target); });
+      uc.sequence.forEach((id) => { if (!onAnyStep.has(id)) touched.add(id); });
       flowEdges = (flowsByUc.get(uc.id) || []).filter((e) =>
         (state.flow === 'both' || e.kind === state.flow)
         && (!state.branch || !e.branch || e.branch === state.branch)
         && (state.showBroken || !isBad(e.status))
         && !HIDDEN.has(e.source) && !HIDDEN.has(e.target));
-      if (stepsOn()) flowEdges.forEach((e) => { touched.add(e.source); touched.add(e.target); });
-      else flowEdges = [];
+      flowEdges.forEach((e) => { touched.add(e.source); touched.add(e.target); });
     }
     const whole = !uc || state.dim;
     const ids = whole
@@ -253,21 +241,20 @@
       }
     }
     if (state.showContains || containsForced()) containsEdges.forEach((e) => { if (both(e)) edges.push(e); });
-    if (!uc && state.showUsecases) {
-      // each use case links to the tops of its chains; contains edges lead down
-      touchEdges.forEach((e) => { if (both(e)) edges.push(e); });
-      if (!(state.showContains || containsForced())) containsEdges.forEach((e) => { if (both(e)) edges.push(e); });
-    }
-    if (uc && !state.dim) {
-      // the hierarchy: use case → tops, then ownership down to every member
-      touchEdges.forEach((e) => { if (e.usecase === uc.id && both(e)) edges.push(e); });
-      if (!(state.showContains || containsForced())) containsEdges.forEach((e) => { if (both(e)) edges.push(e); });
-    }
+    if (!uc && state.showUsecases) touchEdges.forEach((e) => { if (both(e)) edges.push(e); });
     if (uc) {
       edges.push(...flowEdges);
-      if (flowEdges.length) {
+      if (uc.has_flowmap) {
         const first = [...flowEdges].sort((a, b) => (a.step ?? 1e9) - (b.step ?? 1e9) || (a.kind === 'process' ? -1 : 1))[0];
-        if (first && idset.has(first.source)) edges.push({ id: 'start|' + uc.id, type: 'start', source: uc.id, target: first.source });
+        const start = first ? first.source : uc.sequence[0];
+        if (start && idset.has(start)) {
+          edges.push({ id: 'start|' + uc.id, type: 'start', source: uc.id, target: start });
+        }
+      } else {
+        // iter4's touch edges reach only a use case's top-level parts: link every part it lists
+        uc.sequence.forEach((id, i) => {
+          if (idset.has(id)) edges.push({ id: `touch|${uc.id}|${id}`, type: 'usecase_touches', source: uc.id, target: id, usecase: uc.id, order: i + 1 });
+        });
       }
     }
     return { uc, ids, idset, edges, touched, flowEdges, whole };
@@ -503,36 +490,26 @@
   const levelOf = (id) => (nodesById.get(id) || {}).level;
 
   /**
-   * Use-case rows (Top-down) and columns (Flow) are ordered by (a) the hierarchy, then (b) the
-   * numbered steps (Stephen, 2026-09-29): the use case first; its actors together; then its
-   * top-level parts; then each owned part a level further. Inside one hierarchy level, parts
-   * spread out in step order - a part the steps reach later sits further along - so the journey
-   * reads forwards without ever breaking the hierarchy. With no steps shown, each level is one row.
-   * Returns the rank of every node and each node's first step (the order inside a rank).
+   * In a use-case view a node's band is how many calls from the journey's starting point it is
+   * first reached (hop depth along the primary flow - process, or data when only data is shown):
+   * the use case is band 0; every part that starts steps before anything calls it (the actor who
+   * begins the journey, a second actor who joins later) is band 1; parts reached in parallel
+   * share a row. A part reached only by the other flow sits one row below the part that sends
+   * to it. The exact step order is what the Sequence layout draws.
    */
   function ucBands(v) {
-    const members = new Set(v.uc.members || []);
-    const depth = (id) => { let d = 0, p = (nodesById.get(id) || {}).parent; while (p && members.has(p) && d < 64) { d++; p = (nodesById.get(p) || {}).parent; } return d; };
-    const level = new Map([[v.uc.id, 0]]);
-    let maxLevel = 1;
-    for (const id of v.ids) {
-      if (level.has(id)) continue;
-      const lv = levelOf(id);
-      const l = lv === 'actor' ? 1 : members.has(id) ? 2 + depth(id) : null;
-      if (l !== null) { level.set(id, l); maxLevel = Math.max(maxLevel, l); }
+    const b = new Map([[v.uc.id, 0]]);
+    if (!v.uc.has_flowmap) {
+      for (const id of v.ids) if (!b.has(id)) b.set(id, 1 + (WHOLE_TIER[levelOf(id)] ?? 5));
+      return { bands: b };
     }
-    for (const id of v.ids) if (!level.has(id)) level.set(id, maxLevel + 1 + (WHOLE_TIER[levelOf(id)] ?? 5));
-    // (b) how many calls into the journey each part is first reached, along the primary flow
-    const hop = new Map(); const firstStep = new Map();
-    const byStep = (a, c) => (a.step ?? 1e9) - (c.step ?? 1e9);
     const primary = state.flow === 'data' ? 'data' : 'process';
+    const byStep = (a, c) => (a.step ?? 1e9) - (c.step ?? 1e9);
     let prim = v.flowEdges.filter((e) => e.kind === primary).sort(byStep);
-    if (!prim.length) prim = [...v.flowEdges].sort(byStep);
-    for (const e of v.flowEdges) for (const id of [e.source, e.target]) {
-      const st = e.step ?? 1e9;
-      if (!firstStep.has(id) || st < firstStep.get(id)) firstStep.set(id, st);
-    }
-    const out = new Map(); const starts = []; const seen = new Set();
+    let other = v.flowEdges.filter((e) => e.kind !== primary).sort(byStep);
+    if (!prim.length) { prim = other; other = []; }
+    const seen = new Set(); const starts = [];
+    const out = new Map();
     for (const e of prim) {
       if (!seen.has(e.source)) starts.push(e.source);
       seen.add(e.source); seen.add(e.target);
@@ -540,23 +517,20 @@
       out.get(e.source).push(e.target);
     }
     const queue = [];
-    starts.forEach((id) => { if (!hop.has(id)) { hop.set(id, 0); queue.push(id); } });
+    starts.forEach((id) => { if (!b.has(id)) { b.set(id, 1); queue.push(id); } });
     while (queue.length) {
       const id = queue.shift();
-      for (const nb of out.get(id) || []) if (!hop.has(nb)) { hop.set(nb, hop.get(id) + 1); queue.push(nb); }
+      for (const nb of out.get(id) || []) if (!b.has(nb)) { b.set(nb, b.get(id) + 1); queue.push(nb); }
     }
-    // inside each hierarchy level (actors excepted: they stay together), parts spread over as
-    // many ranks as distinct hop depths they have; a part no step reaches takes the first
-    const levels = [...new Set(level.values())].sort((a, b) => a - b);
-    const rank = new Map(); let offset = 0;
-    for (const l of levels) {
-      const ids = [...level.keys()].filter((id) => level.get(id) === l);
-      const spread = l >= 2 && stepsOn();
-      const hops = spread ? [...new Set(ids.filter((id) => hop.has(id)).map((id) => hop.get(id)))].sort((a, b) => a - b) : [];
-      for (const id of ids) rank.set(id, offset + (spread && hop.has(id) ? hops.indexOf(hop.get(id)) : 0));
-      offset += Math.max(1, hops.length);
+    for (let pass = 0; pass < 5; pass++) {
+      for (const e of other) if (b.has(e.source) && !b.has(e.target)) b.set(e.target, b.get(e.source) + 1);
     }
-    return { bands: rank, firstStep };
+    let max = 0; b.forEach((x) => { max = Math.max(max, x); });
+    for (const e of other) { if (!b.has(e.source)) b.set(e.source, 1); if (!b.has(e.target)) b.set(e.target, max + 1); }
+    // Parts listed in the sequence but reached by no step shown: order of first encounter, after the rest.
+    v.uc.sequence.forEach((id) => { if (!b.has(id)) b.set(id, ++max); });
+    for (const id of v.ids) if (!b.has(id)) b.set(id, max + 1);
+    return { bands: b };
   }
 
 
@@ -706,6 +680,7 @@
       { selector: 'node.hl', style: { 'z-index': 20 } },
       { selector: 'node.match', style: { 'overlay-color': '#facc15', 'overlay-opacity': 0.5, 'overlay-padding': 7 } },
       { selector: 'edge.match', style: { 'overlay-color': '#facc15', 'overlay-opacity': 0.45, 'overlay-padding': 5 } },
+      { selector: 'node.ghost', style: { 'border-style': 'dashed', 'background-opacity': 0.02 } },
       { selector: 'node.picked', style: { 'border-width': 4, 'border-color': '#f8fafc', 'overlay-color': '#38bdf8', 'overlay-opacity': 0.35, 'overlay-padding': 6 } },
       { selector: 'node:selected', style: { 'border-width': 4, 'border-color': '#f8fafc' } },
       { selector: 'edge:selected', style: { width: 4, opacity: 1, 'z-index': 30 } },
@@ -788,9 +763,8 @@
           : 'Sequence draws numbered steps, and this use case has no flowmap yet. Showing Top-down tiered.');
       layout = 'tiered';
     }
-    if (v.uc && state.steps && !v.uc.has_flowmap) banners.push('This use case has no flowmap yet, so there are no numbered steps to draw: showing its parts as a hierarchy.');
-    if (v.uc && !(v.uc.members || []).length) banners.push('No parts are tagged with this use case yet: its file names none (the usecase agent names them when a use case is added), or the map has not been re-synced since.');
-    if (v.uc && stepsOn() && v.uc.unresolved && v.uc.unresolved.length) banners.push(`${v.uc.unresolved.length} flowmap reference(s) match no node and are left out: ${v.uc.unresolved.join(', ')}`);
+    if (v.uc && !v.uc.has_flowmap) banners.push('This use case has no flowmap yet, so there are no numbered steps: showing the code parts its file lists, grouped by level.');
+    if (v.uc && v.uc.unresolved && v.uc.unresolved.length) banners.push(`${v.uc.unresolved.length} flowmap reference(s) match no node and are left out: ${v.uc.unresolved.join(', ')}`);
     MERGED = new Map();
     SEQ_PINNED = layout === 'sequence';
     let hint = '';
@@ -812,11 +786,15 @@
       return;
     }
 
-    // A use case is already hierarchical (currentView): its members include every owner up to
-    // each chain's top, so nothing is borrowed or drawn dashed. Cluster nests them as boxes, so
-    // the ownership lines there are the boxes themselves.
-    const all = new Set(v.ids);
-    if (v.uc && layout === 'cluster') v.edges = v.edges.filter((e) => e.type !== 'contains');
+    // Cluster: ancestors of the parts shown appear as dashed boxes so the grouping reads.
+    const all = new Set(v.ids); const ghosts = new Set();
+    if (layout === 'cluster' && v.uc && !state.dim) {
+      for (const id of v.ids) {
+        let p = (nodesById.get(id) || {}).parent;
+        while (p && p !== 'project') { if (!all.has(p)) ghosts.add(p); p = (nodesById.get(p) || {}).parent; }
+      }
+      ghosts.forEach((g) => all.add(g));
+    }
     const parentFor = (id) => {
       if (layout !== 'cluster') return undefined;
       let p = (nodesById.get(id) || {}).parent;
@@ -831,6 +809,7 @@
       const st = LEVELS[n.level] || LEVELS.container;
       const classes = [n.level];
       if (v.uc && state.dim && !v.touched.has(id)) classes.push('dim');
+      if (ghosts.has(id)) classes.push('ghost');
       if (v.uc && id === v.uc.id) classes.push('root');
       const label = n.name;
       if (!v.whole) classes.push('focus');
@@ -896,7 +875,6 @@
     const wholeBandT = (id) => (id === (v.uc && v.uc.id) ? -1 : (WHOLE_TIER[levelOf(id)] ?? 5));
     const wholeBandR = (id) => (id === (v.uc && v.uc.id) ? -1 : (WHOLE_RING[levelOf(id)] ?? 6));
     const bandOf = bands ? (id) => bands.get(id) ?? 99 : null;
-    const stepKey = (id) => (ub && ub.firstStep && ub.firstStep.has(id) ? ub.firstStep.get(id) : 1e9);
     let pos = null;
     const aspect = Math.min(3, Math.max(0.8, cy.width() / Math.max(1, cy.height())));
     if (layout === 'cluster') {
@@ -908,18 +886,11 @@
         tile: true, tilingPaddingVertical: 20, tilingPaddingHorizontal: 20, fit: false,
       }).run();
     } else if (layout === 'flow') {
-      if (bands) {
-        // the Top-down ranks turned on their side: rank = column, left to right
-        const tp = tieredPositions(ids, layEdges.concat(structural), bandOf,
-          { tierGap: 250, colGap: 78, subRowGap: 60, aspect: 1 / aspect, minPerRow: 8, orderKey: stepKey });
-        pos = new Map([...tp].map(([id, p]) => [id, { x: p.y, y: p.x }]));
-      } else {
-        cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 26, rankSep: 110, edgeSep: 8, ranker: 'network-simplex',
-          nodeDimensionsIncludeLabels: true, fit: false, animate: false }).run();
-      }
+      cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 26, rankSep: 110, edgeSep: 8, ranker: 'network-simplex',
+        nodeDimensionsIncludeLabels: true, fit: false, animate: false }).run();
     } else if (layout === 'tiered') {
       pos = tieredPositions(ids, layEdges.concat(structural), bandOf || wholeBandT,
-        bands ? { tierGap: 200, colGap: 210, aspect, orderKey: stepKey } : { aspect });
+        bands ? { tierGap: 200, colGap: 210, aspect } : { aspect });
     } else if (layout === 'rings') {
       if (bands) {
         const seqIndex = new Map(v.uc.sequence.map((id, i) => [id, i]));
@@ -939,8 +910,7 @@
     if (!v.uc) { box.classList.add('hidden'); return; }
     const u = v.uc;
     const np = u.process_steps.length; const nd = u.data_steps.length;
-    const nm = (u.members || []).length; const nt = (u.tops || []).length;
-    const counts = `${nm} part(s) under ${nt} top-level part(s)` + (u.has_flowmap ? ` · ${np} process step(s), ${nd} data step(s)` : ' · no flowmap yet');
+    const counts = u.has_flowmap ? `${np} process step(s), ${nd} data step(s), ${u.sequence.length} parts touched` : `${u.sequence.length} parts listed (no flowmap yet)`;
     box.innerHTML = `<h2 title="Click to fold or unfold">${esc(u.name)} <span class="fold">▾</span></h2><div class="body"><p>${esc(u.summary || u.description)}</p><p class="muted" style="margin-top:4px;color:#6b7280;font-size:12px">${esc(counts)}</p></div>`;
     box.querySelector('h2').onclick = () => box.classList.toggle('folded');
     box.classList.remove('hidden');
@@ -997,7 +967,7 @@
     if (m.type === 'flow') return `Step ${stepName(e)} (${e.kind}${e.branch ? ', branch ' + e.branch : ''}): ${e.plain || stepText(e)}`;
     if (m.type === 'contains') return 'contains';
     if (m.type === 'start') return 'The use case starts here';
-    return String(m.target).startsWith('actor:') ? 'takes part in this use case' : 'a top-level part of this use case';
+    return 'touched by this use case';
   }
 
   // ------------------------------------------------------------------ selection + detail panel
@@ -1027,17 +997,7 @@
     if (!el || el.empty()) return;
     el.select();
     let keep;
-    if (el.isNode()) {
-      keep = el.closedNeighborhood().union(el.ancestors()).union(stepEdgesOf(el.id()));
-      // a use case keeps its whole hierarchy lit: every tagged part (the parts
-      // it needs and their owners), with the edges between them
-      const ucRec = ucById.get(el.id());
-      if (ucRec) {
-        const ids = new Set([el.id(), ...(ucRec.members || [])]);
-        const nodes = cy.nodes().filter((n) => ids.has(n.id()));
-        keep = keep.union(nodes).union(nodes.ancestors()).union(nodes.edgesWith(nodes));
-      }
-    }
+    if (el.isNode()) keep = el.closedNeighborhood().union(el.ancestors()).union(stepEdgesOf(el.id()));
     else {
       // In the Sequence diagram an arrow joins invisible anchors: its end parts are the column heads.
       const m = MERGED.get(el.id());
@@ -1136,7 +1096,7 @@
       h += `<h4>Use cases that pass through it (${ucs.length})</h4><ul>`;
       for (const t of ucs) {
         const u = ucById.get(t.usecase);
-        const where = t.steps.length ? `step${t.steps.length > 1 ? 's' : ''} ${t.steps.join(', ')}` : t.named === false ? 'owns a part it needs' : 'a part it needs';
+        const where = t.steps.length ? `step${t.steps.length > 1 ? 's' : ''} ${t.steps.join(', ')}` : t.order ? `listed ${t.order}${u && u.has_flowmap ? '' : ' (no flowmap yet)'}` : 'owns a part it needs';
         h += `<li><a class="uc" data-uc="${esc(t.usecase)}">${esc(u ? u.name : t.usecase)}</a> <span class="muted">- ${esc(where)}</span></li>`;
       }
       h += '</ul>';
@@ -1222,7 +1182,7 @@
       h += `<h2>Contains</h2><p>${nodeLink(m.source)} contains ${nodeLink(m.target)}.</p>`;
     } else {
       const u = ucById.get(m.source);
-      h += `<h2>${m.type === 'start' ? 'Where the use case starts' : 'A top-level part of a use case'}</h2><p><a class="uc" data-uc="${esc(m.source)}">${esc(u ? u.name : m.source)}</a> → ${nodeLink(m.target)}</p>`;
+      h += `<h2>${m.type === 'start' ? 'Where the use case starts' : 'Touched by a use case'}</h2><p><a class="uc" data-uc="${esc(m.source)}">${esc(u ? u.name : m.source)}</a> → ${nodeLink(m.target)}</p>`;
     }
     return h;
   }
@@ -1488,8 +1448,6 @@
     ROOT.querySelectorAll('.ucopt').forEach((el) => el.classList.toggle('hidden', !uc));
     ROOT.querySelectorAll('.wholeopt').forEach((el) => el.classList.toggle('hidden', !!uc));
     $('dim').checked = state.dim;
-    $('steps').checked = state.steps;
-    $('flowkind').classList.toggle('hidden', !stepsOn());
     for (const k of ['showIface', 'showLib', 'showContains', 'showBroken', 'showUsecases']) $(k).checked = state[k];
     const forced = containsForced();
     $('showContains').checked = state.showContains || forced;
@@ -1516,7 +1474,7 @@
     // A use case is a chain of steps: interface edges between its parts would drown the numbered steps.
     state.showIface = !state.uc;
     if (!state.uc && (state.layout === 'sequence' || state.layout === 'flow')) state.layout = 'cluster';
-    if (state.uc && state.layout === 'cluster') state.layout = 'flow';
+    if (state.uc && ucById.get(state.uc).has_flowmap && state.layout === 'cluster') state.layout = 'sequence';
     SELECTED = null; $('detail').classList.add('hidden'); cy.resize();
   }
   function onUcChange() {
@@ -1524,7 +1482,6 @@
     render();
   }
   $('ucpick').addEventListener('change', (ev) => { state.uc = ev.target.value; onUcChange(); });
-  $('steps').addEventListener('change', (ev) => { state.steps = ev.target.checked; render(); });
   $('dim').addEventListener('change', (ev) => { state.dim = ev.target.checked; if (state.dim && state.layout === 'sequence') state.layout = 'tiered'; render(); });
   for (const k of ['showIface', 'showLib', 'showContains', 'showBroken', 'showUsecases']) {
     $(k).addEventListener('change', (ev) => { state[k] = ev.target.checked; render(); });

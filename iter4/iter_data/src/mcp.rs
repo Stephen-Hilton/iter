@@ -238,7 +238,7 @@ fn tools() -> Vec<Value> {
                    "graph": {"type": "boolean", "description": "attach map neighbours to node hits (default true)"}}), &["query"], true),
         tool("rag_status", "GraphRAG status", "Documents by kind and state, chunks by summary state, work waiting for the Summary agent, the docs directory, the embedding model, live engines, the change-sweep schedule.",
             json!({"project": p_project()}), &[], true),
-        tool("rag_docs", "GraphRAG documents", "The project's indexed documents (no text): kind file|node, title, path, state, chunk and chapter counts, summary.",
+        tool("rag_docs", "GraphRAG documents", "Every document in the project's GraphRAG index, one per document (no text, no match score): kind file|node, title, path, state, chunk and chapter counts, its summary, and `locations` — the absolute path of its file on each engine's checkout.",
             json!({"project": p_project(), "kind": {"type": "string", "enum": ["file", "node"]}, "state": {"type": "string"}}), &[], true),
         tool("rag_doc", "One GraphRAG document", "A document with its chapter summaries and every chunk (text + summary).",
             json!({"project": p_project(), "id": {"type": "string"}}), &["id"], true),

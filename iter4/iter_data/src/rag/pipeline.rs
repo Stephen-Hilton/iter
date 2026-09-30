@@ -23,6 +23,21 @@ pub const MAX_ATTEMPTS: u64 = 3;
 /// Most chunks / characters in one summary job (one LLM call).
 pub const JOB_MAX_CHUNKS: usize = 8;
 pub const JOB_MAX_CHARS: usize = 12_000;
+/// A chapter's chunk summaries sent to a rollup at most (evenly sampled beyond it).
+pub const CHAPTER_ROLLUP_CHARS: usize = 8_000;
+
+/// Evenly spaced summaries whose text fits `budget` characters (all when they fit).
+pub fn sample_to(items: Vec<Value>, budget: usize) -> Value {
+    let len = |v: &Value| v["summary"].as_str().map(str::len).unwrap_or(0) + v["heading"].as_str().map(str::len).unwrap_or(0) + 8;
+    let total: usize = items.iter().map(len).sum();
+    if total <= budget || items.is_empty() {
+        return Value::Array(items);
+    }
+    let keep = ((items.len() * budget) / total).max(1);
+    let step = items.len() as f64 / keep as f64;
+    Value::Array((0..keep).map(|i| items[((i as f64) * step) as usize].clone()).collect())
+}
+
 /// Most documents in one rollup job.
 pub const ROLLUP_MAX_DOCS: usize = 4;
 
@@ -126,6 +141,8 @@ pub async fn store_prepared(a: &ArangoBackend, d: DocMeta<'_>, p: &Prepared) -> 
             "text": text, "chars": text.len(), "tokens": c.get("tokens").cloned().unwrap_or(Value::Null), "text_hash": h,
             "vec_raw": c["vec_raw"], "vec_model": p.model, "created": now,
             "summary": kept.map(|k| k["summary"].clone()).unwrap_or(json!("")),
+            // no vec_sum until a summary exists: the sparse vector index skips a
+            // missing attribute but refuses a null one
             "vec_sum": kept.map(|k| k["vec_sum"].clone()).unwrap_or(Value::Null),
             "sum_model": kept.map(|k| k["sum_model"].clone()).unwrap_or(Value::Null),
             "sum_state": if kept.is_some() { "done" } else { "pending" },
@@ -166,7 +183,7 @@ pub async fn store_prepared(a: &ArangoBackend, d: DocMeta<'_>, p: &Prepared) -> 
     let trx = a.begin(&[DOC_COLL, CHUNK_COLL]).await.map_err(backend)?;
     let res = async {
         a.aql_in(&trx, "FOR c IN rag_chunk FILTER c.project == @p AND c.doc == @d REMOVE c IN rag_chunk", json!({"p": d.project, "d": d.id})).await?;
-        a.aql_in(&trx, "FOR r IN @rows INSERT r INTO rag_chunk", json!({"rows": rows})).await?;
+        a.aql_in(&trx, "FOR r IN @rows INSERT r INTO rag_chunk OPTIONS {keepNull: false}", json!({"rows": rows})).await?;
         a.aql_in(&trx, "UPSERT {_key: @k} INSERT @doc REPLACE @doc IN rag_doc", json!({"k": d.id, "doc": doc})).await
     }
     .await;
@@ -318,6 +335,91 @@ pub async fn nodes_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Js
     Ok(Json(json!({"added": added, "changed": changed, "unchanged": unchanged, "removed": removed, "failed": failed})))
 }
 
+// ---------- repo files (engine: `iter rag sync`, setting repo_globs) ----------
+
+/// A repo file's document key: stable per (project, path).
+pub(crate) fn repo_doc_id(project: &str, path: &str) -> String {
+    format!("r{}", &sha(&format!("{project}\u{0}repo\u{0}{path}"))[..31])
+}
+
+/// {path: hash} of every repo-file document.
+pub async fn file_hashes(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let a = arango(st.store.as_ref())?;
+    let rows = a
+        .aql("FOR d IN rag_doc FILTER d.project == @p AND d.kind == 'file' AND d.source == 'repo' RETURN [d.path, d.hash]", json!({"p": name}))
+        .await
+        .map_err(backend)?;
+    Ok(Json(Value::Object(rows.into_iter().filter_map(|r| Some((r.get(0)?.as_str()?.to_string(), r.get(1).cloned().unwrap_or(Value::Null)))).collect())))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FilesReq {
+    /// changed or new files, chunked and embedded by the engine:
+    /// {path, title, hash, format, chapters, chunks, model, chars, pages}
+    #[serde(default)]
+    files: Vec<Value>,
+    /// when present: every path the repo_globs match now; repo-file documents
+    /// not listed are removed
+    #[serde(default)]
+    keep: Option<Vec<String>>,
+}
+
+/// Files of the checkout indexed where they live (setting `repo_globs`):
+/// kind `file`, `source: "repo"` — searchable like uploads, but never copied,
+/// stored or committed anywhere.
+pub async fn files_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(req): Json<FilesReq>) -> Result<Json<Value>, ApiError> {
+    u.require_writer()?;
+    let a = arango(st.store.as_ref())?;
+    let existing: HashMap<String, String> = a
+        .aql("FOR d IN rag_doc FILTER d.project == @p AND d.kind == 'file' AND d.source == 'repo' RETURN [d.path, d.hash]", json!({"p": name}))
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .filter_map(|r| Some((r.get(0)?.as_str()?.to_string(), r.get(1)?.as_str().unwrap_or("").to_string())))
+        .collect();
+    let (mut added, mut changed, mut unchanged, mut failed) = (0, 0, 0, Vec::<Value>::new());
+    for f in &req.files {
+        let path = s(f, "path").to_string();
+        if !path.starts_with("{topdir}/") || path.split('/').any(|x| x == "..") {
+            failed.push(json!({"path": path, "error": "a repo file's path is {topdir}/…"}));
+            continue;
+        }
+        let hash = s(f, "hash").to_string();
+        match existing.get(&path) {
+            Some(h) if *h == hash && !hash.is_empty() => {
+                unchanged += 1;
+                continue;
+            }
+            Some(_) => changed += 1,
+            None => added += 1,
+        }
+        let prepared: Prepared = match serde_json::from_value(f.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                failed.push(json!({"path": path, "error": format!("prepared chunks: {e}")}));
+                continue;
+            }
+        };
+        let title = if s(f, "title").is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { s(f, "title").to_string() };
+        let extra = json!({"source": "repo", "filename": path.rsplit('/').next().unwrap_or("")});
+        let meta = DocMeta { project: &name, id: repo_doc_id(&name, &path), kind: "file", title, path: path.clone(), hash, extra, by: &u.sub };
+        if let Err(e) = store_prepared(a, meta, &prepared).await {
+            failed.push(json!({"path": path, "error": match e { ApiError::Status(_, m) => m, _ => "ingest failed".into() }}));
+        }
+    }
+    let mut removed = 0;
+    if let Some(keep) = &req.keep {
+        let keep: HashSet<&str> = keep.iter().map(String::as_str).collect();
+        let gone: Vec<String> = existing.keys().filter(|p| !keep.contains(p.as_str())).map(|p| repo_doc_id(&name, p)).collect();
+        removed = gone.len();
+        remove_docs(a, &name, &gone).await?;
+    }
+    if added + changed + removed > 0 {
+        st.store.bump_seq(&name, "rag").await?;
+    }
+    Ok(Json(json!({"added": added, "changed": changed, "unchanged": unchanged, "removed": removed, "failed": failed})))
+}
+
 // ---------- the job protocol ----------
 
 /// Work waiting for engines serving `project`: its own, plus the product-wide
@@ -416,38 +518,18 @@ async fn claim_in(a: &ArangoBackend, name: &str, req: &ClaimReq) -> Result<Value
             return Ok(json!({"job": "ingest", "job_id": job, "doc": doc, "filename": blob["filename"], "content_b64": blob["content_b64"]}));
         }
     }
-    let now = now_utc();
-    let max = req.max_chunks.unwrap_or(JOB_MAX_CHUNKS).clamp(1, 32);
-    if wants("chunks") {
-        // oldest first, in reading order, across documents, up to max chunks /
-        // JOB_MAX_CHARS (the first chunk always fits) — one model call covers
-        // several small node files
-        let q = format!(
-            "LET picked = (FOR c IN rag_chunk FILTER c.project == @p AND {CLAIMABLE_CHUNK}
-                           SORT c.created, c.doc, c.idx LIMIT @max RETURN {{k: c._key, n: c.chars}})
-             FOR i IN 0..(LENGTH(picked) - 1)
-               FILTER LENGTH(picked) > 0
-               LET before = SUM(SLICE(picked, 0, i)[*].n)
-               FILTER i == 0 OR before + picked[i].n <= @maxchars
-               LET c = DOCUMENT(CONCAT('rag_chunk/', picked[i].k))
-               UPDATE c WITH {{sum_state: 'claimed', sum_engine: @e, sum_expires: @exp, sum_job: @job, sum_attempts: c.sum_attempts + 1}} IN rag_chunk
-               RETURN {{id: NEW._key, doc: NEW.doc, idx: NEW.idx, chapter: NEW.chapter, heading: NEW.heading, text: NEW.text,
-                        title: NEW.title, path: NEW.path, kind: NEW.kind, nodetype: NEW.nodetype}}"
-        );
-        let bind = json!({"p": name, "now": now, "max": max, "maxchars": JOB_MAX_CHARS, "e": req.engine, "exp": iso_in(CLAIM_SEC), "job": job});
-        let chunks = a.aql_retry(&q, bind).await.map_err(backend)?;
-        if let Some(first) = chunks.first() {
-            let doc = doc_brief(a, s(first, "doc")).await?;
-            return Ok(json!({"job": "chunks", "job_id": job, "doc": doc, "chunks": chunks}));
-        }
-    }
+    // rollups before more chunks: a document whose chunks are all summarised
+    // becomes "ready" at once instead of after every other chunk in the queue
+    // (2026-09-30: 211 documents sat at "rollup" behind 35k pending chunks)
     if wants("rollup") {
         let q = format!(
             "FOR d IN rag_doc FILTER d.project == @p AND {CLAIMABLE_ROLLUP} SORT d.updated LIMIT @n
-             UPDATE d WITH {{rollup_state: 'claimed', rollup_engine: @e, rollup_expires: @exp, rollup_job: @job, rollup_attempts: d.rollup_attempts + 1}} IN rag_doc
+             UPDATE d WITH {{rollup_state: 'claimed', rollup_engine: @e, rollup_job: @job, rollup_attempts: d.rollup_attempts + 1,
+                             // a big document's rollup is many model calls (chapters in windows, then the whole): its claim lasts longer
+                             rollup_expires: DATE_FORMAT(DATE_ADD(DATE_NOW(), @base + FLOOR(d.chunks / 2), 's'), '%yyyy-%mm-%ddT%hh:%ii:%ssZ')}} IN rag_doc
              RETURN NEW._key"
         );
-        let bind = json!({"p": name, "now": now_utc(), "e": req.engine, "exp": iso_in(CLAIM_SEC), "job": job, "n": ROLLUP_MAX_DOCS});
+        let bind = json!({"p": name, "now": now_utc(), "e": req.engine, "base": CLAIM_SEC, "job": job, "n": ROLLUP_MAX_DOCS});
         let ids: Vec<String> = a.aql_retry(&q, bind).await.map_err(backend)?.into_iter().filter_map(|d| d.as_str().map(String::from)).collect();
         if !ids.is_empty() {
             let mut docs = Vec::new();
@@ -463,11 +545,50 @@ async fn claim_in(a: &ArangoBackend, name: &str, req: &ClaimReq) -> Result<Value
                         json!({"d": id}),
                     )
                     .await
-                    .map_err(backend)?,
+                    .map_err(backend)?
+                    .into_iter()
+                    .map(|mut ch| {
+                        ch["summaries"] = sample_to(ch["summaries"].as_array().cloned().unwrap_or_default(), CHAPTER_ROLLUP_CHARS);
+                        ch
+                    })
+                    .collect(),
                 );
                 docs.push(doc);
             }
             return Ok(json!({"job": "rollup", "job_id": job, "docs": docs}));
+        }
+    }
+    let now = now_utc();
+    let max = req.max_chunks.unwrap_or(JOB_MAX_CHUNKS).clamp(1, 32);
+    if wants("chunks") {
+        // oldest first, in reading order, across documents, up to max chunks /
+        // JOB_MAX_CHARS (the first chunk always fits) — one model call covers
+        // several small node files
+        // smallest documents first (fewest chunks still waiting), each in
+        // reading order: the most documents reach "ready" soonest, and one huge
+        // file no longer holds every small one behind it (2026-09-30: an
+        // 11,530-chunk techreq held 864 small documents at 0/N for hours)
+        let q = format!(
+            "LET docs = (FOR c IN rag_chunk FILTER c.project == @p AND {CLAIMABLE_CHUNK}
+                         COLLECT doc = c.doc WITH COUNT INTO n SORT n, doc LIMIT @max RETURN doc)
+             LET picked = (FOR c IN rag_chunk FILTER c.project == @p AND c.doc IN docs AND {CLAIMABLE_CHUNK}
+                           SORT POSITION(docs, c.doc, true), c.idx LIMIT @max RETURN {{k: c._key, n: c.chars}})
+             FOR i IN 0..(LENGTH(picked) - 1)
+               FILTER LENGTH(picked) > 0
+               LET before = SUM(SLICE(picked, 0, i)[*].n)
+               FILTER i == 0 OR before + picked[i].n <= @maxchars
+               LET c = DOCUMENT(CONCAT('rag_chunk/', picked[i].k))
+               UPDATE c WITH {{sum_state: 'claimed', sum_engine: @e, sum_expires: @exp, sum_job: @job, sum_attempts: c.sum_attempts + 1}} IN rag_chunk
+               RETURN {{id: NEW._key, doc: NEW.doc, idx: NEW.idx, chapter: NEW.chapter, heading: NEW.heading, text: NEW.text,
+                        title: NEW.title, path: NEW.path, kind: NEW.kind, nodetype: NEW.nodetype}}"
+        );
+        // ~1500 characters per requested chunk (a bigger batch = fewer model calls)
+        let maxchars = JOB_MAX_CHARS.max(max * 1500);
+        let bind = json!({"p": name, "now": now, "max": max, "maxchars": maxchars, "e": req.engine, "exp": iso_in(CLAIM_SEC), "job": job});
+        let chunks = a.aql_retry(&q, bind).await.map_err(backend)?;
+        if let Some(first) = chunks.first() {
+            let doc = doc_brief(a, s(first, "doc")).await?;
+            return Ok(json!({"job": "chunks", "job_id": job, "doc": doc, "chunks": chunks}));
         }
     }
     Ok(json!({"job": null}))

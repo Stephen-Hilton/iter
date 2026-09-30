@@ -122,7 +122,8 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .seg button:disabled{cursor:default}
 #brandrow .who{margin-left:0}
 @media (max-width:760px){
-  .segwrap{margin-left:0;width:100%;order:9;justify-content:space-between}
+  .segwrap{margin-left:0;width:100%;order:9;justify-content:space-between;flex-wrap:wrap;row-gap:6px}
+  .segwrap .seg{flex:none}
   #brandrow{flex-wrap:wrap;row-gap:6px}
   #brandrow .who{margin-left:auto}
 }
@@ -749,12 +750,16 @@ async function renderProjectCtl(){
   const total=status?status.engines.length:0;
   const running=status?(status.inprogress||0):0;
   let note=`${live}/${total} engines online · ${running} running · today $${todaySpend.toFixed(2)}${capTxt}`;
+  // no engine online: nothing queued will start, and nothing else on the page says why
+  if(status&&!live)note+=` · <span style="color:var(--bad)" title="No engine serving this project has checked in during the last few ticks, so queued work will not start">no engine online</span> <button class="engsetup" title="The steps to set up and start an engine for this project">Engine setup</button>`;
   if(status&&status.not_honoring&&status.not_honoring.length)note+=` · <span style="color:var(--bad)">not honoring: ${esc(status.not_honoring.join(", "))}</span>`;
   const st=proj.state;
   const seg=st==="Draining"
     ?`<button class="Draining on" disabled>Stopping… (${running} running)</button><button class="Running" data-st="Running">Running</button><button class="Stopped" data-st="Stopped" title="stop now without waiting for running work">force stop</button>`
     :`<button class="Running ${st==="Running"?"on":""}" data-st="Running" ${st==="Running"?"disabled":""}>Running</button><button class="Stopped ${st==="Stopped"?"on":""}" data-st="Stopped" ${st==="Stopped"?"disabled":""}>Stopped</button>`;
   $("#projctl").innerHTML=`<span class="kv"><b>${esc(project)}</b> ${note}</span><span class="seg">${seg}</span>`;
+  const es=$("#projctl").querySelector("button.engsetup");
+  if(es)es.onclick=async()=>{const p=project;await setTab("intro");if(window.IterIntro&&IterIntro.openSetup)IterIntro.openSetup(p);};
   $("#projctl").querySelectorAll("button[data-st]").forEach(b=>b.onclick=async()=>{
     let target=b.dataset.st;
     let msg=target==="Running"?"Engines start picking queued work for this project.":"Engines finish what is running and start nothing new; the project shows Stopped once drained.";
@@ -1012,10 +1017,18 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!menu.hidden){e.pre
 let menuOpenedAt=0;
 document.addEventListener("scroll",()=>{if(!menu.hidden&&Date.now()-menuOpenedAt>600)closeMenu();},true);
 
+/* the engine-owned test sweep (2026-09-30): one per project, created paused;
+   it can be turned on and off, run now and edited, but never deleted or closed */
+function isSweepTemplate(i){return i.system==="test-sweep"&&!!(i.sched&&i.sched.kind);}
 function menuItems(i){
   const b=(act,label,cls="")=>`<button data-act="${act}" class="${cls}">${label}</button>`;
   const note=t=>`<span class="note">${t}</span>`;
   const s=i.state;
+  if(isSweepTemplate(i)){
+    return (s==="scheduled"?b("pause","Pause schedule (turn off)"):b("schedule","Resume schedule (turn on)"))+b("runnow","Run now")+
+      b("setprio","Set priority…")+b("pauseedit","Pause &amp; edit (interval, flags)")+b("addtag","Add tag…")+b("eli5","ELI5 (explain simply)")+`<div class="sep"></div>`+
+      note("The project's test sweep, owned by the engine. When due it runs at once on its timer — no agent slot, no usage hold — while the project is Running: every test group the map allows, then one code item per red group, one test item per code node with no tests, one ingest item per unclear node. Pause turns it off; it cannot be deleted.");
+  }
   if(CLOSED.has(s)){
     const att=i.attempt?` after ${i.attempt} attempt${i.attempt===1?"":"s"}`:"";
     return b("clone","Clone (run it again)")+(s==="complete"?b("followup","Create follow-up request"):"")+
@@ -1263,8 +1276,10 @@ function openForm(mode,src){
   const agentNames=[...new Set([...(agentsCache.map(a=>a.name)),"exec",i.agent].filter(Boolean))];
   const lines=a=>(a||[]).join("\n");
   const tagsText=(i.tags||[]).map(t=>t.color?`${t.text}:${t.color}`:t.text).join(", ");
-  const stateOpts=(mode==="edit"?OPEN_TARGETS:["queued","parked","paused","question"]);
-  const curState=(mode==="edit"&&OPEN_TARGETS.includes(i.state))?i.state:"queued";
+  /* the test sweep template stays a schedule: scheduled (on) or paused (off) */
+  const sweepTpl=mode==="edit"&&isSweepTemplate(i);
+  const stateOpts=sweepTpl?["scheduled","paused"]:(mode==="edit"?OPEN_TARGETS:["queued","parked","paused","question"]);
+  const curState=sweepTpl?i.state:(mode==="edit"&&OPEN_TARGETS.includes(i.state))?i.state:"queued";
   form.innerHTML=`
     <div style="padding:16px">
       <div class="dlghead"><h2>${esc(title)}</h2><button class="ghost sm" id="f-cancel">cancel</button></div>

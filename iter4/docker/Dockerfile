@@ -15,6 +15,7 @@ COPY iter_rag iter_rag
 # the user guide GraphRAG ingests (only iter4_guide.md passes .dockerignore)
 COPY docs docs
 COPY webui webui
+COPY tools/iter_engine_setup.sh tools/iter_engine_setup.sh
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p iter_data && cp target/release/iter_data /iter_data

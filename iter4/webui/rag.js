@@ -31,6 +31,14 @@
     return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 129600 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago";
   };
   const count = (rows, pred) => (rows || []).filter(pred).reduce((a, r) => a + (r.n || 0), 0);
+  // a heading path that starts with the document's own title ("iter4 guide > …",
+  // "GraphRAG index (code) > …") repeats what the hit's title already says
+  const trimHeading = (heading, title) => {
+    const parts = String(heading || "").split(" > ");
+    const t = String(title || "").trim().toLowerCase();
+    if (parts.length > 1 && t && parts[0].trim().toLowerCase().startsWith(t)) parts.shift();
+    return parts.join(" > ");
+  };
 
   function mount(target, c) {
     el = target; ctx = c;
@@ -44,6 +52,7 @@
               <form id="rag-sform" class="rag-sform">
                 <input id="rag-q" type="search" placeholder="Ask in plain words — e.g. how does the engine claim a work item?" autocomplete="off">
                 <button type="submit">Search</button>
+                <button type="button" class="ghost" id="rag-all" title="Every document in the index, one per row, with its summary and where its file is — not ranked">Show all documents</button>
               </form>
               <div class="rag-sopts">
                 <label>in <select id="rag-skind"><option value="">everything</option><option value="file">uploaded documents</option><option value="node">node files</option><option value="guide">the iter guide</option></select></label>
@@ -78,6 +87,10 @@
               <h3>Settings</h3>
               <label class="rag-field">Docs directory <span class="rag-dim">(where the engine stores uploaded originals)</span>
                 <div class="rag-row"><input id="rag-docsdir" class="rag-grow" placeholder="{topdir}/docs/"><button id="rag-docsdir-save" class="ghost">Save</button></div></label>
+              <label class="rag-field">Also index from the checkout <span class="rag-dim">(where the files live; one glob per line, e.g. docs/**/*.md)</span>
+                <textarea id="rag-globs" rows="2" class="rag-grow" placeholder="core/notes/**/*.md"></textarea></label>
+              <label class="rag-field">Node file types to index <span class="rag-dim">(blank = all; e.g. code, bizreq, techreq)</span>
+                <div class="rag-row"><input id="rag-ntypes" class="rag-grow" placeholder="all node types"><button id="rag-index-save" class="ghost">Save</button></div></label>
               <label class="rag-dim rag-check"><input type="checkbox" id="rag-gitignore"> add the docs directory to the project's .gitignore
                 (originals are written there but never committed)</label>
               <div id="rag-sched"></div>
@@ -88,6 +101,7 @@
       </div>`;
     const q = s => el.querySelector(s);
     q("#rag-sform").onsubmit = ev => { ev.preventDefault(); search(); };
+    q("#rag-all").onclick = () => showAll();
     q("#rag-filter").oninput = ev => { S.filter = ev.target.value.toLowerCase(); renderDocs(); };
     el.querySelectorAll("#rag-kinds button").forEach(b => b.onclick = () => { S.kind = b.dataset.k; store.set("rag_kind", S.kind); renderDocs(); });
     q("#rag-file").onchange = ev => { upload([...ev.target.files]); ev.target.value = ""; };
@@ -97,13 +111,14 @@
     drop.ondrop = ev => { ev.preventDefault(); drop.classList.remove("over"); upload([...ev.dataTransfer.files]); };
     q("#rag-docsdir-save").onclick = saveDocsDir;
     q("#rag-gitignore").onchange = saveGitignore;
+    q("#rag-index-save").onclick = saveIndexing;
     show(c);
   }
 
   function show(c) {
     const changed = !ctx || ctx.project !== c.project;
     ctx = c;
-    if (changed) { S.open = null; S.openDoc = null; S.results = null; S.docs = []; el.querySelector("#rag-results").innerHTML = ""; renderDetail(); }
+    if (changed) { S.open = null; S.openDoc = null; S.openSig = null; S.results = null; S.docs = []; el.querySelector("#rag-results").innerHTML = ""; renderDetail(); }
     refresh(true);
     clearInterval(timer);
     timer = setInterval(() => { if (!document.hidden) refresh(false); }, 5000);
@@ -120,7 +135,10 @@
       renderStatus(); renderDocs(); if (full) renderSettings();
       if (S.open) {
         const d = await ctx.api(P() + "/rag/docs/" + enc(S.open)).catch(() => null);
-        if (p === ctx.project && S.open && d) { S.openDoc = d; renderDetail(); }
+        // redraw only when the document really changed: a redraw on every poll
+        // closed the chunk the reader had just opened (2026-09-30)
+        const sig = d && JSON.stringify(d);
+        if (p === ctx.project && S.open && d && sig !== S.openSig) { S.openSig = sig; S.openDoc = d; renderDetail(); }
       }
     } catch (e) {
       el.querySelector("#rag-status").innerHTML = `<span class="rag-bad">could not load GraphRAG: ${esc(e.message)}</span>`;
@@ -198,13 +216,17 @@
   async function openDoc(id) {
     S.open = id; S.openDoc = null; renderDocs();
     el.querySelector("#rag-detail").innerHTML = "<span class='rag-dim'>loading…</span>";
-    try { S.openDoc = await ctx.api(P() + "/rag/docs/" + enc(id)); } catch (e) { el.querySelector("#rag-detail").innerHTML = `<span class="rag-bad">${esc(e.message)}</span>`; return; }
+    try { S.openDoc = await ctx.api(P() + "/rag/docs/" + enc(id)); S.openSig = JSON.stringify(S.openDoc); } catch (e) { el.querySelector("#rag-detail").innerHTML = `<span class="rag-bad">${esc(e.message)}</span>`; return; }
     renderDetail();
     if (window.innerWidth < 900) el.querySelector("#rag-detail").scrollIntoView({ behavior: "smooth" });
   }
 
   function renderDetail() {
     const box = el.querySelector("#rag-detail");
+    // what the reader has open, and where they scrolled, survive a redraw
+    const openChunks = new Set([...box.querySelectorAll("details.rag-chunk[open]")].map(x => x.dataset.i));
+    const scroll = box.scrollTop;
+    const typed = (box.querySelector("#rag-linknode") || {}).value || "";
     const d = S.openDoc;
     if (!d) { box.innerHTML = "<span class='rag-dim'>Select a document to see its summary, chapters and chunks.</span>"; return; }
     const chunks = d.chunk_list || [];
@@ -224,13 +246,16 @@
       ${d.error ? `<div class="rag-bad">${esc(d.error)}</div>` : ""}
       ${chapters.length ? `<h4>Chapters</h4>${chapters.map(c => `<div class="rag-chap"><b>${esc(c.title || "(untitled)")}</b> <span class="rag-dim">${c.chunks} chunk${c.chunks === 1 ? "" : "s"}</span><div>${c.summary ? esc(c.summary) : "<span class='rag-dim'>no summary yet</span>"}</div></div>`).join("")}` : ""}
       <h4>Chunks</h4>
-      ${chunks.map(c => `<details class="rag-chunk"><summary><span class="rag-badge ${c.sum_state === "done" ? "ok" : c.sum_state === "failed" ? "bad" : "dim"}">${esc(c.sum_state)}</span>
+      ${chunks.map(c => `<details class="rag-chunk" data-i="${c.idx}"${openChunks.has(String(c.idx)) ? " open" : ""}><summary><span class="rag-badge ${c.sum_state === "done" ? "ok" : c.sum_state === "failed" ? "bad" : "dim"}">${esc(c.sum_state)}</span>
           <b>#${c.idx + 1}</b> ${esc(c.heading || "")} <span class="rag-dim">${c.chars} chars</span>
           <div class="rag-csum">${c.summary ? esc(c.summary) : c.sum_error ? `<span class="rag-bad">${esc(c.sum_error)}</span>` : ""}</div></summary>
           <pre class="rag-text">${esc(c.text)}</pre></details>`).join("")}
       ${ctx.canWrite ? `<div class="rag-actions">
         <button class="ghost rag-sm" id="rag-resum">Re-summarise</button>
         <button class="ghost rag-sm rag-danger" id="rag-del">Remove from GraphRAG…</button></div>` : ""}`;
+    box.scrollTop = scroll;
+    const ln = box.querySelector("#rag-linknode");
+    if (ln && typed) ln.value = typed;
     box.querySelector("#rag-close").onclick = () => { S.open = null; S.openDoc = null; renderDetail(); renderDocs(); };
     box.querySelectorAll("[data-graph]").forEach(b => b.onclick = () => ctx.openGraph(b.dataset.graph));
     box.querySelectorAll("[data-unlink]").forEach(b => b.onclick = () => linkDoc(d, b.dataset.unlink, true));
@@ -268,6 +293,11 @@
     const dd = el.querySelector("#rag-docsdir");
     if (document.activeElement !== dd) dd.value = (st.settings || {}).docs_dir || "{topdir}/docs/";
     dd.disabled = el.querySelector("#rag-docsdir-save").hidden = !ctx.canWrite;
+    const set = st.settings || {};
+    const gl = el.querySelector("#rag-globs"), nt = el.querySelector("#rag-ntypes");
+    if (document.activeElement !== gl) gl.value = (set.repo_globs || []).join("\n");
+    if (document.activeElement !== nt) nt.value = (set.node_types || []).join(", ");
+    gl.disabled = nt.disabled = el.querySelector("#rag-index-save").hidden = !ctx.canWrite;
     const gi = el.querySelector("#rag-gitignore");
     gi.checked = !!(st.settings || {}).docs_gitignore;
     gi.disabled = !ctx.canWrite;
@@ -303,6 +333,16 @@
     catch (e) { alert(e.message); }
   }
 
+  async function saveIndexing() {
+    const globs = el.querySelector("#rag-globs").value.split("\n").map(x => x.trim()).filter(Boolean);
+    const types = el.querySelector("#rag-ntypes").value.split(/[,\s]+/).map(x => x.trim()).filter(Boolean);
+    try {
+      await ctx.api(P() + "/rag/settings", { method: "PUT", body: JSON.stringify({ repo_globs: globs, node_types: types }) });
+      toast("Saved — the next change sweep (or map change) indexes them");
+      refresh(true);
+    } catch (e) { alert(e.message); }
+  }
+
   async function saveGitignore() {
     const v = el.querySelector("#rag-gitignore").checked;
     try { await ctx.api(P() + "/rag/settings", { method: "PUT", body: JSON.stringify({ docs_gitignore: v }) }); refresh(true); }
@@ -327,6 +367,13 @@
       await ctx.api(P() + "/rag/docs/" + enc(d.id) + "/links", { method: "POST", body: JSON.stringify({ node, unlink }) });
       if (note) note.textContent = `${unlink ? "Unlink" : "Link"} queued: the next engine writes it into ${node} and the map picks it up on its next sync.`;
     } catch (e) { alert(e.message); }
+  }
+
+  function toast(msg) {
+    const t = document.createElement("div");
+    t.className = "rag-toast"; t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 2200);
   }
 
   function b64(file) {
@@ -363,6 +410,43 @@
     refresh(false);
   }
 
+  // "Show all documents": one card per document (not per chunk) with its
+  // summary and where its file lives — nothing is matched, so nothing is scored.
+  // Honours the "in" and "node type" filters; the user guide is included.
+  async function showAll() {
+    const box = el.querySelector("#rag-results");
+    const kind = el.querySelector("#rag-skind").value, nt = el.querySelector("#rag-snt").value;
+    box.innerHTML = "<span class='rag-dim'>loading every document…</span>";
+    let docs, guide = [];
+    try {
+      docs = await ctx.api(P() + "/rag/docs" + (kind && kind !== "guide" ? "?kind=" + enc(kind) : ""));
+      if ((!kind || kind === "guide") && !nt) guide = await ctx.api("/api/projects/_iter/rag/docs").catch(() => []);
+    } catch (e) { box.innerHTML = `<span class="rag-bad">${esc(e.message)}</span>`; return; }
+    if (kind === "guide") docs = [];
+    if (nt) docs = docs.filter(d => d.nodetype === nt);
+    const order = { file: 0, node: 1, guide: 2 };
+    const all = docs.concat(guide).sort((a, b) => (order[a.kind] ?? 3) - (order[b.kind] ?? 3) || String(a.nodetype || "").localeCompare(String(b.nodetype || "")) || String(a.title).localeCompare(String(b.title)));
+    S.results = null;
+    const where = d => {
+      if (d.kind === "guide") return `<div class="rag-loc"><span class="rag-dot live"></span><b>built into the data server</b> <span class="rag-dim">${esc(d.path)}</span></div>`;
+      const locs = d.locations || [];
+      if (!locs.length) return `<div class="rag-loc"><span class="rag-dot"></span><span class="rag-dim">no engine serves this project · ${esc(d.path)}</span></div>`;
+      return locs.map(l => `<div class="rag-loc" title="${l.live ? "engine is live" : "engine is offline"}"><span class="rag-dot ${l.live ? "live" : ""}"></span><b>${esc(l.engine)}</b> <code>${esc(l.path)}</code></div>`).join("");
+    };
+    const n = all.length, counts = ["file", "node", "guide"].map(k => [k, all.filter(d => d.kind === k).length]).filter(([, c]) => c);
+    box.innerHTML = `<div class="rag-dim rag-rmeta">${n} document${n === 1 ? "" : "s"} (${counts.map(([k, c]) => `${c} ${{ file: "uploaded", node: "node files", guide: "guide" }[k]}`).join(" · ")}) · every document in the index, not ranked
+        <button class="ghost rag-sm" id="rag-all-close">close</button></div>
+      <div class="rag-alldocs">${all.map(d => `<article class="rag-doccard">
+        <header>${d.kind === "node" ? `<span class="rag-nt">${esc(d.nodetype || "node")}</span>` : d.kind === "guide" ? `<span class="rag-nt">guide</span>` : `<span class="rag-nt">${esc(d.format || "file")}</span>`}
+          <button class="rag-link" data-open="${esc(d.kind === "guide" ? "" : d.id)}" ${d.kind === "guide" ? "disabled" : ""}>${esc(d.title)}</button>
+          ${stateBadge(d)} <span class="rag-dim rag-small">${d.chunks || 0} chunks · ${(d.chapters || []).length} chapters · updated ${esc(ago(d.updated))}</span></header>
+        <div class="rag-docsum">${d.summary ? esc(d.summary) : `<span class="rag-dim">${d.state === "ready" ? "no summary" : "the Summary agent has not written this document's summary yet"}</span>`}</div>
+        ${where(d)}
+      </article>`).join("")}</div>`;
+    box.querySelector("#rag-all-close").onclick = () => { box.innerHTML = ""; };
+    box.querySelectorAll("[data-open]").forEach(b => b.onclick = () => { if (!b.dataset.open) return; const d = S.docs.find(x => x.id === b.dataset.open); if (d) S.kind = d.kind; openDoc(b.dataset.open); });
+  }
+
   async function search() {
     const q = el.querySelector("#rag-q").value.trim();
     const box = el.querySelector("#rag-results");
@@ -389,7 +473,7 @@
             ${(h.matched || []).map(m => `<span class="rag-badge ${m === "keyword" ? "q" : "dim"}" title="rank ${rk[m]} by ${m}">${esc(m)} #${rk[m]}</span>`).join(" ")}
             ${d.kind === "node" ? `<span class="rag-nt">${esc(d.nodetype || "node")}</span>` : d.kind === "guide" ? `<span class="rag-nt" title="the built-in iter4 user guide">guide</span>` : ""}
             <button class="rag-link" data-open="${esc(h.doc)}">${esc(d.title)}</button>
-            <span class="rag-dim">${esc(h.heading || h.chapter_title || "")}</span></header>
+            <span class="rag-dim">${esc(trimHeading(h.heading, d.title) || h.chapter_title || "")}</span></header>
           <div class="rag-path">${esc(d.path)} · chunk ${h.idx + 1}</div>
           ${h.summary ? `<div class="rag-csum">${esc(h.summary)}</div>` : ""}
           <details ${i < 2 ? "open" : ""}><summary class="rag-dim">full chunk</summary><pre class="rag-text">${esc(h.text)}</pre></details>

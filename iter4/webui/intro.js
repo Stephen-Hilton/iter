@@ -1,14 +1,20 @@
-/* iter4 webui — the Intro tab (Phase 2, R15).
+/* iter4 webui — the Intro tab (rebuilt 2026-09-30).
  *
- * Slide-like pages in two tracks (Business, Technical) with prev/next arrows,
- * keyboard left/right, swipe on phones and a progress dot row; the last slide of
- * both tracks is the New project wizard. Self-contained: index.html loads
- * intro.css + intro.js and calls
+ * One story, told at three levels of detail. A 3-stop slider (Summary ·
+ * Business · Technical) never changes the slide or its picture: stop 1 is the
+ * high-level summary, stop 2 lays business callouts over it, stop 3 adds the
+ * technical overlay (API routes, config keys, code names). Two pages sit
+ * beside the story, each behind its own header button: the Glossary and the
+ * new-project wizard ("Start a new project").
+ *
+ * Self-contained: index.html loads intro.css + intro.js and calls
  *   IterIntro.mount(el, ctx)   once, with an empty <div> the tab owns
  *   IterIntro.show(ctx)        whenever the tab becomes visible again
  * ctx = {api(path, opts) -> Promise<json>, project, isAdmin,
  *        openGraph(nodeQuery), openQueue(), reloadProjects()}.
  * Every class is prefixed intro-; colours come from index.html's :root tokens.
+ * Keys: ← → move between slides, ↑ ↓ change the level of detail. A checkbox under
+ * the slide (remembered per browser) resets the detail to Summary on every slide change.
  */
 (function () {
   "use strict";
@@ -19,7 +25,7 @@
     get(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window: fine */ } }
   };
-  const POS_KEY = "iter_intro_pos";
+  const POS_KEY = "iter_intro_v2";
 
   let copies = []; // copy-button payloads for the current render
   function code(caption, text) {
@@ -30,10 +36,6 @@
   const gbtn = (query, label) => `<button class="intro-btn intro-ghost intro-sm" data-graph="${esc(query)}" title="Open the Project graph at ${esc(query)}">&#9673; ${esc(label || query)}</button>`;
   const qbtn = label => `<button class="intro-btn intro-ghost" data-queue="1">${esc(label || "Open the work queue")}</button>`;
   const chip = (cls, t) => `<span class="intro-chip ${cls || ""}">${t}</span>`;
-  function flow(steps, note) {
-    const parts = steps.map((s, i) => `<div class="intro-step ${s.cls || ""}"><span class="intro-n">${i + 1}</span><b>${s.t}</b><span>${s.d}</span></div>`);
-    return `<div class="intro-flow">${parts.join('<span class="intro-to">&rarr;</span>')}</div>` + (note ? `<div class="intro-loopnote">${note}</div>` : "");
-  }
   const card = (cls, tag, title, body) => `<div class="intro-card ${cls}">${tag ? `<span class="intro-tag">${tag}</span>` : ""}<h4>${title}</h4>${body}</div>`;
 
   function toast(msg) {
@@ -51,399 +53,417 @@
     ta.remove();
   }
 
-  /* ------------------------------------------------------------ diagrams */
-  function archDiagram(tech) {
-    const web = tech
-      ? `<p>One page, <code>webui/index.html</code>, plain JavaScript, built into the iter_data binary. Queue, project graph, settings.</p>`
-      : `<p>Where people watch the work, answer questions, set priorities and budgets.</p>`;
-    const data = tech
-      ? `<p>axum HTTP API. The only thing that touches the database (behind one storage trait). Users, roles, tokens, locks, versioned writes, the project graph.</p>
-         <div class="intro-db">ArangoDB <small>the one store: documents, counters, the map as a graph, and GraphRAG vectors</small></div>`
-      : `<p>Holds every work item, lock, agent definition, schedule, user and spend record, and the map of the program.</p>
-         <div class="intro-db">Database <small>ArangoDB, usually in the same container</small></div>`;
-    const eng = (n, agents) => `<div class="intro-node intro-eng"><span class="intro-role">${tech ? "iter_engine" : "engine"} · machine ${n}</span>
-         <h4>${tech ? "Engine0" + n : "Engine " + n}</h4>
-         <p>${tech ? "Polls every 5 s, claims items, runs <code>claude -p</code> in the checkout, commits, pushes." : "Runs agents in its copy of the repository."}</p>
-         <div class="intro-agents">${agents}</div></div>`;
-    return `<div class="intro-arch">
-      <div class="intro-node intro-web"><span class="intro-role">${tech ? "webui" : "the looks"}</span><h4>${tech ? "Web page" : "Web page"}</h4>${web}</div>
-      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${tech ? "HTTPS JSON<br>+ bearer token" : "reads &amp;<br>steers"}</div>
-      <div class="intro-node intro-data"><span class="intro-role">${tech ? "iter_data" : "the brains"}</span><h4>Data server</h4>${data}</div>
-      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${tech ? "same API<br>engine token" : "hands out work,<br>records results"}</div>
-      <div class="intro-engs">
-        ${eng(1, chip("intro-ok", "agent: code") + chip("intro-ok", "agent: plan"))}
-        ${eng(2, chip("intro-ok", "agent: code") + chip("intro-d", "idle slot"))}
-      </div></div>`;
+  /* ------------------------------------------------------------ levels of detail */
+  const LEVELS = [
+    { n: 1, label: "Summary", hint: "the idea in one picture" },
+    { n: 2, label: "Business", hint: "adds what it means for the business" },
+    { n: 3, label: "Technical", hint: "adds how it is built" }
+  ];
+  // content shown from level n up; business callouts and technical notes look different
+  const at = (n, html) => (S.lv >= n ? html : "");
+  const biz = html => at(2, `<div class="intro-ov intro-ov-biz"><span class="intro-ovtag">business</span>${html}</div>`);
+  const tech = html => at(3, `<div class="intro-ov intro-ov-tech"><span class="intro-ovtag">technical</span>${html}</div>`);
+  // one line that grows with the level: [summary, business addition, technical addition]
+  function grow(parts) {
+    let h = `<span>${parts[0]}</span>`;
+    if (S.lv >= 2 && parts[1]) h += ` <span class="intro-g-biz">${parts[1]}</span>`;
+    if (S.lv >= 3 && parts[2]) h += `<span class="intro-g-tech">${parts[2]}</span>`;
+    return h;
   }
 
-  // node files (HTML, so they stay readable on phones) -> sync -> a small graph (SVG)
-  function mapSvg() {
-    const files = ["main.iter.md", "iter_data.code.iter.md", "iter_engine.code.iter.md", "lock-acquire.interface.iter.md", "map-the-repo.usecase.iter.md"];
-    // vertices: [x, y, colour, label, label side]
-    const V = { m: [120, 26, "var(--dim)", "main", "r"], d: [70, 96, "var(--accent)", "iter_data", "l"], e: [166, 96, "var(--accent)", "iter_engine", "r"],
-      i: [108, 158, "var(--warn)", "lock-acquire", "b"], u: [200, 150, "var(--q)", "use case", "b"] };
-    const edge = (a, b, dash) => `<line class="intro-s-edge" x1="${V[a][0]}" y1="${V[a][1]}" x2="${V[b][0]}" y2="${V[b][1]}"${dash ? ' stroke-dasharray="4 3"' : ""}/>`;
-    const lbl = (x, y, l, side) => side === "l" ? `<text class="intro-s-lbl" x="${x - 15}" y="${y + 4}" text-anchor="end">${l}</text>`
-      : side === "r" ? `<text class="intro-s-lbl" x="${x + 15}" y="${y + 4}">${l}</text>`
-      : `<text class="intro-s-lbl" x="${x}" y="${y + 26}" text-anchor="middle">${l}</text>`;
-    const verts = Object.values(V).map(([x, y, c, l, side]) => `<circle class="intro-s-v" cx="${x}" cy="${y}" r="9" style="stroke:${c}"/>${lbl(x, y, l, side)}`).join("");
-    return `<div class="intro-map">
-      <div class="intro-mapfiles">${files.map(f => `<code>${f}</code>`).join("")}</div>
-      <div class="intro-mapsync"><span class="intro-arr">&rarr;</span>sync</div>
-      <svg class="intro-svg" viewBox="0 0 250 196" role="img" aria-label="the five node files become five connected vertices">
-        ${edge("m", "d")}${edge("m", "e")}${edge("e", "i")}${edge("d", "i")}${edge("u", "e", 1)}
-        ${verts}
-      </svg></div>`;
+  /* ------------------------------------------------------------ visuals */
+
+  // the cover: the whole system in one picture, with numbered steps pinned on it
+  // (how a project gets going, in order; hover or tap a number for its text).
+  // Summary draws the parts; Business adds what each part is responsible for;
+  // Technical adds the node files, binaries and wire protocols.
+  const COVER_PINS = [
+    // [step, x, y, title, one line] in the svg's 940x560 viewBox
+    [1, 104, 42, "you", "Set requirements, describe the work, and define or refine the tests that say what \u201cdone\u201d means."],
+    [2, 30, 150, "your repo", "Create your repository, drop in iter_engine, and connect it to iter_data."],
+    [3, 822, 20, "iter_data", "Start refining your requirements and tests, and optionally use the Project graph to lay out your project's high-level design."],
+    [4, 420, 290, "iter_engine", "Set it up and turn it on: it starts processing work items."],
+    [5, 30, 470, "agents", "Agents work off each other's results to create plans, code, tests and more, using the MCP server in iter_data."],
+    [6, 652, 296, "kept in sync", "Work is synced between one central iter_data, any number of installed iter_engines, and any number of Claude accounts."]
+  ];
+  function coverSvg() {
+    const b = S.lv >= 2, t = S.lv >= 3;
+    const tabs = (x, w, y0, items, cls) => items.map((l, i) => `<g class="intro-c-tab ${cls}">
+      <rect x="${x}" y="${y0 + i * 24}" width="${w}" height="21" rx="5"/><text x="${x + w / 2}" y="${y0 + i * 24 + 14.5}" text-anchor="middle">${l}</text></g>`).join("");
+    // the repository tree: [indent, label, technical note]
+    const tree = [[0, "Your_Repo/", "+ main.iter.md"], [1, "src/"], [2, "data/"], [3, "container_db/", "+ db.code.iter.md"], [4, "src/"], [4, "test/", "*.tests.iter.md"],
+      [2, "app/"], [3, "container_applogic/"], [4, "src/"], [4, "test/"], [1, ".iter/", "config.json"]];
+    const treeSvg = tree.map(([d, l, note], i) => {
+      const y = 182 + i * 20, x = 52 + d * 16;
+      const label = d ? `<tspan class="intro-c-hook">&#8627; </tspan>${l}` : l;
+      const n = t && note ? `<text x="${d === 1 ? 140 : 226}" y="${y}" class="intro-c-note">${note}</text>` : "";
+      return `<text x="${x}" y="${y}" class="intro-c-tree ${d ? "" : "intro-c-root"}">${label}</text>${n}`;
+    }).join("");
+    const agent = (cx, name, stack) => {
+      const cy = 488, r = 33;
+      const back = stack ? `<circle class="intro-c-agentb" cx="${cx - 14}" cy="${cy - 12}" r="${r}"/><circle class="intro-c-agentb" cx="${cx - 7}" cy="${cy - 6}" r="${r}"/>` : "";
+      const top = stack ? cy - 12 - r : cy - r;
+      return `<line class="intro-c-write" x1="${cx}" y1="${top - 3}" x2="${cx}" y2="416" marker-end="url(#intro-cah)"/>
+        <line class="intro-c-bus" x1="${cx}" y1="545" x2="${cx}" y2="${cy + r + 4}" marker-end="url(#intro-cah)"/>
+        <g class="intro-c-agent">${back}<circle cx="${cx}" cy="${cy}" r="${r}"/>
+        <text x="${cx}" y="${cy + 1}" text-anchor="middle" class="intro-c-aname">${name}</text>
+        <text x="${cx}" y="${cy + 15}" text-anchor="middle" class="intro-c-asub">${t ? "claude -p" : "agent"}</text></g>`;
+    };
+    const webEnd = b ? 540 : 636;
+    return `<svg class="intro-c-svg" viewBox="0 0 940 560" role="img" aria-label="Your repository holds your code; iter_engine runs inside it and starts Test, Code, Deploy and Plan agents that write to the repository; the engine talks to iter_data over the API and the agents reach iter_data over MCP; you steer iter_data from the web page">
+      <defs>
+        <marker id="intro-cah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="intro-v-ahead"/></marker>
+        <marker id="intro-cah-b" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="intro-c-ahead-b"/></marker>
+      </defs>
+
+      <g class="intro-c-you"><circle cx="70" cy="70" r="28"/><text x="70" y="75" text-anchor="middle" class="intro-c-youl">you</text>
+        <text x="70" y="118" text-anchor="middle" class="intro-v-cap">file work · answer</text><text x="70" y="132" text-anchor="middle" class="intro-v-cap">set limits</text></g>
+      <line class="intro-c-web" x1="102" y1="70" x2="${webEnd}" y2="70" marker-end="url(#intro-cah)"/>
+      <text x="${(102 + webEnd) / 2}" y="62" text-anchor="middle" class="intro-c-wire">web page</text>
+      ${t ? `<text x="${(102 + webEnd) / 2}" y="88" text-anchor="middle" class="intro-c-note">browser · login token</text>` : ""}
+
+      ${b ? tabs(544, 102, 26, ["work queue", "lock mgmt", "schedule", "agent defs"], "intro-c-tab-d") + tabs(816, 104, 26, ["account mgmt", "engine mgmt", "arbitration", "MCP / APIs"], "intro-c-tab-d") : ""}
+      <g class="intro-c-data"><rect x="640" y="20" width="180" height="104" rx="14"/>
+        <text x="730" y="54" text-anchor="middle" class="intro-c-title">iter_data</text>
+        <text x="730" y="76" text-anchor="middle" class="intro-c-sub">control panel</text>
+        <text x="730" y="98" text-anchor="middle" class="intro-v-cap">${t ? "rust binary + ArangoDB" : "one container"}</text></g>
+
+      <g class="intro-c-repo"><rect x="30" y="150" width="560" height="262" rx="10"/></g>
+      ${treeSvg}
+
+      <path class="intro-c-api" d="M586,340 C650,340 700,260 700,130" marker-start="url(#intro-cah-b)" marker-end="url(#intro-cah-b)"/>
+      <text x="708" y="222" class="intro-c-wire intro-c-wireb">API</text>
+      <text x="708" y="238" class="intro-v-cap">${t ? "" : "work &amp; results"}</text>
+      ${t ? `<text x="708" y="238" class="intro-c-note">HTTPS JSON</text><text x="708" y="252" class="intro-c-note">engine token</text>` : ""}
+
+      ${b ? tabs(316, 108, 296, ["agent mgmt", "repo mgmt", "account mgmt", "verification"], "intro-c-tab-e") : ""}
+      <g class="intro-c-eng"><rect x="420" y="290" width="160" height="106" rx="12"/>
+        <text x="500" y="326" text-anchor="middle" class="intro-c-title intro-c-title-s">iter_engine</text>
+        <text x="500" y="348" text-anchor="middle" class="intro-c-sub">execution</text>
+        <text x="500" y="370" text-anchor="middle" class="intro-v-cap">${t ? "rust binary · 5 s tick" : "beside your code"}</text></g>
+
+      <path class="intro-c-bus" d="M560,396 L560,545 L90,545"/>
+      <text x="566" y="438" class="intro-v-cap">${t ? "starts sessions" : "starts agents"}</text>
+      ${agent(90, "Test", true)}${agent(220, "Code", true)}${agent(350, "Deploy", false)}${agent(470, "Plan", false)}
+      <text x="160" y="436" text-anchor="middle" class="intro-v-cap">${t ? "edit files in the checkout" : "change the code"}</text>
+
+      <path class="intro-c-mcp" d="M560,545 C740,545 808,380 808,130" marker-end="url(#intro-cah)"/>
+      <text x="760" y="352" text-anchor="end" class="intro-c-wire">MCP</text>
+      <text x="760" y="368" text-anchor="end" class="intro-v-cap">${t ? "POST /mcp: search, file work, ask" : "agents' tools"}</text>
+    </svg>`;
+  }
+  const coverPins = () => COVER_PINS.map(([n, x, y, title, line]) => {
+    const side = x > 600 ? "intro-tip-l" : x < 200 ? "intro-tip-r" : "", up = y > 320 ? "intro-tip-up" : "";
+    return `<span class="intro-pin" tabindex="0" data-pin="${n}" style="left:${(x / 940 * 100).toFixed(2)}%;top:${(y / 560 * 100).toFixed(2)}%" aria-label="${n}. ${esc(title)}: ${esc(line)}">${n}` +
+      `<span class="intro-tip ${side} ${up}" role="tooltip"><b>${n}. ${esc(title)}</b>${esc(line)}</span></span>`;
+  }).join("");
+  const coverStory = () => `<ol class="intro-pinlist">${COVER_PINS.map(([n, , , title, line]) =>
+    `<li data-pin="${n}"><span class="intro-pinn">${n}</span><span><b>${title}</b> <span class="intro-g-biz">${line}</span></span></li>`).join("")}</ol>`;
+
+  // the work loop as a circle: six steps, new work re-enters at "File"
+  const LOOP = [
+    { t: "File", d: ["Work is described: a first big request, or ongoing work as it comes up.", "Anyone can file, and so can agents: one big request is broken into many small items.", "POST /api/projects/{p}/workitems · MCP workitem_create · iter add. Children inherit priority and use-case tag; a repeat (same check: + container: tags) merges into the open item."] },
+    { t: "Prioritize", d: ["A number from 0 to 99 decides the order; lower goes first.", "0–9 now · 10–39 one number per use case · 40–49 people's requests · 50+ maintenance. Related work shares one number, so it moves together.", "priority 0–99, blockedby (deep: waits for the blocker and all it created); cycles refused at write time, with the path named."] },
+    { t: "Pick up", d: ["A free engine takes the most important item that can run now.", "Items that must wait say why in the queue: a reserved folder, a budget, another item.", "Engine tick every 5 s: versioned claim queued→in-progress, one lock row per lockdir, caps (maxagents ladder, agent max, daily budget)."] },
+    { t: "Build", d: ["A Claude Code agent does the work in its copy of the repository.", "Several agents build at once, each inside the folders it reserved.", "claude -p turns: prework → request → postwork → agent memory → self-check. Every session has the iter MCP tools (search, file work, ask)."] },
+    { t: "Check", d: ["A checker confirms the work matches the request.", "Incomplete work goes back once with the gaps listed; anything unclear goes to a person.", "Close gate: deterministic evidence (turn cap, commits, children, notes) + a verifier model → complete | bounce | question."] },
+    { t: "Save", d: ["The change is saved and the item closes; follow-up work loops back to File.", "Every step is recorded on the item: request, replies, checks, cost.", "Scoped git commit (lockdirs + commit_extra_paths) and push; locks released; spend row written."] }
+  ];
+  function loopSvg() {
+    const cx = 170, cy = 170, r = 118, n = LOOP.length;
+    const pt = i => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; };
+    const arcs = LOOP.map((_, i) => {
+      const a0 = -Math.PI / 2 + i * 2 * Math.PI / n + 0.26, a1 = -Math.PI / 2 + (i + 1) * 2 * Math.PI / n - 0.26;
+      const [x0, y0] = [cx + r * Math.cos(a0), cy + r * Math.sin(a0)], [x1, y1] = [cx + r * Math.cos(a1), cy + r * Math.sin(a1)];
+      return `<path class="intro-v-arc" d="M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 0 1 ${x1.toFixed(1)},${y1.toFixed(1)}" marker-end="url(#intro-ah2)"/>`;
+    }).join("");
+    const nodes = LOOP.map((s, i) => {
+      const [x, y] = pt(i);
+      return `<g class="intro-v-step intro-v-s${i}" data-step="${i}"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="27"/>
+        <text x="${x.toFixed(1)}" y="${(y - 3).toFixed(1)}" text-anchor="middle" class="intro-v-num">${i + 1}</text>
+        <text x="${x.toFixed(1)}" y="${(y + 11).toFixed(1)}" text-anchor="middle" class="intro-v-lbl">${s.t}</text></g>`;
+    }).join("");
+    return `<svg class="intro-v-loop" viewBox="0 0 340 340" role="img" aria-label="the work loop: file, prioritize, pick up, build, check, save, and back to file">
+      <defs><marker id="intro-ah2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="intro-v-ahead"/></marker></defs>
+      ${arcs}${nodes}
+      <text x="${cx}" y="${cy - 6}" text-anchor="middle" class="intro-v-center">the work loop</text>
+      <text x="${cx}" y="${cy + 12}" text-anchor="middle" class="intro-v-cap">every engine runs it,</text>
+      <text x="${cx}" y="${cy + 26}" text-anchor="middle" class="intro-v-cap">many at once</text>
+    </svg>`;
+  }
+  const loopLegend = () => `<ol class="intro-loopl">${LOOP.map((s, i) => `<li data-step="${i}"><b>${i + 1} · ${s.t}</b> ${grow(s.d.map((x, k) => k === 2 ? `<code>${esc(x)}</code>` : x))}</li>`).join("")}</ol>`;
+
+  // a repository tree with folder reservations
+  function lockTree() {
+    const p = t => S.lv >= 3 ? `<code>{topdir}/${t}</code>` : `<b>${t}</b>`;
+    return `<div class="intro-tree">
+      <div>${S.lv >= 3 ? "<code>{topdir}/</code>" : "your repository/"}</div>
+      <div class="intro-ind1">${p("api/")} ${chip("intro-ok", "reserved: Add refund endpoint")}</div>
+      <div class="intro-ind2">${p("api/payments/")} ${chip("intro-w", "waits: Fix rounding (inside api/)")}</div>
+      <div class="intro-ind1">${p("web/checkout/")} ${chip("intro-ok", "reserved: New checkout page")}</div>
+      <div class="intro-ind1">${p("docs/")} ${chip("intro-d", "free")}</div>
+    </div>`;
+  }
+  // a small dependency chain: B and C wait for A and everything A created
+  function depChain() {
+    return `<div class="intro-deps">
+      <div class="intro-dep intro-dep-done">A · Design the API<small>+ the 3 items it filed</small></div>
+      <span class="intro-deparr">&rarr;</span>
+      <div class="intro-dep intro-dep-run">B · Build the API<small>waits for A and all of A's items</small></div>
+      <span class="intro-deparr">&rarr;</span>
+      <div class="intro-dep">C · Build the screen<small>waits for B</small></div>
+    </div>`;
+  }
+  function priorityBands() {
+    const band = (from, to, label, cls) => `<div class="intro-band ${cls}" style="flex:${to - from + 1}"><b>${from}–${to}</b><span>${label}</span></div>`;
+    return `<div class="intro-bands">${band(0, 9, "do now", "intro-band-now")}${band(10, 39, "one per use case", "intro-band-uc")}${band(40, 49, "people", "intro-band-p")}${band(50, 99, "maintenance", "intro-band-m")}</div>
+      <div class="intro-small intro-dim intro-center">lower number goes first</div>`;
   }
 
+  // the close gate: one entrance, three exits
+  function gateDiagram() {
+    const t = S.lv >= 3;
+    return `<div class="intro-gate">
+      <div class="intro-gin"><b>The agent says "done"</b><span>${t ? "session result + final message + git evidence + notes" : "and writes what it delivered"}</span></div>
+      <div class="intro-garr">&rarr;</div>
+      <div class="intro-gbox">
+        <div class="intro-gstage"><span class="intro-gn">1</span><b>Check the facts</b><span>${t ? "turn cap · open reviews · requires_children · requires_commit" : "did it finish, commit, file what it had to?"}</span></div>
+        <div class="intro-gstage"><span class="intro-gn">2</span><b>Second opinion</b><span>${t ? "verifier model (closegate.verify, default haiku), read-only; JSON verdict" : "another AI compares the claim with the request"}</span></div>
+      </div>
+      <div class="intro-garr">&rarr;</div>
+      <div class="intro-gouts">
+        <div class="intro-gout intro-gout-ok"><b>&#10003; Complete</b><span>${t ? "close complete; commit + push" : "saved and closed"}</span></div>
+        <div class="intro-gout intro-gout-back"><b>&#8634; Back once</b><span>${t ? "bounce under max_bounces (1): gaps go into the next prompt" : "with the gaps listed"}</span></div>
+        <div class="intro-gout intro-gout-q"><b>? Ask a person</b><span>${t ? "question widget: continue | accept" : "when it is still unclear"}</span></div>
+      </div>
+    </div>`;
+  }
+
+  // usage: several accounts, each with a switch and a stop mark
   function ladderBars() {
     const row = (name, used, sw, st, note) => `<div class="intro-barrow"><b>${name}</b>
       <div class="intro-track-bar"><div class="intro-fill" style="width:${used}%"></div>
       <div class="intro-mark intro-sw" style="left:${sw}%"></div><div class="intro-mark intro-st" style="left:${st}%"></div></div>
       <span class="intro-dim">${note}</span></div>`;
     return `<div class="intro-bars">
-      ${row("Dev1", 83, 80, 99, "past switch → next")}
-      ${row("Dev2", 41, 80, 99, "in use now")}
-      ${row("Dev3", 12, 80, 99, "waiting")}
+      ${row("Account 1", 83, 80, 99, "past switch → next")}
+      ${row("Account 2", 41, 80, 99, "in use now")}
+      ${row("Account 3", 12, 80, 99, "waiting")}
       <div class="intro-small intro-dim"><span style="color:var(--warn)">&#9646;</span> switch % &nbsp; <span style="color:var(--bad)">&#9646;</span> stop % &nbsp; bar = the higher of 5-hour and 7-day usage</div>
     </div>`;
   }
-
-  function lockTree(tech) {
-    const code = tech ? s => `<code>${s}</code>` : s => s;
-    return `<div class="intro-tree">
-      <div>${tech ? code("{topdir}/") : "your repository/"}</div>
-      <div class="intro-ind1">${code("api/")} ${chip("intro-ok", "locked by: Add refund endpoint")}</div>
-      <div class="intro-ind2">${code("api/payments/")} ${chip("intro-w", "waiting: Fix rounding (inside api/)")}</div>
-      <div class="intro-ind1">${code("web/checkout/")} ${chip("intro-ok", "locked by: New checkout page")}</div>
-      <div class="intro-ind1">${code("docs/")} ${chip("intro-d", "free")}</div>
+  function controlPanel() {
+    return `<div class="intro-panel">
+      <div class="intro-pcell"><div class="intro-switch"><span class="intro-sw-on">Running</span><span>Stopped</span></div>
+        <b>Run or stop a project</b><span>stopping lets running work finish first</span></div>
+      <div class="intro-pcell"><div class="intro-inbox"><span>?</span><em>3</em></div>
+        <b>The question inbox</b><span>agents and the checker ask; your answer sends the item back in line</span></div>
+      <div class="intro-pcell"><div class="intro-gauge"><div style="width:62%"></div></div><div class="intro-small">$31 of $50 today</div>
+        <b>A daily budget</b><span>blank = no limit · 0 = spend nothing</span></div>
     </div>`;
   }
 
-  const STATES = [
-    ["intro-a", "queued", "ready to run once what it waits on is finished"],
-    ["intro-w", "in-progress", "an agent is working on it right now"],
-    ["intro-q", "question", "waiting for a person to answer or approve"],
-    ["intro-ok", "complete", "done, checked and closed"],
-    ["intro-b", "failed", "ran out of attempts; a person should look"],
-    ["intro-d", "parked", "held for a future condition (rare)"],
-    ["intro-d", "paused", "a short manual hold, e.g. while editing"],
-    ["intro-d", "scheduled", "a recurring template that files a fresh item on its schedule"]
-  ];
-  const statesDl = () => `<dl class="intro-dl">${STATES.map(([c, s, d]) => `<dt>${chip(c, s)}</dt><dd>${d}</dd>`).join("")}</dl>`;
+  // where it runs: the looks, the brains, the brawn
+  function archDiagram() {
+    const t = S.lv >= 3;
+    const eng = (n, agents) => `<div class="intro-node intro-eng"><span class="intro-role">${t ? "iter_engine" : "engine"} · machine ${n}</span>
+         <h4>${t ? "Engine0" + n : "Engine " + n}</h4>
+         <p>${t ? "Polls every 5 s, claims items, runs <code>claude -p</code> in its checkout, commits, pushes." : "Runs agents in its copy of the repository."}</p>
+         <div class="intro-agents">${agents}</div></div>`;
+    return `<div class="intro-arch">
+      <div class="intro-node intro-web"><span class="intro-role">the looks</span><h4>Web page</h4>
+        <p>${t ? "One page (<code>webui/</code>), plain JavaScript, built into the iter_data binary." : "Where people watch the work, answer questions and set limits."}</p></div>
+      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "HTTPS JSON<br>+ bearer token" : "reads &amp;<br>steers"}</div>
+      <div class="intro-node intro-data"><span class="intro-role">the brains</span><h4>Data server</h4>
+        <p>${t ? "axum HTTP API + MCP. The only thing that touches the database; the lock authority." : "Holds every work item, reservation, agent, schedule, cost record and the map of the program."}</p>
+        <div class="intro-db">${t ? "ArangoDB" : "Database"} <small>${t ? "documents, change counters, the map as a graph, GraphRAG vectors" : "in the same container"}</small></div></div>
+      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "same API<br>engine token" : "hands out work,<br>records results"}</div>
+      <div class="intro-engs">
+        ${eng(1, chip("intro-ok", "agent: code") + chip("intro-ok", "agent: plan"))}
+        ${eng(2, chip("intro-ok", "agent: code") + chip("intro-d", "free slot"))}
+      </div></div>`;
+  }
 
-  /* ------------------------------------------------------------ business track */
-  const BIZ = [
-    {
-      kicker: "iter in one minute",
-      title: "A team of AI coding agents working on your software, without tripping over each other",
-      lede: "You describe the work. iter hands it to Claude Code agents running on your own machines, keeps them out of each other's way, checks their work before calling it done, and asks a person when it is unsure.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-a", "1 · you", "File the work", "<p>Write a request: what to change and where. Or file one big request and let a planning agent break it into smaller items.</p>")}
-        ${card("intro-o", "2 · agents", "Agents build it", "<p>Several agents work at once, each in the part of the code it has reserved.</p>")}
-        ${card("intro-q", "3 · iter", "iter checks and records", "<p>Nothing counts as done until a checker agrees. Every step is written down.</p>")}
+  // "it plugs into your repo, not your project": what iter touches, and what it never does
+  function repoPlug() {
+    const t = S.lv >= 3, b = S.lv >= 2;
+    return `<div class="intro-plug">
+      <div class="intro-plug-col intro-plug-no"><span class="intro-role">your project</span><h4>Untouched</h4>
+        <ul><li>your application and how it runs</li><li>its build and its dependencies</li><li>its servers, its data, its users</li></ul>
+        ${b ? `<p class="intro-g-biz">No library to install, no code to change, nothing to deploy with your product. Remove iter and your software doesn't notice.</p>` : ""}
+        ${t ? `<p class="intro-g-tech">No SDK, no runtime hook, no build step: iter's code never runs inside your application.</p>` : ""}</div>
+      <div class="intro-plug-mid"><span class="intro-plug-bolt">&#9889;</span><b>iter plugs in here</b></div>
+      <div class="intro-plug-col intro-plug-yes"><span class="intro-role">your repository</span><h4>A few files beside the code</h4>
+        <ul><li>short description files for the map</li><li>one small settings folder</li><li>ordinary git commits from the agents</li></ul>
+        ${b ? `<p class="intro-g-biz">Works with any language or stack, on the repositories you already have; everything it adds is plain text you can read and review.</p>` : ""}
+        ${t ? `<p class="intro-g-tech"><code>*.iter.md</code> node files · <code>main.iter.md</code> · <code>.iter/config.json</code> (+ a token in <code>.env</code>) · the engine works in a checkout through git pull / commit / push. iter_data stores records, not your code: node-file summaries and hashes, plus the chunks of documents you choose to index for search.</p>` : ""}</div>
+    </div>`;
+  }
+
+  // what it is built from: contexts above crates
+  function buildMap() {
+    const t = S.lv >= 3, b = S.lv >= 2;
+    const crate = (name, what, whyBiz, techLine, g) => `<div class="intro-crate">
+      <div class="intro-crate-h"><code>${name}</code>${t && g ? gbtn(g, "graph") : ""}</div>
+      <div>${what}</div>${b && whyBiz ? `<div class="intro-g-biz">${whyBiz}</div>` : ""}${t && techLine ? `<div class="intro-g-tech">${techLine}</div>` : ""}</div>`;
+    return `<div class="intro-ctxs">
+      <div class="intro-ctx intro-ctx-data"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Orchestration and data</b><span class="intro-dim">the central side: one per team</span></div>
+        ${crate("iter_data", "The data server: the API, the database, the map, search.", "Everything people and agents see comes from here.", "axum; ArangoDB storage; auth + roles; locks; versioned writes; graph; GraphRAG; MCP at /mcp", "iter_data")}
+        ${crate("webui", "This web page.", "Watch, steer and answer from any browser.", "plain JS, embedded in the iter_data binary", "webui")}
       </div>
-      <div class="intro-actions">
-        <button class="intro-btn" data-wizard="1">Start a new project</button>
-        <button class="intro-btn intro-ghost" data-track="tech">Technical overview instead</button>
-        ${qbtn("See the work queue")}
-      </div>`
+      <div class="intro-ctx intro-ctx-eng"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Engines and checkout tools</b><span class="intro-dim">the working side: one per machine</span></div>
+        ${crate("iter_engine", "The engine, and the <code>iter</code> command agents use.", "Runs the agents where the code lives; nothing leaves your machines but results.", "tick loop; claude -p sessions; close gate; datasync; GraphRAG worker (ingest, OCR, summaries)", "iter_engine")}
+        ${crate("iter_local", "Reads and writes the project's files on disk.", "Keeps the map and the tests in the repository, under version control.", "node-file scan, ids, map snapshot, validate, test runner, graph edits", "iter_local")}
+      </div>
+      <div class="intro-ctx intro-ctx-shared"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Shared rules and types</b><span class="intro-dim">used by both sides, so they never disagree</span></div>
+        <div class="intro-crates-row">
+        ${crate("iter_core", "The rulebook: what a work item is, when a reservation counts, when a schedule fires.", "", "pure functions: states, priorities, waits, dedup keys, schedules", "iter_core")}
+        ${crate("iter_rag", "Reads documents and turns passages into searchable fingerprints.", "", "extract (pdf, docx, pptx…), token-sized chunks, all-MiniLM-L6-v2 embedder", "iter_rag")}
+        </div>
+      </div>
+      ${t ? `<div class="intro-ctx intro-ctx-ship"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Build, ship and prove</b></div>
+        <div class="intro-small"><code>docker/</code> the all-in-one image (ArangoDB + iter_data) · <code>deploy.sh</code> docker | local · <code>e2e.sh</code> a real server and engine end to end</div></div>` : ""}
+    </div>`;
+  }
+
+  /* ------------------------------------------------------------ the story */
+  const STORY = [
+    {
+      kicker: "iter",
+      title: "A team of AI coding agents on your software, with a foreman",
+      lede: () => grow(["You describe the work. iter hands it to Claude Code agents running on your machines, keeps them out of each other's way, checks what they deliver, and asks you when it matters."]),
+      body: () => `<div class="intro-hero intro-hero-c"><div class="intro-c-wrap">${coverSvg()}${coverPins()}</div><div class="intro-hero-side">
+        ${biz(`Getting a project going, step by step:${coverStory()}`)}
+        <div class="intro-chapters"><span class="intro-dim intro-small">the story</span>${["the work loop", "sharing the code", "done means checked", "people steer", "where it runs", "what it's built from"].map((c, i) => `<button class="intro-chap" data-go="${i + 1}">${c}</button>`).join("")}</div>
+        ${tech(`<ul><li>A Rust workspace: <code>iter_data</code> (axum + ArangoDB, one container) and <code>iter_engine</code>, which runs headless <code>claude -p</code> sessions in each checkout.</li><li>One HTTP API for the page, the engines and agents; the same calls as MCP tools at <code>/mcp</code>.</li><li>Only engines touch your code; only iter_data touches the database.</li></ul>`)}
+      </div></div>`
     },
     {
-      kicker: "why it exists",
-      title: "One AI agent is handy. Ten at once need a foreman.",
-      lede: "Running many agents on one codebase goes wrong in predictable ways. iter is the foreman that prevents each one.",
-      body: () => `<div class="intro-tablewrap"><table class="intro-table">
-        <tr><th>Without a harness</th><th>With iter</th></tr>
-        <tr><td>Two agents edit the same files and undo each other.</td><td><b>Locks:</b> each item reserves the folders it will change; others wait their turn.</td></tr>
-        <tr><td>Work happens in the wrong order.</td><td><b>Dependencies:</b> an item waits until the work it needs is finished.</td></tr>
-        <tr><td>An agent says "done" when it isn't.</td><td><b>Close gate:</b> a second AI compares the claim with the request before the item closes.</td></tr>
-        <tr><td>A stuck agent goes unnoticed.</td><td><b>Retries</b> with a growing wait, then "failed"; unclear cases go to a person as a <b>question</b>.</td></tr>
-        <tr><td>Spend creeps up unseen.</td><td><b>Caps:</b> a daily cost limit and usage limits for each Claude account.</td></tr>
-        <tr><td>How the system fits together lives in people's heads.</td><td><b>Project graph:</b> a map of the program built from files in the repository.</td></tr>
-      </table></div>`
+      kicker: "1 · the work loop",
+      title: "Every piece of work travels the same loop",
+      lede: () => grow(["A <b>work item</b> is like a ticket: a title, the request, a priority, the folders it may change, and a history of everything that happened to it.", "It loops: finished work often files the next work."]),
+      body: () => `<div class="intro-loopwrap">${loopSvg()}${loopLegend()}</div>`
     },
     {
-      kicker: "what it does",
-      title: "The work cycle, in plain words",
-      lede: "Every piece of work is a <b>work item</b>: like a ticket, with a title, the request, a priority, the folders it may change, and a history of everything that happened to it.",
-      body: () => flow([
-        { t: "File", d: "someone (or an agent) files a work item" },
-        { t: "Pick up", d: "an engine takes the most important item that is free to run", cls: "intro-hl" },
-        { t: "Build", d: "a Claude Code agent does the work in a copy of your repository" },
-        { t: "Check", d: "the close gate verifies the work matches the request", cls: "intro-q" },
-        { t: "Save", d: "the change is committed to git and the item closes", cls: "intro-ok" }
-      ], "&hellip; then the next item. Many engines and many agents run this cycle at the same time.") +
-        `<p class="intro-dim">An agent can file new items too: a planning agent turns one large request into a set of smaller, ordered ones. Those children carry the parent's priority, so a whole piece of work moves through together.</p>`
+      kicker: "2 · sharing the code",
+      title: "Many agents, one codebase, no collisions",
+      lede: () => grow(["Three simple rules let a dozen agents share one codebase: reserve the folders you change, wait for the work you need, and go in priority order."]),
+      body: () => `<div class="intro-three">
+        <div class="intro-third"><h4>Reserve</h4>${lockTree()}<p class="intro-small">${grow(["An item reserves the folders it will change; another item that needs them waits.", "Like booking a meeting room: a crashed machine's booking expires on its own.", "lock rows {path, workid, expires} in iter_data; overlap = ancestor/descendant; leases renewed while the run lives; lock shape per agent refuses out-of-bounds reservations."])}</p></div>
+        <div class="intro-third"><h4>Wait</h4>${depChain()}<p class="intro-small">${grow(["An item can wait for another, and for everything that one created.", "Work happens in the right order without anyone watching.", "blockedby (deep) · blockedby_shallow · cycles refused with the path named · agents declare waits mid-run (workitem_wait / iter wait --on)."])}</p></div>
+        <div class="intro-third"><h4>Go in order</h4>${priorityBands()}<p class="intro-small">${grow(["The lowest number that is free to run goes next.", "A whole piece of work shares one number, so it moves through together.", "children inherit the creator's priority exactly; a root takes the lowest unused number in its band."])}</p></div>
+      </div>
+      ${biz(`When something waits, the queue says why: which reservation, which item, which limit. Nobody has to guess.`)}
+      ${tech(`Visible waits: <code>blockedby_locks</code> names the holder, and one engine-owned <code>blocked by: …</code> tag gives the reason (lock, usage cap, agent cap, reservation, retry, approval, budget).`)}`
     },
     {
-      kicker: "the parts",
-      title: "Three parts: the brains, the brawn and the looks",
-      lede: "One central data server, any number of engines where the code lives, and this web page.",
-      body: () => archDiagram(false) +
-        `<p class="intro-dim">Only the engines ever touch your code, and only the data server touches the database. The data server can run on a laptop (Docker Desktop) or a small cloud machine, started with one command.</p>
-        <div class="intro-actions">${gbtn("iter_data", "data server in the graph")}${gbtn("iter_engine", "engine in the graph")}${gbtn("webui", "web page in the graph")}</div>`
+      kicker: "3 · done means checked",
+      title: "An agent stopping is not the work being finished",
+      lede: () => grow(["Before anything counts as done, iter checks it, and says so when it can't be sure."]),
+      body: () => gateDiagram() + `<div class="intro-cols">
+        ${biz(`<b>Honest reports are cheap.</b> Every agent ends with what it delivered and a <code>NOT DONE:</code> line for anything it didn't finish. An honest gap is one quick retry; a hidden one is exactly what the checker catches.`)}
+        ${biz(`<b>Red tests become work.</b> Test groups run on a schedule; a group that turns red files <b>exactly one</b> item to fix it, never one per run.`)}
+      </div>
+      ${tech(`Not bounces: an incomplete verdict while declared blockers are open (the item queues behind them), and a verifier that fails twice (the item closes on the evidence, marked <code>unavailable</code>). Closed items are immutable except appended <code>doc</code> rows and a reopen by a person.`)}`
     },
     {
-      kicker: "running in parallel",
-      title: "Many agents, no collisions",
-      lede: "Three simple rules let a dozen agents share one codebase.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-a", "", "Locks", "<p>A lock is a reservation on a folder, like booking a meeting room. An item that needs a booked folder, or anything inside it, waits. Bookings expire unless renewed, so a crashed machine never holds a room forever.</p>")}
-        ${card("intro-o", "", "Dependencies", "<p>Item B can say \"wait for A\". A only counts as finished when A <i>and everything A created</i> are finished.</p>")}
-        ${card("intro-w", "", "Priorities", "<p>A number from 0 to 99; lower goes first. 0–9 do now · 10–39 one number per use case · 40–49 requests from people · 50–99 maintenance.</p>")}
-      </div>${lockTree(false)}
-      <p class="intro-dim">When an item waits, the queue says why: which lock, which cap, or which item it is waiting on.</p>`
-    },
-    {
-      kicker: "quality",
-      title: "Work is checked before it counts as done",
-      lede: "\"The agent stopped\" is not the same as \"the work is finished\". iter checks the difference.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-q", "", "The close gate", "<p>Before an item closes, iter checks the facts (did the agent run out of turns? did it commit anything?) and asks a second AI whether the final report covers everything in the request. If not, the item goes back for one more try with the gaps listed. After that, a person decides.</p>")}
-        ${card("intro-o", "", "Honest reports", "<p>Every agent must end with what it delivered and a <code>NOT DONE:</code> line for anything it didn't finish. An honest gap is a cheap retry; a hidden one is what the checker exists to catch.</p>")}
-        ${card("intro-b", "", "Red tests become work", "<p>Test groups run on a schedule. A group that goes red files <b>exactly one</b> work item to fix it, never one per run.</p>")}
-      </div>`
-    },
-    {
-      kicker: "control",
+      kicker: "4 · people steer",
       title: "People steer; agents do the legwork",
-      lede: "You set the direction, the limits and the tie-breaks. iter does the rest.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-q", "", "A question inbox", "<p>When an agent or the checker needs a decision, the item moves to <b>question</b> and waits. Answering puts it back in line with your answer at the top of its instructions.</p>")}
-        ${card("intro-a", "", "Controls", "<p>Run or stop a whole project (stopping lets running work finish first). <b>Run now</b> on one item. Reopen a closed item. Change priorities any time.</p>")}
-        ${card("intro-w", "", "Budget and usage", "<p>A daily cost cap (blank = no limit, 0 = spend nothing). Several Claude accounts, each with a <b>switch</b> and a <b>stop</b> percentage; fewer agents run as usage climbs, and when every account is at its stop level, iter pauses until usage resets.</p>")}
-      </div>${ladderBars()}`
+      lede: () => grow(["You set the direction, the limits and the tie-breaks. iter enforces them."]),
+      body: () => controlPanel() +
+        at(2, `<div class="intro-usage"><div><h4>Several Claude accounts, used in turn</h4>${ladderBars()}</div>
+          <p class="intro-small">${grow(["", "Each account has a <b>switch</b> level (move on to the next) and a <b>stop</b> level (never go past). Fewer agents run as usage climbs; when every account is at its stop level, iter pauses until usage resets.", "maxagents ladder by usage %, each agent type's max, accounts in order to switch % then round again to stop %; usage from stream-json rate_limit_event + a 1-token idle probe; engines avoid accounts other engines use."])}</p></div>`) +
+        tech(code("project record: accounts, agent ladder, budget", JSON.stringify({
+          maxagents: { ">98%": 0, ">95%": 1, ">90%": 2, "else": 4 }, maxdailycost: 50,
+          accounts: [{ name: "Dev1", token_envar: "DEV1_TOKEN", order: 1, switch: 80, stop: 99 }, { name: "Dev2", token_envar: "DEV2_TOKEN", order: 2, switch: 80, stop: 99 }]
+        }, null, 2)))
     },
     {
-      kicker: "the map",
-      title: "The project graph: your software, drawn from its own files",
-      lede: "Each part of the program has a short description file (<code>*.iter.md</code>) next to its code. iter reads them all and draws the map.",
-      body: () => mapSvg() +
-        `<p>The map shows the parts, the contracts between them (<b>interfaces</b>), the journeys people take through the product (<b>use cases</b>), the requirements, and the tests. It answers questions a folder listing cannot: <i>which part owns this folder? what does this use case touch? which tests cover this contract?</i> It keeps itself up to date: an engine redraws it within a minute of a file changing.</p>
-        <div class="intro-actions">${gbtn("iter4 harness", "iter4's own map")}${gbtn("map-the-repo", "a use case: Map a repository")}</div>`
+      kicker: "5 · where it runs",
+      title: "It plugs into your repo, not your project",
+      lede: () => grow(["Your software stays exactly as it is. iter works beside it, in the repository, through three parts: this web page, one central data server, and engines where the code lives."]),
+      body: () => repoPlug() + archDiagram() +
+        biz(`Only the engines touch your code, and only the data server touches the database. Your code stays in your git repository on machines you choose; the data server runs on a laptop or a small cloud machine, started with one command.`) +
+        tech(`<ul><li>Each tick the engine reads the tiny <code>versions</code> counters and re-pulls only tables that moved; a full reload every 6 h is the fallback.</li>
+          <li>A project's <code>state</code> (Running / Draining / Stopped) is the commanded state; each engine's heartbeat is the actual one.</li>
+          <li>Graph edits from the page and GraphRAG work reach engines through the heartbeat reply, outside the work queue.</li></ul>`)
     },
     {
-      kicker: "the work queue",
-      title: "Reading the work queue",
-      lede: "Every item is in exactly one state. Most of the time you will only see the first three.",
-      body: () => statesDl() +
-        `<p class="intro-dim">Above the list, one progress chip per use case shows how many of its items are done, so you can see each piece of work move toward complete.</p>
-        <div class="intro-actions">${qbtn()}</div>`
+      kicker: "6 · what it's built from",
+      title: "Two sides and a shared rulebook",
+      lede: () => grow(["The central side keeps the records; the working side does the work where the code lives; both are built on the same rules, so they never disagree."]),
+      body: () => buildMap()
     },
     {
-      kicker: "common questions",
-      title: "What leaders usually ask",
-      lede: "",
-      body: () => `<div class="intro-faq">
-        <details open><summary>Where does our code go?</summary><p>It stays in your git repository and on the engine machines you choose. The data server holds the work records; for the map it keeps each description file's summary and a fingerprint of its text, and the text itself stays in git.</p></details>
-        <details><summary>What does it cost to run?</summary><p>Agents run on Claude subscriptions (Pro, Max, Team or Enterprise) through long-lived account tokens. iter records the spend of every item and can cap spend per day.</p></details>
-        <details><summary>What happens when an agent fails?</summary><p>It retries with a growing wait (5 attempts by default), then the item shows as failed for a person. Anything that depends on it waits underneath it and carries on once it is fixed.</p></details>
-        <details><summary>Can we see what happened?</summary><p>Each item keeps its request, the agent's replies, the checker's verdicts, test logs and notes. A closed item cannot be edited, only annotated or reopened by a person.</p></details>
-        <details><summary>Where does it run?</summary><p>The data server is one container (database plus server) on a laptop or a small cloud machine. Engines run on any machine with a copy of the repository and Claude Code.</p></details>
-        <details><summary>Any licensing to check?</summary><p>The default database, ArangoDB Community Edition (3.12.5 and later), is licensed for non-commercial use and datasets up to 100 GB. Whether that covers your use is the owner's decision; the Enterprise image needs no code change, and iter can also run on SQLite.</p></details>
+      kicker: "your turn",
+      title: "Start a project, or look around",
+      lede: () => grow(["Everything in this story is live: the queue, the map and the search are the real thing, running on iter's own code."]),
+      body: () => `<div class="intro-cta">
+        <button class="intro-bigbtn" data-page="wizard"><b>Start a new project</b><span>name it, set its accounts and limits, and get the exact setup commands</span></button>
+        <button class="intro-bigbtn intro-bigbtn-g" data-queue="1"><b>See the work queue</b><span>every item, its state and why it waits</span></button>
+        <button class="intro-bigbtn intro-bigbtn-g" data-graph="iter4 harness"><b>Explore the project graph</b><span>iter4's own map: every part and how they connect</span></button>
+        <button class="intro-bigbtn intro-bigbtn-g" data-page="glossary"><b>Read the glossary</b><span>every word on these slides, in one place</span></button>
       </div>`
-    },
-    {
-      kicker: "getting started",
-      title: "From nothing to a first finished item",
-      lede: "Four steps. The wizard on the next page does the second one for you.",
-      body: () => flow([
-        { t: "Data server", d: "start it with one command (Docker), on a laptop or a small cloud machine" },
-        { t: "Project", d: "create the project record: name, repository, accounts, budget", cls: "intro-hl" },
-        { t: "Engine", d: "on a machine with the repository and Claude Code, run the setup command and start the engine" },
-        { t: "First item", d: "file a work item in the queue, press Run, and watch it go", cls: "intro-ok" }
-      ]) + `<div class="intro-actions"><button class="intro-btn" data-wizard="1">Open the new project wizard</button>${qbtn()}</div>`
     }
   ];
 
-  /* ------------------------------------------------------------ technical track */
-  const TECH = [
-    {
-      kicker: "iter4 for engineers",
-      title: "A Rust harness that loops headless Claude Code agents over a central work queue",
-      lede: "iter4 is iter3 with a new data backend (ArangoDB), a graph of the program built from its <code>*.iter.md</code> files, a stable id on every one of those files, and a test sweep that turns red test groups into work items. One cargo workspace:",
-      body: () => `<div class="intro-tablewrap"><table class="intro-table">
-        <tr><th>Crate / dir</th><th>What it is</th><th></th></tr>
-        <tr><td><code>iter_core</code></td><td>shared types: work items, projects, engines, agents, locks, widgets, schedules, dedup keys</td><td>${gbtn("iter_core", "graph")}</td></tr>
-        <tr><td><code>iter_data</code></td><td>the data server: axum API, ArangoDB storage, auth, locks, versioned writes, the project graph, the iter3 migration</td><td>${gbtn("iter_data", "graph")}</td></tr>
-        <tr><td><code>iter_engine</code></td><td>the local engine and the <code>iter</code> verbs agents call (<code>add</code>, <code>ask</code>, <code>wait</code>, <code>ids</code>, <code>sync</code>, <code>sweep</code>…)</td><td>${gbtn("iter_engine", "graph")}</td></tr>
-        <tr><td><code>iter_local</code></td><td>checkout-side tools: node-file scan, stable ids, map snapshot, test groups, test runner, validate</td><td>${gbtn("iter_local", "graph")}</td></tr>
-        <tr><td><code>webui/</code></td><td>this page, embedded into iter_data</td><td>${gbtn("webui", "graph")}</td></tr>
-        <tr><td><code>docker/</code></td><td>the all-in-one image: ArangoDB CE + iter_data</td><td>${gbtn("docker", "graph")}</td></tr>
-      </table></div>
-      <div class="intro-actions"><button class="intro-btn intro-ghost" data-track="biz">Business overview instead</button><button class="intro-btn" data-wizard="1">Start a new project</button></div>`
-    },
-    {
-      kicker: "architecture",
-      title: "Data is the brains, the engine the brawn, the web page the looks",
-      lede: "",
-      body: () => archDiagram(true) + `<ul>
-        <li><b>iter_data is the only component that talks to the database</b>; engines and the page use its HTTP API. It is the lock authority too: no lock files in the repo.</li>
-        <li><b>The engine is the only component with repo access.</b> Its config holds just enough to reach iter_data (<code>.iter/config.json</code> + a token in <code>.env</code>); everything else is central, so many engines on many hosts share one queue.</li>
-        <li>Each tick (5 s) the engine reads the tiny <code>versions</code> seq rows and only re-pulls tables whose counter moved, writes its heartbeat, and reloads everything every 6 h as a fallback.</li>
-        <li>A project's <code>state</code> (Running / Draining / Stopped) is the <i>commanded</i> state; each engine's state is the <i>actual</i> one. Stopping drains: running work finishes, nothing new starts.</li>
-      </ul><div class="intro-actions">${gbtn("iter4 harness", "the context node")}${gbtn("iter_data")}${gbtn("iter_engine")}</div>`
-    },
-    {
-      kicker: "data model",
-      title: "Collections, versioned writes, and the work item",
-      lede: "Every row keeps its iter3 partition/sort key and JSON body: <code>{_key, pk, sk, version, expires, workid, body}</code>.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-a", "", "Collections", `<p><code>workitem</code> (headers the list reads) and <code>workitem_detail</code> (request, responses, verify rows, test logs, docs), <code>agent</code>, <code>agent_tooling</code>, <code>project</code>, <code>engine</code>, <code>webui_user</code>, <code>lock</code>, <code>versions</code>, <code>spend</code>; plus the graph: <code>node</code> vertices and <code>link</code> edges.</p>`)}
-        ${card("intro-o", "", "Three atomic operations", `<p><b>Versioned write:</b> the writer sends the version it read (<code>expect_version</code>); a mismatch is a 409 and the writer re-reads. <b>Lock acquire:</b> create if absent, expired or already this item's. <b>Seq bump:</b> an atomic +1. Every backend passes one contract test for all three.</p>`)}
-      </div>` + code("a work item header (iter_core)", JSON.stringify({
-        id: "01890a5d-ac70-7db8-8b5d-10505a42232f", version: 7, name: "Add refund endpoint", project: "demo",
-        state: "queued", agent: "code", priority: 12, lockdirs: ["{topdir}/api/refunds/"],
-        blockedby: ["184fa9a3-f967-4a98-9d8f-57152e7cbe64"], createdby: "plan (agent)", attempt: 1, gate_bounces: 0,
-        tags: [{ text: "usecase:refunds" }]
-      }, null, 2)) + statesDl()
-    },
-    {
-      kicker: "the loop",
-      title: "What one engine does, every tick",
-      lede: "",
-      body: () => flow([
-        { t: "Pick", d: "highest priority queued item whose dependencies are done and whose lockdirs are free; caps and schedules first" },
-        { t: "Claim + lock", d: "versioned queued→in-progress, then one lock row per lockdir (a lost race releases and defers)", cls: "intro-hl" },
-        { t: "Session", d: "claude -p turns: prework → the request → postwork → agent memory → self-check" },
-        { t: "Close gate", d: "deterministic checks + a verifier model", cls: "intro-q" },
-        { t: "Commit", d: "git commit + push of the item's lock scope only; release locks", cls: "intro-ok" }
-      ], "&hellip; next item. A finished session may take on a queued neighbour with the same lockdirs and use case (session chaining).") +
-        `<ul>
-        <li><b>Caps:</b> the <code>maxagents</code> ladder (by usage %), each agent type's <code>max</code>, the daily budget, every account at stop %.</li>
-        <li><b>Prompt</b> (order kept for the prompt cache): agent prompt body → shared rules → capability index → close-gate paragraph → project context (<code>main.iter.md</code> + <code>globalcontextfiles</code>) → the work item → previous attempt → context files, listed for the agent to read, never inlined.</li>
-        <li><b>Failure:</b> retry with back-off (<code>first_retry_second</code> × <code>retry_backoff_exponent</code>ⁿ) up to <code>maxattempts</code>, then <code>failed</code>.</li>
-        <li><b>exec items</b> run a shell command (<code>exec_shell</code>) instead of an agent; exit 0 is their contract. Scheduled items clone one on each firing (skip, don't backfill).</li>
-      </ul>`
-    },
-    {
-      kicker: "sharing a codebase",
-      title: "Locks, lock shape, dependencies",
-      lede: "",
-      body: () => lockTree(true) + `<ul>
-        <li><b>Lock rows</b> live in iter_data: <code>{project, path, engine, workid, acquired, expires}</code>. Overlap is ancestor/descendant. Long runs extend <code>expires</code> (a lease); an expired row may be replaced by any engine.</li>
-        <li><b>Visible waits:</b> a waiter's <code>blockedby_locks</code> names the holder, and one engine-owned <code>blocked by: …</code> tag says why it isn't running (lock, usage cap, agent cap, reservation, retry, approval, budget, accounts).</li>
-        <li><b>Reservations:</b> a high-priority item that locks the whole tree drains the slots instead of starving forever.</li>
-        <li><b>Lock shape</b> (per agent, overridable per project): <code>allow</code> patterns, <code>outside: refuse|warn</code>, <code>max_overlap</code>, <code>none</code>. iter_data refuses an out-of-shape lockdir with a 400 that names the rule.</li>
-        <li><b>Dependencies are deep:</b> a blocker counts as done only when it and everything it created closed complete. Cycles are refused at write time with the path named. Agents declare blockers mid-run with <code>iter wait --on &lt;id&gt;</code>.</li>
-      </ul><div class="intro-actions">${gbtn("lock-acquire", "lock-acquire interface")}</div>`
-    },
-    {
-      kicker: "close gate",
-      title: "Exit 0 is not the definition of done",
-      lede: "The gate runs in the engine's close step for agent items that returned successfully.",
-      body: () => `<div class="intro-cols">
-        ${card("intro-a", "deterministic, free", "Evidence checks", "<p><b>turn cap</b> (cut off ≠ finished) · <b>open review</b> rows with no disposition · <code>requires_children</code> (a plan must file items) · <code>requires_commit</code> (code must move HEAD).</p>")}
-        ${card("intro-q", "one extra turn", "LLM verifier", "<p><code>closegate.verify</code>: a model alias (default haiku), read-only tools, sees the request, the final message and the evidence; answers <code>{verdict: complete|incomplete|unclear, open: [...], reason}</code>. It judges done-ness, not quality.</p>")}
-      </div>` + flow([
-        { t: "complete", d: "close complete", cls: "intro-ok" },
-        { t: "bounce", d: "under max_bounces (1): verify row, back to queued with the gaps in the next prompt" },
-        { t: "question", d: "at the limit or unclear: a question widget (continue | accept)", cls: "intro-q" }
-      ]) + `<p class="intro-dim">Not bounces: a verdict of incomplete while declared blockers are still open (the item queues behind them, no bounce), and a verifier that fails to run twice in a row (the item closes on the evidence, marked <code>unavailable</code>). Closed items are immutable except appended <code>doc</code> rows and a reopen by a person.</p>`
-    },
-    {
-      kicker: "agents",
-      title: "Agent records, prompts and the agent-side CLI",
-      lede: "An <b>agent</b> is a named record (<code>plan</code>, <code>code</code>, <code>test</code>, <code>usecase</code>, …) with defaults a project can override key by key.",
-      body: () => code("agent record (abridged)", JSON.stringify({
-        name: "code", max: 4, childstate: "queued", timeoutsec: 3600, model: "opus", flags: "--dangerously-skip-permissions",
-        closegate: { verify: "haiku", requires_children: false, requires_commit: true, max_bounces: 1 },
-        lockshape: { allow: [], outside: "refuse", max_overlap: 3 }, promptbody: "…"
-      }, null, 2)) + `<ul>
-        <li><b>Agent tooling</b> rows are the shared text around agents: <code>shared</code> rules, <code>capability</code> docs (indexed, read on demand), <code>source</code>, <code>prepost</code> steps, the <code>critic</code> persona.</li>
-        <li><b><code>iter</code></b> is on every agent's PATH (a shim to <code>iter_engine cli</code>): <code>add</code> (file a child item), <code>ask</code> (question a person), <code>reject</code>, <code>wait --on</code>, <code>block</code>, <code>doc</code>, <code>critreview</code>, <code>capability</code>, <code>status</code>.</li>
-        <li>The <code>test</code> agent (formerly <code>testwriter</code>): with an <code>exec_shell</code> it runs tests deterministically, with no model; without one it writes tests.</li>
-        <li><b>Agent memory:</b> one short <code>&lt;dir&gt;.agentmemory.iter.md</code> per codepath, refreshed after each run and read first by the next one.</li>
-      </ul>`
-    },
-    {
-      kicker: "accounts and cost",
-      title: "Usage caps across several Claude accounts",
-      lede: "Each account is a long-lived token (<code>claude setup-token</code>) in the engine's <code>.env</code>; the project record only names the env var.",
-      body: () => ladderBars() + code("project record: accounts + ladder + budget", JSON.stringify({
-        maxagents: { ">98%": 0, ">95%": 1, ">90%": 2, "else": 4 }, maxdailycost: 50,
-        accounts: [{ name: "Dev1", token_envar: "DEV1_TOKEN", order: 1, switch: 80, stop: 99 }, { name: "Dev2", token_envar: "DEV2_TOKEN", order: 2, switch: 80, stop: 99 }]
-      }, null, 2)) + `<ul>
-        <li>Use accounts in <code>order</code> until each passes <b>switch</b> %; when all have, go round again up to <b>stop</b> %; when all are at stop, hold and watch for the 5-hour / 7-day reset.</li>
-        <li>An engine avoids accounts other running engines are using (unless that leaves none).</li>
-        <li>Usage comes from Claude Code's stream-json <code>rate_limit_event</code> per run, plus a 1-token idle probe that reads the rate-limit headers.</li>
-        <li><code>maxdailycost</code>: absent = unlimited, <code>0</code> = spend nothing, &gt;0 = $ per day. Every item gets a spend row, cache tokens included.</li>
-      </ul>`
-    },
-    {
-      kicker: "the map",
-      title: "Node files → the project graph",
-      lede: "Any <code>name.&lt;nodetype&gt;.iter.md</code> file is a <b>node file</b> (the dot rule). Its frontmatter starts with a stable <code>id: &lt;uuid&gt;</code>; its <code>children:</code> lists are the edges.",
-      body: () => `<dl class="intro-dl">
-        <dt><code>main</code></dt><dd>one per project: <code>projectname</code>, <code>projectdescription</code>, scan / interface / use case dirs, <code>globalcontextfiles</code> every agent reads.</dd>
-        <dt><code>code</code></dt><dd><code>level: context | container | component</code>: a context is a bucket (data, auth…), containers are deployables or crates, components their parts. <code>codedirs</code>, <code>codenodes</code>, <code>inputs</code>/<code>outputs</code> (interfaces), reqs, tests.</dd>
-        <dt><code>interface</code></dt><dd>one operation per file (<code>request-reply | event | stream | dataset</code>); the body is an example of the data. A outputs I and B inputs I draws a connection A→B.</dd>
-        <dt><code>usecase</code></dt><dd>a journey through the product and the code nodes it touches, with numbered flow steps.</dd>
-        <dt><code>bizreq</code> / <code>techreq</code></dt><dd>business and technical requirements, one testable bullet each.</dd>
-        <dt><code>tests</code></dt><dd>formerly <code>testgroup</code>: scripts to run, with <code>teststate</code> omit / include / block / inherit per chain.</dd>
-      </dl>` + mapSvg() + code("keep the map current", "iter ids --fix     # give every node file an id (reuses the stored id when it knows the file)\niter sync          # push the snapshot: one vertex per file, one edge per children link\niter validate      # structure checks, missing / malformed ids") +
-        `<p class="intro-dim">A running engine syncs on its own, at most once a minute when the tree changed. Read routes: <code>GET /api/projects/{p}/graph</code>, <code>…/graph/lookup</code>, <code>…/graph/owner?path=</code>, <code>…/graph/nodes/{id}/neighbors</code>.</p>
-        <div class="intro-actions">${gbtn("iter4 harness", "context node")}${gbtn("graph-sync", "graph-sync interface")}${gbtn("map-the-repo", "Map a repository")}</div>`
-    },
-    {
-      kicker: "tests",
-      title: "The test sweep: red tests become exactly one work item",
-      lede: "",
-      body: () => flow([
-        { t: "Read the map", d: "tests vertices, reached through each root's chains" },
-        { t: "Honour teststate", d: "omit / include / block / inherit, per chain" },
-        { t: "Run", d: "the deterministic runner (iter runtests)", cls: "intro-hl" },
-        { t: "Record", d: "POST …/graph/nodes/{id}/testresult" },
-        { t: "File if red", d: "one code item per red group, unless one is already open", cls: "intro-b" }
-      ]) + `<ul>
-        <li>The filed item locks the parent code node's <code>codedirs</code>, names the failing checks with their output tails, and carries the parent's use case tag and priority band.</li>
-        <li>Repeats merge: an open item carrying the same <code>check:testgroup:&lt;id&gt;</code> + <code>container:</code> tags is booked as "seen again" instead of filed twice.</li>
-        <li>Test logs live on the work item (<code>log_header</code> / <code>log_detail</code> rows, one pair per group per attempt), not in the tree.</li>
-      </ul>` + code("install the sweep as a recurring exec item", "iter sweep                                  # run now\niter sweep --install-schedule --every 4h    # recurring (user token required)") +
-        `<div class="intro-actions">${gbtn("red-test-becomes-workitem", "use case: red test becomes a work item")}</div>`
-    },
-    {
-      kicker: "get started",
-      title: "Stand it up",
-      lede: "",
-      body: () => code("1 · the data server (API + this page on :8300)", "cd iter4\n./deploy.sh docker     # ArangoDB + iter_data in one container\n# secrets ITER_ADMIN_PASSWORD, ITER_JWT_SECRET come from ../.env\n# ./deploy.sh local    # native iter_data against a dev ArangoDB on :8529") +
-        `<p><b>2 · the project record:</b> the wizard on the last page (admins). It also gives you the exact commands below with your names filled in.</p>` +
-        code("3 · in the checkout on the engine machine", "iter_engine cli init --project demo --data-url http://127.0.0.1:8300 --engine Engine01\n# writes main.iter.md, .iter/config.json, .iter/.gitignore, reqs/, interfaces/, usecases/\n\n# .env beside it (never commit it):\nITER_ENGINE_TOKEN=<minted by an admin: POST /api/users/Engine01/token>\nDEV1_TOKEN=<output of: claude setup-token>\n\niter_engine --accounts                  # which account env vars are set\niter_engine --config .iter/config.json  # start") +
-        `<p><b>4 ·</b> press Run on the project, file a work item, watch it close. Keep <code>ANTHROPIC_API_KEY</code> out of the engine's environment: it outranks the account token and bills API credits instead.</p>
-        <div class="intro-actions"><button class="intro-btn" data-wizard="1">Open the wizard</button>${qbtn()}</div>`
-    },
-    {
-      kicker: "glossary",
-      title: "Words you will meet",
-      lede: "",
-      body: () => `<dl class="intro-dl intro-small">
-        <dt>work item</dt><dd>one unit of work: a header row (state, agent, priority, lockdirs, tags) plus detail rows (request, responses, verify, logs, docs).</dd>
-        <dt>agent</dt><dd>a named worker definition: prompt body, model, caps, close gate and lock shape.</dd>
-        <dt>engine</dt><dd>one iter_engine process on one host; serves one or more projects from their checkouts (<code>topdir</code>).</dd>
-        <dt>lockdirs / lock</dt><dd>the folders an item will write; each becomes a lock row while it runs.</dd>
-        <dt>reservation</dt><dd>a lock-like row that holds slots for a high-priority whole-tree item.</dd>
-        <dt>close gate</dt><dd>the checks between "the agent stopped" and "complete".</dd>
-        <dt>bounce</dt><dd>a gate failure that sends the item back to queued with feedback.</dd>
-        <dt>question</dt><dd>a state and a widget: the item waits for a person's answer.</dd>
-        <dt>seq</dt><dd>a per-project, per-table change counter engines poll to know what to re-pull.</dd>
-        <dt>versioned write</dt><dd>a write that only lands if the version is still the one the writer read.</dd>
-        <dt>maxagents ladder</dt><dd>usage-% gates, checked in order, that set how many agents may run.</dd>
-        <dt>switch / stop</dt><dd>per-account usage % at which the engine moves on, and at which it gives up.</dd>
-        <dt>exec item</dt><dd>an item that runs a shell command instead of an agent.</dd>
-        <dt>scheduled</dt><dd>a recurring template that files a fresh item each time it fires.</dd>
-        <dt>usecase tag</dt><dd><code>usecase:&lt;name&gt;</code>, inherited by every child, drives the progress chips.</dd>
-        <dt>dedup tags</dt><dd><code>check:</code> + <code>container:</code>: a repeat of an open item is merged, not filed.</dd>
-        <dt>node file</dt><dd>a <code>name.&lt;nodetype&gt;.iter.md</code> file; one vertex in the graph.</dd>
-        <dt>teststate</dt><dd>whether a chain's tests run: omit, include, block or inherit.</dd>
-        <dt>Draining</dt><dd>a project told to stop that still has work running.</dd>
-      </dl>`
-    }
+  /* ------------------------------------------------------------ the glossary */
+  const GLOSSARY = [
+    ["The work", [
+      ["work item", "One unit of work: a title, the request, a priority, the folders it may change, tags, and a history (replies, checks, notes, cost). Like a ticket."],
+      ["state", "Where an item is: queued, in-progress, question, complete, failed, parked, paused or scheduled."],
+      ["question", "A state and a small form: the item waits for a person's decision; answering sends it back in line."],
+      ["priority", "0–99, lower goes first: 0–9 now, 10–39 one number per use case, 40–49 people's requests, 50+ maintenance. Children inherit it."],
+      ["dependency (blocked by)", "An item that waits for another item and everything that item created."],
+      ["exec item", "An item that runs a shell command instead of an agent."],
+      ["scheduled item", "A template that files a fresh item every time it fires (every N minutes, daily, weekly). Missed times are skipped, not caught up."],
+      ["repeat (dedup)", "Filing the same fault again (same check: + container: tags) records a repeat on the open item instead of a second item."]]],
+    ["Agents and engines", [
+      ["agent", "A named kind of worker (code, plan, test, usecase, explain, summary…): its prompt, model, limits, check and allowed folders."],
+      ["engine", "The iter program on one machine: it runs agents in its copy of the repository and reports to the data server."],
+      ["data server (iter_data)", "The central server: every record, the API, the map, search; the only thing that touches the database."],
+      ["session", "One headless Claude Code run (claude -p) doing an item's work, in several turns."],
+      ["account / switch / stop", "A Claude subscription token the engine may use; switch % moves to the next account, stop % is never passed."],
+      ["ELI5", "The Explain button on an item: a read-only agent re-explains it for someone new."]]],
+    ["Sharing the code", [
+      ["lock (reservation)", "An item's hold on the folders it changes while it runs; others that need them wait. Expires on its own if the machine dies."],
+      ["lockdirs / lock shape", "The folders an item will change; the rules for which folders an agent may reserve."],
+      ["reservation (slots)", "A hold that keeps room for a high-priority item that needs the whole tree."],
+      ["Draining", "A project told to stop that still has work running; it becomes Stopped when that finishes."]]],
+    ["Quality", [
+      ["close gate", "The checks between 'the agent stopped' and 'complete': the facts, then a second AI's opinion."],
+      ["bounce", "A close-gate failure that sends the item back once with the gaps listed."],
+      ["NOT DONE line", "What an agent writes for anything it did not finish: an honest gap is cheap."],
+      ["test group / sweep", "Scripts that check a part; the sweep runs them on a schedule and files one fix item per red group."]]],
+    ["The map", [
+      ["node file", "A short description file next to the code (name.<type>.iter.md): one point on the map."],
+      ["project graph", "The map of the program drawn from its node files: parts, connections, requirements, tests."],
+      ["context / container / component", "Map levels: a big area (data, engines), a deployable piece (a crate), a part inside it."],
+      ["interface", "The contract between two parts: one operation, with an example of the data."],
+      ["use case", "A journey someone takes through the product, and the parts it needs."],
+      ["bizreq / techreq", "Business and technical requirements, one testable line each."],
+      ["datasync", "How a change made on the map in the browser reaches the repository: the first free engine writes it."]]],
+    ["Search and tools", [
+      ["GraphRAG", "Search by meaning and by keyword over the project's documents and node files; each hit brings its place in the map."],
+      ["chunk", "A passage of a document, sized for the search model; each has a summary and two fingerprints (vectors)."],
+      ["Summary agent", "A small, fast model that summarises chunks, chapters and whole documents, outside the work queue."],
+      ["embedding model", "all-MiniLM-L6-v2: turns text into 384 numbers so similar meanings sit close together."],
+      ["MCP", "Model Context Protocol: iter's API as ready-made tools for AI assistants; every agent session has them."],
+      ["user guide", "iter's own manual, searchable from every project."]]]
   ];
+  function glossaryHtml() {
+    const f = (S.gq || "").trim().toLowerCase();
+    const groups = GLOSSARY.map(([g, terms]) => {
+      const rows = terms.filter(([t, d]) => !f || (t + " " + d).toLowerCase().includes(f));
+      return rows.length ? `<section class="intro-gsec"><h3>${esc(g)}</h3><dl class="intro-dl">${rows.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join("")}</dl></section>` : "";
+    }).join("");
+    return `<div class="intro-gfilter"><input id="intro-gq" type="search" placeholder="filter the glossary" value="${esc(S.gq || "")}" autocomplete="off"></div>
+      <div class="intro-gloss-grid">${groups || `<p class="intro-dim">No term matches "${esc(f)}".</p>`}</div>
+      <p class="intro-dim intro-small">Looking for how to do something? The GraphRAG tab searches iter's user guide from any project.</p>`;
+  }
 
-  /* ------------------------------------------------------------ wizard */
+  /* ------------------------------------------------------------ the new-project wizard */
   const WIZ_SLIDE = { kicker: "new project", title: "Start a new project", wizard: true };
-  const TRACKS = { biz: { label: "Business", slides: BIZ.concat([WIZ_SLIDE]) }, tech: { label: "Technical", slides: TECH.concat([WIZ_SLIDE]) } };
   const WSTEPS = ["Project", "Accounts & limits", "Engine", "Review", "Set up"];
 
   function freshWizard() {
@@ -564,7 +584,6 @@ journeys people take through the product in \`usecases/\`.
   }
 
   /* ------------------------------------------------------------ the module */
-  const S = { el: null, ctx: null, track: "biz", i: 0, w: freshWizard(), engines: [], keyBound: false };
 
   function field(id, label, input, help, err) {
     return `<div class="intro-field"><label for="intro-f-${id}">${label}</label>${input}` +
@@ -621,7 +640,7 @@ journeys people take through the product in \`usecases/\`.
           "The address of this iter_data server <b>as the engine machine sees it</b>. Defaults to this page's address; change it if the engine reaches the server by another name.", e.dataUrl) +
         `<p class="intro-dim intro-small">The engine record stores the checkout path for this project (<code>projects.${esc(d.name.trim())}.dirs.topdir = ${esc(d.topdir.trim())}</code>). Heartbeat, state and account are filled in by the engine once it runs.</p>`;
     } else if (w.step === 3) {
-      body = `<p>Nothing is written until you press <b>Create project</b>. The project starts <b>Stopped</b>, so no agent runs until you press Run in the work queue.</p>` +
+      body = `<p>Nothing is written until you press <b>Create project</b>. The project starts <b>Stopped</b>. Two things must happen before any agent runs: an <b>engine</b> (the <code>iter_engine</code> program, on the machine that holds the code) must be running for it, and you press <b>Running</b> in the work queue. The next page gives the engine setup as one command.</p>` +
         code(`PUT /api/projects/${d.name.trim()}`, JSON.stringify(projectRecord(d), null, 2)) +
         code(`PUT /api/engines/${d.engine.trim()} (${S.engines.some(x => x.name === d.engine.trim()) ? "merged into the existing record" : "new record"})`,
           JSON.stringify({ projects: { [d.name.trim()]: { dirs: { topdir: d.topdir.trim() } } } }, null, 2)) +
@@ -638,39 +657,123 @@ journeys people take through the product in \`usecases/\`.
           (admin ? "" : `<button class="intro-btn intro-ghost" data-wpreview="1">Preview setup commands</button>`) +
           `<button class="intro-btn" data-wcreate="1" ${admin && !w.busy ? "" : "disabled"}>${w.busy ? "Creating…" : "Create project"}</button>`
         : `<button class="intro-btn intro-ghost" data-wreset="1">Start another project</button><span class="intro-grow"></span>${qbtn("Go to the work queue")}`;
-    return `<div class="intro-steps">${chips}</div>${body}<div class="intro-wizfoot">${foot}</div>`;
+    return `${w.existing ? "" : `<div class="intro-steps">${chips}</div>`}${body}<div class="intro-wizfoot">${foot}</div>`;
+  }
+
+  // where the setup script lives: this server (always matches it), or GitHub
+  const SETUP_GH = "https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh";
+  const setupUrl = d => d.dataUrl.trim().replace(/\/+$/, "") + "/iter_engine_setup.sh";
+  function setupCmd(d, token) {
+    const lines = [`bash iter_engine_setup.sh --data-url ${shq(d.dataUrl.trim())} --project ${shq(d.name.trim())} --engine ${shq(d.engine.trim())}`,
+      `  --topdir ${shq(d.topdir.trim())}`,
+      `  --token ${token ? shq(token) : "<the token from step 1>"}`];
+    if (oneLine(d.desc)) lines.push(`  --desc ${shq(oneLine(d.desc))}`);
+    lines.push("  --start");
+    return `curl -fsSLo iter_engine_setup.sh ${setupUrl(d)}\n` + lines.join(" \\\n");
+  }
+  /** The engine's check-in state: online when it heartbeat within the last minute. */
+  function engineState(rec) {
+    if (!rec) return { online: false, text: "has not checked in yet" };
+    const t = Date.parse(rec.last_seen || "");
+    if (!t) return { online: false, text: "has never checked in" };
+    const ago = Math.max(0, Math.round((Date.now() - t) / 1000));
+    const when = ago < 90 ? `${ago} s ago` : ago < 5400 ? `${Math.round(ago / 60)} min ago` : `${Math.round(ago / 3600)} h ago`;
+    return { online: ago < 60, text: `last checked in ${when}${rec.host ? " from " + rec.host : ""}` };
+  }
+  function watchHtml() {
+    const d = S.w.d, eng = d.engine.trim();
+    const st = engineState(S.engines.find(x => x.name === eng));
+    return st.online
+      ? `<div class="intro-note intro-okn"><b>Engine ${esc(eng)} is online</b> (${esc(st.text)}). Press <b>Running</b> on ${esc(d.name.trim())} in the work queue if it is Stopped; queued work starts within a few seconds.</div>`
+      : `<div class="intro-note"><span class="intro-spin"></span> Waiting for engine <b>${esc(eng)}</b> to check in: it ${esc(st.text)}. This updates on its own.</div>`;
+  }
+  // re-read the engines every 5 s while the Set up page is on screen
+  let watchTimer = null;
+  function watchEngine() {
+    if (watchTimer) return;
+    watchTimer = setInterval(async () => {
+      const el = S.el && S.el.querySelector("#intro-engwatch");
+      if (!el || S.page !== "wizard" || S.w.step !== 4) { clearInterval(watchTimer); watchTimer = null; return; }
+      if (!el.offsetParent) return; // the tab is hidden
+      try { const r = await S.ctx.api("/api/engines"); S.engines = Array.isArray(r) ? r : S.engines; } catch (e) { return; }
+      el.innerHTML = watchHtml();
+    }, 5000);
   }
 
   function resultsHtml() {
     const w = S.w, d = w.d, admin = !!(S.ctx && S.ctx.isAdmin);
-    const eng = d.engine.trim(), url = d.dataUrl.trim();
-    let h = w.created
-      ? `<div class="intro-note intro-okn">Project <b>${esc(d.name.trim())}</b> created (Stopped)${w.created.engineMsg ? "; " + esc(w.created.engineMsg) : ""}.</div>`
-      : `<div class="intro-note">Preview only: the project record was not created.</div>`;
+    const eng = d.engine.trim(), url = d.dataUrl.trim(), name = d.name.trim();
+    let h = "";
+    if (w.created) h += `<div class="intro-note intro-okn">Project <b>${esc(name)}</b> created (Stopped)${w.created.engineMsg ? "; " + esc(w.created.engineMsg) : ""}.</div>`;
+    else if (!w.existing) h += `<div class="intro-note">Preview only: the project record was not created.</div>`;
     if (w.created && w.created.engineErr) h += `<div class="intro-note intro-badn">The engine record was not updated: ${esc(w.created.engineErr)}. Add the project to engine ${esc(eng)} from its gear in the work queue (checkout path ${esc(d.topdir.trim())}).</div>`;
-    h += `<h3>1 · Set up the checkout</h3><p class="intro-dim intro-small">On the engine machine, clone the repository if you haven't, then run this inside it. It writes the files below and never overwrites one that exists (add <code>--force</code> to replace them).</p>` +
-      code("in the checkout", `cd ${shq(d.topdir.trim())}\n${initCmd(d)}`) +
-      code("main.iter.md (the project's head file)", mainIterMd(d)) +
-      code(".iter/config.json (how the engine reaches this server)", configJson(d)) +
-      `<p class="intro-dim intro-small">Also written: <code>.iter/.gitignore</code> (users/, bin/, temp/), <code>reqs/${esc(slug(d.name.trim()))}.bizreq.iter.md</code>, <code>reqs/${esc(slug(d.name.trim()))}.techreq.iter.md</code>, and empty <code>interfaces/</code> and <code>usecases/</code> folders. Commit them.</p>`;
-    h += `<h3>2 · The engine token</h3><p class="intro-dim intro-small">The engine signs in as a user named after it, with role <code>engine</code>. An admin mints its token once; it lasts a year.</p>`;
+    if (!eng) return h + `<div class="intro-note intro-badn">No engine is assigned to <b>${esc(name)}</b>. Add one from the engine gear in the work queue (projects served), then come back to this page.</div>`;
+    const st = engineState(S.engines.find(x => x.name === eng));
+    h += st.online
+      ? `<p>Engine <b>${esc(eng)}</b> is already running (${esc(st.text)}), and it serves <b>${esc(name)}</b> from its next tick. It still needs the project's files in <code>${esc(d.topdir.trim())}</code> on that machine: run step 2 there without <code>--start</code>.</p>`
+      : `<div class="intro-note"><b>Nothing runs yet.</b> Work items for ${esc(name)} stay <b>queued</b> until an engine is running for it. An engine is the <code>iter_engine</code> program, running on the machine that holds the code (<code>${esc(d.topdir.trim())}</code>): it takes queued work and runs the agents there. iter_data cannot start it for you. Three steps:</div>`;
+
+    h += `<h3>1 · Mint the engine token</h3><p class="intro-dim intro-small">The engine signs in to this server as a user named <code>${esc(eng)}</code> (role <code>engine</code>). The token lasts a year and is shown once; step 2 puts it in the checkout's <code>.env</code> for you.</p>`;
     if (w.token) {
-      h += `<div class="intro-note intro-okn">Token for <b>${esc(eng)}</b>, shown once. Put it in the checkout's <code>.env</code> now.</div><div class="intro-token">${esc(w.token)}</div>` +
-        `<div class="intro-actions"><button class="intro-btn intro-sm" data-copytoken="1">Copy token</button></div>`;
+      h += `<div class="intro-note intro-okn">Token for <b>${esc(eng)}</b> minted, and filled into the command below.</div>` +
+        `<div class="intro-actions"><button class="intro-btn intro-sm intro-ghost" data-copytoken="1">Copy the token alone</button></div>`;
     } else if (admin) {
       h += `<div class="intro-actions"><button class="intro-btn" data-wmint="1" ${w.busy ? "disabled" : ""}>Create user ${esc(eng)} and mint its token</button></div>`;
     } else {
-      h += `<div class="intro-note">Ask an admin to mint it, or use the commands below with an admin token.</div>`;
+      h += `<div class="intro-note">Only an admin can mint it: ask one to open this page (Intro → Start a new project, or the work queue's Engine setup link).</div>`;
     }
     if (w.tokenErr) h += `<div class="intro-note intro-badn">${esc(w.tokenErr)}</div>`;
-    if (!w.token) h += code("or by hand, with an admin token in $ADMIN_TOKEN",
-      `curl -X PUT ${url}/api/users/${eng} -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \\\n  -d '{"role":"engine"}'      # only if the user does not exist yet\ncurl -X POST ${url}/api/users/${eng}/token -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' -d '{}'`);
-    h += `<h3>3 · The .env file</h3><p class="intro-dim intro-small">In the checkout, next to <code>.iter/</code>. Keep it out of git. Keep <code>ANTHROPIC_API_KEY</code> out of it and out of the engine's environment: it outranks the account token and bills API credits instead.</p>` +
+
+    const accts = d.accounts.map(a => a.token_envar.trim()).filter(Boolean);
+    h += `<h3>2 · Run the setup script on that machine</h3>
+      <p class="intro-dim intro-small">Open a terminal on the machine that holds <code>${esc(d.topdir.trim())}</code> and paste this. The script checks the tools (git, curl, the <code>claude</code> CLI), finds <code>iter_engine</code> or builds it from GitHub, creates the folder, scaffolds the project files, writes <code>.env</code> and keeps it out of git, starts the engine and waits for it to check in. It never overwrites a file, so it is safe to run again.</p>` +
+      code("in a terminal on the engine machine", setupCmd(d, w.token)) +
+      `<ul class="intro-small intro-dim">
+        <li>Claude accounts: ${accts.length ? `it asks for ${accts.map(a => `<code>${esc(a)}</code>`).join(", ")}, one token per account (run <code>claude setup-token</code> while logged in to it). Already have them in another env file? Add <code>--env-from ~/path/to/.env</code> and they are copied.` : "none listed, so the agents use that machine's own <code>claude</code> login."}</li>
+        <li>Already built <code>iter_engine</code>? Add <code>--bin /path/to/iter_engine</code>. Otherwise the script builds it with <code>cargo</code> (install Rust from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> first).</li>
+        <li>That machine cannot reach ${esc(url)}? Then the <code>--data-url</code> above is wrong for it too: use the address it does reach this server by. The script itself is also on <a href="${esc(SETUP_GH)}" target="_blank" rel="noopener">GitHub</a>: <code>curl -fsSLo iter_engine_setup.sh ${esc(SETUP_GH)}</code></li>
+        <li>Later: <code>bash iter_engine_setup.sh --status</code> or <code>--stop</code> in the checkout; the log is <code>.iter/engine.log</code>.</li>
+      </ul>
+      <div class="intro-actions"><a class="intro-btn intro-ghost intro-sm" href="${esc(setupUrl(d))}" download="iter_engine_setup.sh">Download iter_engine_setup.sh</a></div>`;
+
+    h += `<h3>3 · Wait for it to check in</h3><div id="intro-engwatch">${watchHtml()}</div>`;
+
+    h += `<details class="intro-byhand"><summary>Or do it by hand (what the script does)</summary>` +
+      `<h4>Set up the checkout</h4><p class="intro-dim intro-small">Clone the repository if you haven't, then run this inside it. It writes the files below and never overwrites one that exists (add <code>--force</code> to replace them).</p>` +
+      code("in the checkout", `cd ${shq(d.topdir.trim())}\n${initCmd(d)}`) +
+      code("main.iter.md (the project's head file)", mainIterMd(d)) +
+      code(".iter/config.json (how the engine reaches this server)", configJson(d)) +
+      `<p class="intro-dim intro-small">Also written: <code>.iter/.gitignore</code> (users/, bin/, temp/), <code>reqs/${esc(slug(name))}.bizreq.iter.md</code>, <code>reqs/${esc(slug(name))}.techreq.iter.md</code>, and empty <code>interfaces/</code> and <code>usecases/</code> folders. Commit them.</p>` +
+      (w.token ? "" : code("the engine token, with an admin token in $ADMIN_TOKEN",
+        `curl -X PUT ${url}/api/users/${eng} -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \\\n  -d '{"role":"engine"}'      # only if the user does not exist yet\ncurl -X POST ${url}/api/users/${eng}/token -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' -d '{}'`)) +
+      `<h4>The .env file</h4><p class="intro-dim intro-small">In the checkout, next to <code>.iter/</code>. Keep it out of git. Keep <code>ANTHROPIC_API_KEY</code> out of it and out of the engine's environment: it outranks the account token and bills API credits instead.</p>` +
       code(".env", envLines(d, w.token)) +
-      `<h3>4 · Start the engine</h3>` +
+      `<h4>Start the engine</h4>` +
       code("in the checkout", "iter_engine --accounts                  # check every account env var is set\niter_engine --config .iter/config.json  # start; the first line names this server") +
-      `<p class="intro-dim intro-small">Then open the work queue, press <b>Run</b> on the project, and file a first work item. The engine maps the repository on its own; <code>iter sync</code> does it by hand.</p>`;
+      `</details>`;
+    watchEngine();
     return h;
+  }
+
+  /** The Set up page for a project that already exists (the work queue's "Engine setup" link):
+   *  the same steps, filled from the project and its engine record. */
+  async function openSetup(name) {
+    if (!S.ctx || !S.ctx.api || !name) return;
+    const api = S.ctx.api;
+    let proj = null;
+    try { proj = await api("/api/projects/" + encodeURIComponent(name)); } catch (e) { toast("Could not load project " + name); return; }
+    try { const r = await api("/api/engines"); S.engines = Array.isArray(r) ? r : []; } catch (e) { S.engines = []; }
+    const w = freshWizard(), d = w.d;
+    const engs = proj.engines || [];
+    // the engine to set up: the first assigned one that is not online, else the first
+    const pick = engs.find(n => !engineState(S.engines.find(x => x.name === n)).online) || engs[0] || "";
+    const rec = S.engines.find(x => x.name === pick);
+    d.name = name; d.desc = proj.desc || ""; d.gitrepo = proj.gitrepo || ""; d.engine = pick;
+    d.topdir = (rec && rec.projects && rec.projects[name] && rec.projects[name].dirs && rec.projects[name].dirs.topdir) || "";
+    d.accounts = (proj.accounts || []).map(a => ({ name: a.name || "", token_envar: a.token_envar || "", switch: a.switch, stop: a.stop }));
+    w.step = 4; w.existing = true;
+    S.w = w; S.page = "wizard"; save(); render(true);
+    if (S.el.getBoundingClientRect().top < 0) window.scrollTo({ top: 0 });
   }
 
   async function createProject() {
@@ -728,36 +831,63 @@ journeys people take through the product in \`usecases/\`.
     if (S.el && current().wizard && S.w.step >= 2 && S.w.step <= 3) render();
   }
 
+
   /* ------------------------------------------------------------ rendering */
-  const slides = () => TRACKS[S.track].slides;
-  const current = () => slides()[S.i];
+  // page: story | glossary | wizard
+  const S = { el: null, ctx: null, page: "story", i: 0, lv: 1, resetLv: false, gq: "", w: freshWizard(), engines: [], keyBound: false };
+  const current = () => STORY[S.i];
+  const save = () => store.set(POS_KEY, { page: S.page, i: S.i, lv: S.lv, resetLv: S.resetLv });
+
+  function levelBar() {
+    return `<div class="intro-detail" role="group" aria-label="level of detail">
+      <span class="intro-detail-l">Detail</span>
+      <div class="intro-stops">
+        <div class="intro-stops-track"><div class="intro-stops-fill" style="width:${(S.lv - 1) * 50}%"></div></div>
+        ${LEVELS.map(l => `<button class="intro-stop ${l.n <= S.lv ? "intro-on" : ""} ${l.n === S.lv ? "intro-cur" : ""}" data-lv="${l.n}" title="${esc(l.hint)}" aria-pressed="${l.n === S.lv}"><span class="intro-stop-dot"></span><span class="intro-stop-l">${l.label}</span></button>`).join("")}
+      </div></div>`;
+  }
 
   function render(focusSlide) {
     if (!S.el) return;
-    // keep focus + caret in the wizard field being typed in across re-renders
+    // keep focus + caret in the field being typed in across re-renders
     const ae = document.activeElement, keep = ae && S.el.contains(ae) && ae.matches("input,textarea")
       ? { sel: ae.id ? "#" + ae.id : ae.dataset.acct != null ? `[data-acct="${ae.dataset.acct}"][data-k="${ae.dataset.k}"]` : ae.dataset.lad != null ? `[data-lad="${ae.dataset.lad}"][data-k="${ae.dataset.k}"]` : null, s: ae.selectionStart, e: ae.selectionEnd }
       : null;
     copies = [];
-    const sl = current(), n = slides().length;
-    const content = sl.wizard ? wizardHtml() : sl.body();
-    S.el.innerHTML = `<div class="intro-root">
-      <div class="intro-bar">
-        <div class="intro-tracks" role="tablist">${Object.entries(TRACKS).map(([k, t]) => `<button class="intro-track ${k === S.track ? "intro-on" : ""}" data-track="${k}" role="tab" aria-selected="${k === S.track}">${t.label}</button>`).join("")}</div>
-        <span class="intro-where">${S.i + 1} / ${n} · ${esc(sl.kicker)}</span>
-      </div>
-      <section class="intro-slide" tabindex="-1" aria-live="polite">
+    const n = STORY.length;
+    let main;
+    if (S.page === "glossary") {
+      main = `<section class="intro-slide intro-page" tabindex="-1">
+        <p class="intro-kicker">glossary</p><h2 class="intro-title">Words you will meet</h2>
+        <div class="intro-body">${glossaryHtml()}</div></section>`;
+    } else if (S.page === "wizard") {
+      main = `<section class="intro-slide intro-page" tabindex="-1">
+        <p class="intro-kicker">${S.w.existing ? "engine setup" : esc(WIZ_SLIDE.kicker)}</p><h2 class="intro-title">${S.w.existing ? "Get " + esc(S.w.d.name.trim()) + " running" : WIZ_SLIDE.title}</h2>
+        <div class="intro-body">${wizardHtml()}</div></section>`;
+    } else {
+      const sl = current();
+      main = `<section class="intro-slide intro-lv${S.lv}" tabindex="-1" aria-live="polite">
         <p class="intro-kicker">${esc(sl.kicker)}</p>
         <h2 class="intro-title">${sl.title}</h2>
-        ${sl.lede ? `<p class="intro-lede">${sl.lede}</p>` : ""}
-        <div class="intro-body">${content}</div>
+        <p class="intro-lede">${sl.lede()}</p>
+        <div class="intro-body">${sl.body()}</div>
       </section>
       <div class="intro-nav">
         <button class="intro-arrow" data-go="${S.i - 1}" ${S.i === 0 ? "disabled" : ""} aria-label="previous slide">&larr;</button>
-        <div class="intro-dots">${slides().map((s, i) => `<button class="intro-dot ${i === S.i ? "intro-on" : ""}" data-go="${i}" title="${esc((i + 1) + ". " + s.kicker)}" aria-label="slide ${i + 1}: ${esc(s.kicker)}"></button>`).join("")}</div>
+        <div class="intro-dots">${STORY.map((s, i) => `<button class="intro-dot ${i === S.i ? "intro-on" : ""}" data-go="${i}" title="${esc((i + 1) + ". " + s.kicker)}" aria-label="slide ${i + 1}: ${esc(s.kicker)}"></button>`).join("")}</div>
         <button class="intro-arrow" data-go="${S.i + 1}" ${S.i === n - 1 ? "disabled" : ""} aria-label="next slide">&rarr;</button>
       </div>
-      <div class="intro-keys">&larr; &rarr; keys move between slides</div>
+      <div class="intro-keys">&larr; &rarr; move between slides · &uarr; &darr; change the detail</div>
+      <label class="intro-opt"><input type="checkbox" id="intro-resetlv" ${S.resetLv ? "checked" : ""}> Back to Summary on every new slide</label>`;
+    }
+    const pageBtn = (p, label) => `<button class="intro-btn ${S.page === p ? "" : "intro-ghost"} intro-sm" data-page="${S.page === p ? "story" : p}">${S.page === p ? "&larr; Back to the story" : label}</button>`;
+    S.el.innerHTML = `<div class="intro-root">
+      <div class="intro-bar">
+        ${S.page === "story" ? levelBar() : ""}
+        <span class="intro-where">${S.page === "story" ? `${S.i + 1} / ${n}` : ""}</span>
+        <div class="intro-pages">${pageBtn("glossary", "Glossary")}${pageBtn("wizard", "Start a new project")}</div>
+      </div>
+      ${main}
     </div>`;
     if (keep && keep.sel) {
       const t = S.el.querySelector(keep.sel);
@@ -768,24 +898,24 @@ journeys people take through the product in \`usecases/\`.
   }
 
   function go(i) {
-    const n = slides().length;
-    i = Math.max(0, Math.min(n - 1, i));
-    if (i === S.i) return;
-    S.i = i;
-    store.set(POS_KEY, { track: S.track, i: S.i });
-    render(true);
+    i = Math.max(0, Math.min(STORY.length - 1, i));
+    if (S.page === "story" && i === S.i) return;
+    // optional: each new slide starts at Summary, not the last slide's detail
+    if (S.resetLv && S.page === "story") S.lv = 1;
+    S.page = "story"; S.i = i; save(); render(true);
     if (S.el.getBoundingClientRect().top < 0) window.scrollTo({ top: 0 });
-    if (current().wizard) loadEngines();
   }
-  function setTrack(t) {
-    if (!TRACKS[t] || t === S.track) return;
-    const onWizard = current().wizard;
-    S.track = t;
-    S.i = onWizard ? slides().length - 1 : 0;
-    store.set(POS_KEY, { track: S.track, i: S.i });
-    render(true);
+  function setLevel(lv) {
+    lv = Math.max(1, Math.min(3, lv));
+    if (lv === S.lv) return;
+    S.lv = lv; save(); render();
   }
-  function openWizard() { go(slides().length - 1); }
+  function setPage(p) {
+    S.page = p === "glossary" || p === "wizard" ? p : "story";
+    save(); render(true);
+    if (S.el.getBoundingClientRect().top < 0) window.scrollTo({ top: 0 });
+    if (S.page === "wizard") loadEngines();
+  }
 
   function wizNext() {
     const w = S.w;
@@ -801,8 +931,9 @@ journeys people take through the product in \`usecases/\`.
     if (!b || !S.el.contains(b)) return;
     const ds = b.dataset, w = S.w, d = w.d;
     if (ds.go != null) return go(+ds.go);
-    if (ds.track) return setTrack(ds.track);
-    if (ds.wizard) return openWizard();
+    if (ds.lv != null) return setLevel(+ds.lv);
+    if (ds.page) return setPage(ds.page);
+    if (ds.wizard) return setPage("wizard");
     if (ds.graph) { if (S.ctx && S.ctx.openGraph) S.ctx.openGraph(ds.graph); return; }
     if (ds.queue) { if (S.ctx && S.ctx.openQueue) S.ctx.openQueue(); return; }
     if (ds.copy != null) return copyText(copies[+ds.copy]);
@@ -819,8 +950,26 @@ journeys people take through the product in \`usecases/\`.
     if (ds.dellad != null) { d.ladder.splice(+ds.dellad, 1); w.errs = {}; return render(); }
   }
 
+  // hovering a step in the loop's list lights its circle, and the reverse
+  function onOver(ev) {
+    const pin = ev.target.closest("[data-pin]");
+    S.el.querySelectorAll(".intro-pinhot").forEach(x => x.classList.remove("intro-pinhot"));
+    if (pin && S.el.contains(pin)) S.el.querySelectorAll(`[data-pin="${pin.dataset.pin}"]`).forEach(x => x.classList.add("intro-pinhot"));
+    const t = ev.target.closest("[data-step]");
+    S.el.querySelectorAll(".intro-hot").forEach(x => x.classList.remove("intro-hot"));
+    if (!t || !S.el.contains(t)) return;
+    S.el.querySelectorAll(`[data-step="${t.dataset.step}"]`).forEach(x => x.classList.add("intro-hot"));
+  }
+
   function onInput(ev) {
-    const t = ev.target, d = S.w.d;
+    const t = ev.target;
+    if (t.id === "intro-gq") {
+      S.gq = t.value;
+      const grid = S.el.querySelector(".intro-gloss-grid");
+      if (grid) { const tmp = document.createElement("div"); tmp.innerHTML = glossaryHtml(); grid.replaceWith(tmp.querySelector(".intro-gloss-grid")); }
+      return;
+    }
+    const d = S.w.d;
     if (t.dataset.f) {
       const f = t.dataset.f;
       d[f] = t.value;
@@ -845,18 +994,24 @@ journeys people take through the product in \`usecases/\`.
     }
   }
 
+  function onChange(ev) {
+    if (ev.target.id === "intro-resetlv") { S.resetLv = ev.target.checked; save(); ev.target.blur(); } // blur: the arrow keys ignore focused inputs
+  }
+
   function visible() { return S.el && S.el.isConnected && S.el.offsetParent !== null; }
   function onKey(ev) {
     if (!visible() || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     const t = ev.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-    if (document.querySelector("dialog[open]")) return;
+    if (document.querySelector("dialog[open]") || S.page !== "story") return;
     if (ev.key === "ArrowRight") { ev.preventDefault(); go(S.i + 1); }
     else if (ev.key === "ArrowLeft") { ev.preventDefault(); go(S.i - 1); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); setLevel(S.lv + 1); }
+    else if (ev.key === "ArrowDown") { ev.preventDefault(); setLevel(S.lv - 1); }
   }
   let touch = null;
   function onTouchStart(ev) {
-    if (ev.touches.length !== 1 || ev.target.closest("input,textarea,pre,.intro-tablewrap,.intro-code")) { touch = null; return; }
+    if (ev.touches.length !== 1 || S.page !== "story" || ev.target.closest("input,textarea,pre,.intro-tablewrap,.intro-code")) { touch = null; return; }
     touch = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
   }
   function onTouchEnd(ev) {
@@ -870,19 +1025,32 @@ journeys people take through the product in \`usecases/\`.
     mount(el, ctx) {
       S.el = el; S.ctx = ctx || {};
       const pos = store.get(POS_KEY);
-      if (pos && TRACKS[pos.track]) { S.track = pos.track; S.i = Math.max(0, Math.min(TRACKS[pos.track].slides.length - 1, pos.i | 0)); }
+      if (pos) {
+        S.page = ["story", "glossary", "wizard"].includes(pos.page) ? pos.page : "story";
+        S.i = Math.max(0, Math.min(STORY.length - 1, pos.i | 0));
+        S.lv = [1, 2, 3].includes(pos.lv) ? pos.lv : 1;
+        S.resetLv = pos.resetLv === true;
+      }
       el.addEventListener("click", onClick);
       el.addEventListener("input", onInput);
+      el.addEventListener("change", onChange);
+      el.addEventListener("mouseover", onOver);
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchend", onTouchEnd, { passive: true });
       if (!S.keyBound) { document.addEventListener("keydown", onKey); S.keyBound = true; }
       render();
-      if (current().wizard) loadEngines();
+      if (S.page === "wizard") loadEngines();
     },
+    // called whenever the tab is shown AND by the page's 10-second refresh:
+    // never re-render here — a re-render would throw away what the reader has
+    // open or half-typed; only a change of admin rights redraws the wizard
+    /** The work queue's "Engine setup" link: the Set up steps for an existing project. */
+    openSetup(name) { return openSetup(name); },
     show(ctx) {
+      const wasAdmin = !!(S.ctx && S.ctx.isAdmin);
       if (ctx) S.ctx = ctx;
-      render();
-      if (current().wizard) loadEngines();
+      if (!S.el || !S.el.firstChild) return render();
+      if (S.page === "wizard" && wasAdmin !== !!(S.ctx && S.ctx.isAdmin)) render();
     }
   };
 })();

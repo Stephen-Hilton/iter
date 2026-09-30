@@ -259,7 +259,7 @@ A closed item (complete or failed) is immutable except for tags and appended not
 
 ### How do scheduled work items work?
 
-A scheduled item is a template in state `scheduled` with a `sched` of kind `every` (every N minutes), `daily`, `weekly` or `stale`. When due, an engine claims the firing and clones the template into a queued run; a missed daily or weekly slot is skipped, never back-filled, and a template does not fire while its last run is still open. Only users (not engine tokens) can create schedules. The test sweep (`iter sweep --install-schedule --every 4h`) and the GraphRAG change sweep are schedules; the Work queue offers Run now, Pause and Resume for them.
+A scheduled item is a template in state `scheduled` with a `sched` of kind `every` (every N minutes), `daily`, `weekly` or `stale`. When due, an engine claims the firing and clones the template into a queued run; a missed daily or weekly slot is skipped, never back-filled, and a template does not fire while its last run is still open. Only users (not engine tokens) can create schedules, with one exception: the test sweep, which every engine makes sure each project has (see "What is the test sweep?"). The test sweep and the GraphRAG change sweep are schedules; the Work queue offers Run now, Pause and Resume for them.
 
 ### What is dedup?
 
@@ -353,7 +353,15 @@ In `*.tests.iter.md` files (usually `test/<name>.tests.iter.md` beside the node)
 
 ### What is the test sweep?
 
-`iter_engine cli sweep` runs every test group the map allows, records each result on the map, and files one `code` fix item per red group (tagged with the use cases it touches), never a second while the first is open. It also files `ingest` items for nodes whose text breaks the standard. `iter_engine cli sweep --install-schedule --every 4h` makes it a schedule (needs a user token).
+`iter_engine cli sweep` runs every test group the map allows (`*.tests.iter.md`, and the older `*.testgroup.iter.md`), records each result on the map, and files work for what it finds, never a second item while the first is open:
+
+- one `code` fix item per red group (tagged with the use cases it touches); when the fix is very complex or risky, that item files a `plan` item instead and waits for it (`iter wait --on`), then proves the fix; a group whose script itself broke is recorded but files nothing;
+- one `test` item per leaf code node the map includes that has no tests at all — no tests file, or one with no test registered — which writes its first tests and links them from the node (at most 5 new per sweep, `--tests-max`);
+- one `ingest` item per node whose text breaks the standard (at most 10 new per sweep, `--text-max`).
+
+Every project has exactly one **Test sweep** schedule, owned by the engine: the first engine to serve the project creates it **paused**, every 4 hours. Resume it in the Work queue to turn it on; Pause turns it off. It cannot be deleted or closed, and Pause & edit changes its interval or command flags. When due it runs at once on its timer — it takes no agent slot and ignores the usage and budget holds, since a shell run spends no model time — but only while the project is Running. It writes nothing into the checkout (results live on the map), so its runs make no commit; neither do `iter rag sync` runs.
+
+Test scripts write any output files only under `$ITER_TEST_OUT`: a folder per test group outside the checkout, emptied at the start of every run, so it holds the last run and never a history. `iter_engine cli sweep --install-schedule --every 4h` turns it on from the command line (needs a user token).
 
 ### What is teststate?
 
@@ -496,6 +504,6 @@ The container: `docker logs iter4`. Native iter_data: `run/iter_data.log`. Engin
 - **Interface** — a contract between two parts, one operation per file.
 - **Use case** — a journey through the product and the parts it needs.
 - **Datasync** — graph edits from the web page waiting for an engine to apply them.
-- **Sweep** — the scheduled run of every test group that files fix items.
+- **Sweep** — the project's engine-owned Test sweep schedule: runs every test group on a timer and files work for what it finds.
 - **GraphRAG** — the semantic search index over documents and node files.
 - **MCP** — the Model Context Protocol server agents use to call iter.

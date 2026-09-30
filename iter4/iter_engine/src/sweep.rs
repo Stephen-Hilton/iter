@@ -36,9 +36,9 @@ fn step(state: Chain, own: &str) -> Chain {
     }
 }
 
-/// For each testgroup vertex id: its owner id and whether some chain from
-/// main includes it (the reasons are kept for the report).
-pub fn eligible(vertices: &[Value], edges: &[Value]) -> Vec<(String, String, bool, String)> {
+/// Every chain state each vertex is reached with, walking the executable DAG
+/// down from main (empty for a vertex main does not reach).
+fn chain_states<'a>(vertices: &'a [Value], edges: &'a [Value]) -> HashMap<&'a str, Vec<Chain>> {
     let byid: HashMap<&str, &Value> = vertices.iter().filter_map(|v| v["id"].as_str().map(|i| (i, v))).collect();
     let mut out_edges: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
     for e in edges {
@@ -67,6 +67,13 @@ pub fn eligible(vertices: &[Value], edges: &[Value]) -> Vec<(String, String, boo
     for (v, st) in &seen {
         owner_states.entry(v).or_default().push(*st);
     }
+    owner_states
+}
+
+/// For each testgroup vertex id: its owner id and whether some chain from
+/// main includes it (the reasons are kept for the report).
+pub fn eligible(vertices: &[Value], edges: &[Value]) -> Vec<(String, String, bool, String)> {
+    let owner_states = chain_states(vertices, edges);
     let mut result = Vec::new();
     // `tests` since iter4; maps synced before the rename say `testgroups`
     for e in edges.iter().filter(|e| e["kind"] == "tests" || e["kind"] == "testgroups") {
@@ -108,6 +115,9 @@ pub struct SweepOpts {
     /// check node text against docs/node_text_standard.md and file `ingest`
     /// items for failing nodes, at most this many new ones per sweep (0 = skip)
     pub text_max: usize,
+    /// file a `test` item for each code node with no tests, at most this many
+    /// new ones per sweep (0 = skip)
+    pub tests_max: usize,
 }
 
 /// `iter sweep`. Exit 0 all green, 1 something red/error, 2 could not run.
@@ -163,7 +173,7 @@ pub fn sweep_verb(c: &Conn, o: &SweepOpts) -> i32 {
         let mut red_labels: Vec<String> = Vec::new();
         for label in &labels {
             ran += 1;
-            match rt::run_group(&file, label, None, o.timeout_min) {
+            match rt::run_group_stamped(&file, label, None, o.timeout_min, false) {
                 Ok(run) => {
                     pass += run.pass;
                     total += run.total;
@@ -211,10 +221,105 @@ pub fn sweep_verb(c: &Conn, o: &SweepOpts) -> i32 {
         }
     }
     println!("sweep: {ran} group(s) run, {red} testgroup file(s) non-green, {skipped} skipped by teststate");
+    if o.tests_max > 0 && o.group.is_none() {
+        untested_sweep(api, c, &vertices, &edges, o);
+    }
     if o.text_max > 0 && o.group.is_none() {
         text_sweep(api, c, &vertices, o);
     }
     worst
+}
+
+/// Code nodes the sweep should ask the `test` agent to write tests for
+/// (2026-09-30): a LEAF code node (no child code nodes — a parent's tests
+/// live with its parts) that has no tests at all — no tests file linked, or
+/// linked files with no test registered in any group — and that some chain
+/// from main includes (an omitted or blocked node is left alone, as its
+/// tests would be). Sorted by path.
+pub fn untested(vertices: &[Value], edges: &[Value]) -> Vec<Value> {
+    let states = chain_states(vertices, edges);
+    let is_code = |id: &str| vertices.iter().any(|v| v["id"] == id && v["nodetype"] == "code");
+    let mut out: Vec<Value> = vertices
+        .iter()
+        .filter(|v| v["nodetype"] == "code")
+        .filter(|v| {
+            let id = v["id"].as_str().unwrap_or("");
+            let registered: u64 = edges
+                .iter()
+                .filter(|e| e["from"] == id && (e["kind"] == "tests" || e["kind"] == "testgroups"))
+                .filter_map(|e| vertices.iter().find(|t| t["id"] == e["to"]))
+                .flat_map(|t| t["groups"].as_array().cloned().unwrap_or_default())
+                .map(|g| g["tests"].as_u64().unwrap_or(0))
+                .sum();
+            let has_tests = registered > 0;
+            let has_code_children = edges.iter().any(|e| e["from"] == id && e["kind"] == "codenodes" && e["to"].as_str().map(is_code).unwrap_or(false));
+            let included = states.get(id).map(|s| s.contains(&Chain::Include)).unwrap_or(false);
+            !has_tests && !has_code_children && included
+        })
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    out
+}
+
+/// The no-tests half of the sweep (2026-09-30): each untested code node
+/// becomes one `test` item that plans, writes and runs its first tests and
+/// links them from the node file, so the next sweep runs them (and turns red
+/// ones into `code` items). Deduplicated per node by `check:no-tests` +
+/// `container:<path>`, capped per sweep.
+fn untested_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &SweepOpts) {
+    let nodes = untested(vertices, edges);
+    println!("no tests: {} code node(s) have no tests", nodes.len());
+    let mut filed = 0;
+    for v in &nodes {
+        if filed >= o.tests_max {
+            println!("no tests: stopping at {} new item(s) this sweep (--tests-max)", o.tests_max);
+            break;
+        }
+        let path = v["path"].as_str().unwrap_or("");
+        let name = v["name"].as_str().unwrap_or("");
+        let dir = v["dir"].as_str().map(String::from).unwrap_or_else(|| path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default());
+        let stem = path.rsplit('/').next().unwrap_or("").trim_end_matches(".code.iter.md");
+        let tests_file = format!("{dir}/test/{stem}.tests.iter.md");
+        if o.dry_run {
+            println!("  would file: tests for {path}");
+            filed += 1;
+            continue;
+        }
+        let codedirs: Vec<String> = v["codedirs"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+        let request = format!(
+            "Map node \"{name}\" ({path}) has no tests (no tests file, or one with no test registered), so the test sweep cannot tell whether its code works. Write its first tests.\n\n\
+             - Read the node file and the code it owns ({}) to learn what the part DOES — its inputs, outputs and the promises other parts rely on.\n\
+             - Create {tests_file} (or fill the tests file the node already links) with a `## Planned tests` list, simplest first, and a testgroup block.\n\
+             - Write one deterministic shell script per test beside it (exit 0 = passes, 1 = fails, last line `ITER_RESULT pass=… fail=… total=…`) and register each in the testgroup block, in order.\n\
+             - Link the tests from the node file: add `\"{{thisfiledir}}/test/*.tests.iter.md\"` to `children.tests` in {path} unless it is already there (keep every other field as it is).\n\
+             - A script that writes files writes them only under `$ITER_TEST_OUT` (emptied before every run, outside the checkout), never into the tree.\n\
+             - Run the group with `iter runtests --group <label>` and report what is green and what is red. Do not change the code under test: a red test is filed as a `code` item by the next sweep.",
+            if codedirs.is_empty() { "the files beside the node".to_string() } else { codedirs.join(", ") },
+        );
+        let mut tags = vec![
+            json!({"text": format!("{}no-tests", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""}),
+            json!({"text": format!("{}{}", iter_core::dedup::CONTAINER_TAG_PREFIX, path), "color": ""}),
+            json!({"text": "sweep", "color": ""}),
+        ];
+        for u in usecases_touching(vertices, edges, v["id"].as_str().unwrap_or("")) {
+            tags.push(json!({"text": format!("usecase:{u}"), "color": ""}));
+        }
+        let workid = std::env::var("ITER_WORKID").unwrap_or_default();
+        let body = json!({"name": format!("Tests first: write the first tests for {name}"), "agent": "test", "state": "queued",
+            "lockdirs": [path, format!("{dir}/test/")], "blockedby": [], "context": [], "model": "", "tags": tags,
+            "createdby": workid, "requestedby": if workid.is_empty() { "user" } else { "agent:exec" }, "prework": [], "postwork": [],
+            "request": request});
+        match api.post(&format!("/api/projects/{}/workitems", c.project), &body) {
+            Ok(created) if crate::cli::already_open(&created) => {}
+            Ok(created) => {
+                filed += 1;
+                let id = created["id"].as_str().unwrap_or("");
+                println!("  filed test item …{} for {path}", &id[id.len().saturating_sub(12)..]);
+            }
+            Err(e) => eprintln!("  could not file the test item for {path}: {e}"),
+        }
+    }
 }
 
 /// The node-text half of the sweep (2026-09-29): every code node whose text
@@ -336,7 +441,8 @@ fn file_fix_item(api: &Api, c: &Conn, tg: &Value, owner: Option<&Value>, labels:
          It belongs to \"{owner_name}\" ({owner_path}) on the architecture map, so this item locks that node's code.\n\n\
          - Reproduce: `\"$ITER_BIN\" runtests --project \"$ITER_PROJECT\" --group \"{first}\" --broken` (a green result parks this item as stale).\n\
          - Fix the CODE the tests describe; if a test itself is wrong, say so in your output and fix the test.\n\
-         - Finish with `--fixed` on the same group.\n\n\
+         - Finish with `--fixed` on the same group.\n\
+         - If the fix is very complex or risky (a redesign, a change across several parts, a data migration, anything you would want reviewed before it is built), do not attempt it: file one `plan` item with `\"$ITER_BIN\" add --agent plan` naming this group, the failing checks and why it is not a simple fix, then `\"$ITER_BIN\" wait --on <that item's id>` and end your turn. This item re-runs once the plan's work closes, and proves `--fixed` then.\n\n\
          Failing checks (last 30 lines of each):\n\n{logs}\n",
         when = iter_core::now_utc(),
         first = labels.first().cloned().unwrap_or_default(),
@@ -377,8 +483,11 @@ fn file_fix_item(api: &Api, c: &Conn, tg: &Value, owner: Option<&Value>, labels:
     }
 }
 
-/// `iter sweep --install-schedule --every <N>[m|h]`: create the scheduled exec
-/// template (users only — iter_data refuses schedules from engine tokens).
+/// `iter sweep --install-schedule --every <N>[m|h]`: turn the project's one
+/// test sweep on at this interval (2026-09-30). The engine normally creates
+/// it paused; this sets it `scheduled` with the new interval, or creates it
+/// when no engine has yet (users only — iter_data refuses a schedule from an
+/// engine token unless it is the paused template).
 pub fn install_schedule(c: &Conn, every: &str) -> i32 {
     let Some(api) = &c.api else {
         eprintln!("iter sweep: no iter_data connection");
@@ -394,21 +503,33 @@ pub fn install_schedule(c: &Conn, every: &str) -> i32 {
         eprintln!("iter sweep: --every must be like 30m or 4h");
         return 2;
     }
-    let body = json!({
-        "name": format!("Test sweep, every {every}: run the map's testgroups, file fix items for red ones"),
-        "agent": "test", "state": "scheduled", "exec_shell": "iter sweep",
-        "sched": {"kind": "every", "every_min": mins},
-        "lockdirs": [], "blockedby": [], "context": [], "tags": [{"text": "sweep", "color": ""}],
-        "requestedby": "user", "prework": [], "postwork": [],
-        "request": "Scheduled test sweep: `iter sweep` reads the architecture map, runs every testgroup a chain from main includes, records results on the map, and files one deduplicated fix item per red group.",
-    });
-    match api.post(&format!("/api/projects/{}/workitems", c.project), &body) {
-        Ok(r) => {
-            println!("schedule created: {} (every {mins} min)", r["id"].as_str().unwrap_or("?"));
+    let items = match api.get(&format!("/api/projects/{}/workitems", c.project)) {
+        Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        Err(e) => {
+            eprintln!("iter sweep: cannot read the work items: {e}");
+            return 2;
+        }
+    };
+    let existing = items.into_iter().find(|i| i["system"] == iter_core::TEST_SWEEP && !i["sched"].is_null());
+    let result = match existing {
+        Some(mut tpl) => {
+            let id = tpl["id"].as_str().unwrap_or("").to_string();
+            let version = tpl["version"].as_u64().unwrap_or(0);
+            tpl["state"] = json!("scheduled");
+            tpl["sched"]["every_min"] = json!(mins);
+            api.put(&format!("/api/projects/{}/workitems/{id}?expect_version={version}", c.project), &tpl).map(|_| id)
+        }
+        None => api
+            .post(&format!("/api/projects/{}/workitems", c.project), &iter_core::test_sweep_template_body("scheduled", mins))
+            .map(|r| r["id"].as_str().unwrap_or("?").to_string()),
+    };
+    match result {
+        Ok(id) => {
+            println!("test sweep on: {id} (every {mins} min)");
             0
         }
         Err(e) => {
-            eprintln!("iter sweep: could not create the schedule: {e}");
+            eprintln!("iter sweep: could not turn the test sweep on: {e}");
             1
         }
     }
@@ -454,5 +575,24 @@ mod tests {
         assert_eq!(r["tg2"], (false, "blocked".into()), "include below a block stays blocked");
         assert_eq!(r["tg3"].0, false);
         assert_eq!(r["tg4"], (false, "omitted on every chain".into()));
+    }
+
+    #[test]
+    fn untested_means_an_included_leaf_code_node_with_no_tests() {
+        // main -> P -> {L1, L2, L3, L4}; L1 has tests; L4 links a tests file
+        // with nothing registered; L3 is omitted; O is unlinked; P has
+        // children, so its tests live with its parts
+        let vs = vec![
+            v("m", "main", ""), v("P", "code", ""), v("L1", "code", ""), v("L2", "code", ""), v("L3", "code", "omit"),
+            v("L4", "code", ""), v("O", "code", ""),
+            json!({"id": "tg", "nodetype": "tests", "groups": [{"label": "a", "tests": 0}, {"label": "b", "tests": 2}]}),
+            json!({"id": "empty", "nodetype": "tests", "groups": [{"label": "c", "tests": 0}]}),
+        ];
+        let es = vec![
+            e("m", "root", "P"), e("P", "codenodes", "L1"), e("P", "codenodes", "L2"), e("P", "codenodes", "L3"),
+            e("P", "codenodes", "L4"), e("L1", "tests", "tg"), e("L4", "tests", "empty"),
+        ];
+        let ids: Vec<String> = untested(&vs, &es).iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, vec!["L2".to_string(), "L4".to_string()]);
     }
 }

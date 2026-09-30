@@ -26,6 +26,12 @@ pub fn ingest_at_startup(store: std::sync::Arc<dyn Storage>) {
             Ok(msg) => println!("[iter_data] GraphRAG guide: {msg}"),
             Err(e) => eprintln!("[iter_data] GraphRAG guide not ingested: {e}"),
         }
+        // the vector indexes are otherwise only checked after an ingest: a
+        // server restarted over a large, already-indexed store builds them now
+        match search::ensure_vector_indexes(a).await {
+            Ok(()) => println!("[iter_data] GraphRAG vector indexes: {}", search::vector_index_state(a).await["indexes"]),
+            Err(e) => eprintln!("[iter_data] GraphRAG vector indexes: {e}"),
+        }
     });
 }
 

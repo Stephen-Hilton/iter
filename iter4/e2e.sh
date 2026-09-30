@@ -481,6 +481,34 @@ LF=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$TPL" | jq -r 
 [ "$LF" != "2026-09-01T00:00:00Z" ] || fail "last_fired not updated"
 pass "schedule fired once, clone completed, template intact, last_fired claimed"
 
+# ---- test sweep (2026-09-30): engine-owned, created paused, undeletable; a run starts on its timer outside the cap and commits nothing ----
+SW=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -c '[.[]|select(.system=="test-sweep" and .sched!=null)]')
+[ "$(echo "$SW" | jq length)" = 1 ] || fail "expected the engine to create exactly one test sweep, got $(echo "$SW" | jq length)"
+SWID=$(echo "$SW" | jq -r '.[0].id')
+[ "$(echo "$SW" | jq -r '.[0].state')" = paused ] || fail "the test sweep was not created paused"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X DELETE "$BASE/api/projects/$PROJECT/workitems/$SWID")
+[ "$CODE" = 409 ] || fail "the test sweep was deletable (HTTP $CODE)"
+pass "the engine created one paused test sweep; delete refused"
+# turn it on, due now; cap 0, so only an outside-the-cap start can run it
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={"else":0}' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+SWT=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$SWID")
+echo "$SWT" | jq '.state="scheduled"|.sched.last_fired="2026-09-01T00:00:00Z"' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$SWID?expect_version=$(echo "$SWT" | jq .version)" -d @- >/dev/null || fail "resume the test sweep"
+HEAD_BEFORE=$(git -C "$SAMPLE" rev-parse HEAD 2>/dev/null || echo none)
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-sweep.log" 2>&1) || true
+grep -q "test sweep run .* starts on its timer, outside the cap" "$SCRATCH/engine-sweep.log" || { cat "$SCRATCH/engine-sweep.log"; fail "the test sweep run did not start outside the cap"; }
+git -C "$SAMPLE" log --format=%s 2>/dev/null | grep -q "^iter: Test sweep" && fail "a test sweep run committed"
+[ "$(git -C "$SAMPLE" rev-parse HEAD 2>/dev/null || echo none)" = "$HEAD_BEFORE" ] || fail "HEAD moved during the test sweep run"
+pass "the test sweep run started with cap 0 and committed nothing"
+# leave it off, and its run closed, for the sections below
+SWT=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$SWID")
+echo "$SWT" | jq '.state="paused"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$SWID?expect_version=$(echo "$SWT" | jq .version)" -d @- >/dev/null
+for R in $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r ".[]|select(.source_schedule==\"$SWID\" and (.state|IN(\"complete\",\"failed\")|not))|.id"); do
+  RW=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$R")
+  echo "$RW" | jq '.state="complete"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$R?expect_version=$(echo "$RW" | jq .version)" -d @- >/dev/null || true
+done
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={">98%":0,"else":2}' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+
 # ---------- usage%-driven account gating ----------
 export ITER_USAGE_DIR="$SCRATCH/usage"
 mkdir -p "$ITER_USAGE_DIR"
@@ -1119,7 +1147,10 @@ EX=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR/details" |
 grep -q "EXPLAINED-MARKER" <<<"$EX" || fail "no 'explained' detail row on the closed item: $(keys_of "$GR")"
 [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR" | jq -r '.explain_requested+.explain_engine')" = "" ] || fail "explain_requested/explain_engine not cleared"
 [ "$(st_of "$GR")" = complete ] || fail "explain changed the item's state"
-grep -q -- "--allowedTools Read,Glob,Grep --disallowedTools Bash,Edit,Write" "$GATE_LOG" || { grep -A3 "explain tools" "$GATE_LOG" | tail -5; fail "explain session was not read-only"; }
+# read-only: Read/Glob/Grep plus (since 2026-09-29) the iter MCP server's read-only tools — never one that changes state
+grep -qE -- "--allowedTools Read,Glob,Grep(,mcp__iter__[a-z_,]+)? --disallowedTools Bash,Edit,Write" "$GATE_LOG" || { grep -A3 "explain tools" "$GATE_LOG" | tail -5; fail "explain session was not read-only"; }
+grep -E -- "--allowedTools Read,Glob,Grep,mcp__iter__" "$GATE_LOG" | grep -qE "mcp__iter__(workitem_(create|ask|reject|wait|doc|block)|rag_add_document|rag_link_document)" \
+  && fail "explain session was given a state-changing MCP tool"
 for m in "# Explain this work item simply (ELI5)" "READ-ONLY" "Title: gate-recovers" "### request" "### response" "main.iter.md" "reqs/techreq.md"; do
   grep -qF -- "$m" "$GATE_PROMPTS/eli5-prompt.txt" || { head -40 "$GATE_PROMPTS/eli5-prompt.txt"; fail "ELI5 prompt lacks: $m"; }
 done

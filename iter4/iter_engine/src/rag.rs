@@ -40,6 +40,11 @@ const OCR_PAGES_PER_CALL: usize = 6;
 const JOBS_PER_RUN: usize = 25;
 
 pub const DEFAULT_MODEL: &str = "haiku";
+/// Chunks per Summary agent call unless the `summary` agent record sets `batch`.
+pub const DEFAULT_BATCH: u64 = 16;
+/// One rollup prompt's text at most: bigger documents are rolled up in
+/// chapter windows first, then from their chapter summaries.
+pub const ROLLUP_WINDOW_CHARS: usize = 40_000;
 pub const DEFAULT_TIMEOUT_SEC: u64 = 300;
 
 /// Bumped whenever chunking or embedding input changes: part of every node
@@ -126,6 +131,11 @@ pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool)
     if vertices.is_empty() {
         return Err(format!("the map of '{project}' has no node files — run `iter sync` first"));
     }
+    // settings: which node types to index (empty = all) and extra repo globs
+    let settings = api.get(&format!("/api/projects/{project}/rag/settings")).unwrap_or(json!({}));
+    let strs = |k: &str| -> Vec<String> { settings[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() };
+    let node_types = strs("node_types");
+    let vertices: Vec<Value> = vertices.into_iter().filter(|v| node_types.is_empty() || node_types.iter().any(|t| v["nodetype"] == t.as_str())).collect();
     let indexed: Value = if force { json!({}) } else { api.get(&format!("/api/projects/{project}/rag/nodes/hashes")).map_err(|e| e.to_string())? };
     let mut r = SyncReport { total: vertices.len(), ..Default::default() };
     let mut keep = Vec::new();
@@ -152,7 +162,26 @@ pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool)
     if dry_run {
         return Ok(r);
     }
-    let mut prepared = Vec::new();
+    // prepare and send as we go (~1500 chunks per PUT): a large project's
+    // vectors never sit in memory all at once
+    let total_changed = changed.len();
+    let mut batch: Vec<Value> = Vec::new();
+    let mut batch_chunks = 0usize;
+    let mut done = 0usize;
+    let flush = |batch: &mut Vec<Value>, keep: Option<&Vec<String>>, r: &mut SyncReport| -> Result<(), String> {
+        let mut body = json!({"nodes": batch});
+        if let Some(k) = keep {
+            body["keep"] = json!(k);
+        }
+        let out = put_long(api, &format!("/api/projects/{project}/rag/nodes"), &body)?;
+        r.added += out["added"].as_u64().unwrap_or(0);
+        r.changed += out["changed"].as_u64().unwrap_or(0);
+        r.unchanged += out["unchanged"].as_u64().unwrap_or(0);
+        r.removed += out["removed"].as_u64().unwrap_or(0);
+        r.failed.extend(out["failed"].as_array().cloned().unwrap_or_default());
+        batch.clear();
+        Ok(())
+    };
     for (v, path, raw, h) in changed {
         let name = v["name"].as_str().unwrap_or("");
         let nodetype = v["nodetype"].as_str().unwrap_or("");
@@ -163,27 +192,110 @@ pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool)
                                  ("description", v["description"].clone()), ("hash", json!(h)), ("format", json!("markdown"))] {
                     p[k] = val;
                 }
-                prepared.push(p);
+                batch_chunks += p["chunks"].as_array().map(|a| a.len()).unwrap_or(0);
+                batch.push(p);
+                done += 1;
+                if batch_chunks >= 1500 || batch.len() >= SYNC_BATCH {
+                    flush(&mut batch, None, &mut r)?;
+                    batch_chunks = 0;
+                    if total_changed > SYNC_BATCH {
+                        println!("[rag] {project}: {done} of {total_changed} node files indexed so far");
+                    }
+                }
             }
             Err(e) => r.failed.push(json!({"path": path, "error": e})),
         }
     }
-    let batches: Vec<&[Value]> = if prepared.is_empty() { vec![&[]] } else { prepared.chunks(SYNC_BATCH).collect() };
-    let n = batches.len();
-    for (i, b) in batches.into_iter().enumerate() {
-        // the keep list rides on the last call, after every change is in
-        let mut body = json!({"nodes": b});
-        if i + 1 == n {
-            body["keep"] = json!(keep);
+    // the keep list rides on the last call, after every change is in
+    flush(&mut batch, Some(&keep), &mut r)?;
+    let globs = strs("repo_globs");
+    if !globs.is_empty() || !api.get(&format!("/api/projects/{project}/rag/files/hashes")).map(|h| h.as_object().map(|o| o.is_empty()).unwrap_or(true)).unwrap_or(true) {
+        sync_repo_files(api, project, topdir, &globs, force, &mut r)?;
+    }
+    Ok(r)
+}
+
+/// Files of the checkout matching `globs` ({topdir}-relative, e.g.
+/// `core/fleet_shared/**/*.md`), indexed where they live: only changed ones
+/// are extracted, chunked, embedded and sent; files that no longer match drop
+/// out. Node files (`*.iter.md`) are left to the node sweep.
+fn sync_repo_files(api: &Api, project: &str, topdir: &Path, globs: &[String], force: bool, r: &mut SyncReport) -> Result<(), String> {
+    let top = topdir.canonicalize().unwrap_or_else(|_| topdir.to_path_buf());
+    let mut paths: std::collections::BTreeSet<std::path::PathBuf> = Default::default();
+    for g in globs {
+        let rel = g.trim_start_matches("{topdir}").trim_start_matches('/');
+        let pattern = top.join(rel).to_string_lossy().into_owned();
+        for p in glob::glob(&pattern).map_err(|e| format!("repo_globs {g}: {e}"))?.flatten() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if p.is_file() && !name.ends_with(".iter.md") && !p.components().any(|c| c.as_os_str() == ".git") {
+                paths.insert(p);
+            }
         }
-        let out = put_long(api, &format!("/api/projects/{project}/rag/nodes"), &body)?;
+    }
+    let indexed: Value = if force { json!({}) } else { api.get(&format!("/api/projects/{project}/rag/files/hashes")).map_err(|e| e.to_string())? };
+    let mut keep = Vec::new();
+    let mut batch: Vec<Value> = Vec::new();
+    let mut batch_chunks = 0usize;
+    let send = |batch: &mut Vec<Value>, keep: Option<&Vec<String>>, r: &mut SyncReport| -> Result<(), String> {
+        let mut body = json!({"files": batch});
+        if let Some(k) = keep {
+            body["keep"] = json!(k);
+        }
+        let out = put_long(api, &format!("/api/projects/{project}/rag/files"), &body)?;
         r.added += out["added"].as_u64().unwrap_or(0);
         r.changed += out["changed"].as_u64().unwrap_or(0);
         r.unchanged += out["unchanged"].as_u64().unwrap_or(0);
         r.removed += out["removed"].as_u64().unwrap_or(0);
         r.failed.extend(out["failed"].as_array().cloned().unwrap_or_default());
+        batch.clear();
+        Ok(())
+    };
+    r.total += paths.len();
+    for p in &paths {
+        let rel = format!("{{topdir}}/{}", p.strip_prefix(&top).unwrap_or(p).to_string_lossy());
+        keep.push(rel.clone());
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                r.unreadable.push(format!("{rel}: {e}"));
+                continue;
+            }
+        };
+        let h = format!("{}", sha(&format!("{INDEX_VERSION}\n{}", String::from_utf8_lossy(&bytes))));
+        if indexed.get(&rel).and_then(|x| x.as_str()) == Some(h.as_str()) {
+            continue;
+        }
+        r.sent += 1;
+        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let prepared = extract::extract(&fname, &bytes).and_then(|ex| {
+            if ex.needs_ocr {
+                return Err(format!("{fname}: a scanned PDF — upload it on the GraphRAG tab to have it OCR'd"));
+            }
+            let title = ex.text.lines().find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string())).filter(|t| !t.is_empty()).unwrap_or_else(|| fname.clone());
+            prepare(&title, &ex.text).map(|mut v| {
+                v["title"] = json!(title);
+                v["format"] = json!(ex.format);
+                v["pages"] = json!(ex.pages);
+                v
+            })
+        });
+        match prepared {
+            Ok(mut v) => {
+                v["path"] = json!(rel);
+                v["hash"] = json!(h);
+                batch_chunks += v["chunks"].as_array().map(|a| a.len()).unwrap_or(0);
+                batch.push(v);
+                // a PUT carries ~1500 chunks at most (each with its vector)
+                if batch_chunks >= 1500 {
+                    send(&mut batch, None, r)?;
+                    batch_chunks = 0;
+                    println!("[rag] {project}: {} of {} repo files indexed so far", keep.len(), paths.len());
+                }
+            }
+            Err(e) => r.failed.push(json!({"path": rel, "error": e})),
+        }
     }
-    Ok(r)
+    send(&mut batch, Some(&keep), r)
 }
 
 /// A PUT that may take longer than the client's 30 s default (embedding a batch).
@@ -282,6 +394,101 @@ pub fn rollup_prompt(persona: &str, job: &Value) -> String {
     p
 }
 
+/// Characters of summary text a document brings to a rollup.
+fn doc_text_len(d: &Value) -> usize {
+    d["chapters"].as_array().into_iter().flatten().map(|ch| {
+        ch["title"].as_str().map(str::len).unwrap_or(0) + 40
+            + ch["summaries"].as_array().into_iter().flatten().map(|s| s["summary"].as_str().map(str::len).unwrap_or(0) + s["heading"].as_str().map(str::len).unwrap_or(0) + 8).sum::<usize>()
+    }).sum()
+}
+
+/// One model call, its spend recorded; the answer's JSON, or why not.
+fn ask_model(api: &Api, project: &Project, account: &str, model: &str, timeout: u64, prompt: &str) -> Result<Value, String> {
+    let extra = vec!["--tools".to_string(), String::new(), "--max-turns".to_string(), "2".to_string(), "--no-session-persistence".to_string()];
+    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    let out = crate::work::spawn_claude(project, &cwd, account, prompt, model, &extra, timeout).map(|raw| crate::work::parse_claude_stream(account, &raw).1)?;
+    if out.cost_usd > 0.0 || out.input_tokens > 0 {
+        let _ = api.post(
+            &format!("/api/projects/{}/spend", project.name),
+            &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
+                    "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": "", "agent": "summary"}),
+        );
+    }
+    if out.subtype != "success" {
+        return Err(format!("the Summary agent's session ended with '{}'", out.subtype));
+    }
+    parse_json_answer(&out.text).ok_or_else(|| format!("the Summary agent's answer was not JSON: {}", out.text.chars().take(200).collect::<String>()))
+}
+
+/// Chapter windows of at most ROLLUP_WINDOW_CHARS (a chapter never splits).
+pub fn chapter_windows(chapters: &[Value]) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = Vec::new();
+    let mut cur: Vec<Value> = Vec::new();
+    let mut n = 0usize;
+    for ch in chapters {
+        let len = doc_text_len(&json!({"chapters": [ch]}));
+        if !cur.is_empty() && n + len > ROLLUP_WINDOW_CHARS {
+            out.push(std::mem::take(&mut cur));
+            n = 0;
+        }
+        n += len;
+        cur.push(ch.clone());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Roll up one document that fits no single prompt: its chapters in windows
+/// (chapter summaries from their chunk summaries), then the document from its
+/// chapter summaries. Returns a `docs[]` entry of the done report.
+fn rollup_big(persona: &str, d: &Value, ask: &dyn Fn(&str) -> Result<Value, String>) -> Result<Value, String> {
+    let id = d["id"].clone();
+    if doc_text_len(d) <= ROLLUP_WINDOW_CHARS {
+        let a = ask(&rollup_prompt(persona, &json!({"docs": [d]})))?;
+        let entry = a["docs"].as_array().and_then(|x| x.first()).cloned()
+            .or_else(|| a["doc_summary"].is_string().then(|| json!({"doc_summary": a["doc_summary"], "chapters": a["chapters"]})))
+            .ok_or("no document summary in the answer")?;
+        return Ok(json!({"doc": id, "doc_summary": entry["doc_summary"], "chapters": entry["chapters"]}));
+    }
+    let chapters = d["chapters"].as_array().cloned().unwrap_or_default();
+    let mut chapter_summaries: Vec<Value> = Vec::new();
+    for w in chapter_windows(&chapters) {
+        let mut p = format!(
+            "{persona}\n\n# Task\n\nBelow are passage summaries from part of the document \"{}\" ({}), grouped by chapter. For each chapter write a summary of 2–4 sentences (at most 90 words).\n\
+             Answer with JSON only, no prose and no code fence: {{\"chapters\": [{{\"idx\": 0, \"summary\": \"…\"}}]}} — one entry per chapter, idx exactly as given.\n\n",
+            d["title"].as_str().unwrap_or(""), d["path"].as_str().unwrap_or("")
+        );
+        for ch in &w {
+            p.push_str(&format!("<chapter idx=\"{}\" title=\"{}\">\n", ch["idx"], ch["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("(untitled)").replace('"', "'")));
+            for s in ch["summaries"].as_array().into_iter().flatten() {
+                p.push_str(&format!("- {}\n", s["summary"].as_str().unwrap_or("")));
+            }
+            p.push_str("</chapter>\n");
+        }
+        let a = ask(&p)?;
+        chapter_summaries.extend(a["chapters"].as_array().cloned().unwrap_or_default());
+    }
+    // the document from its chapter summaries (sampled evenly if even those are too long)
+    let titles: std::collections::HashMap<u64, String> = chapters.iter().filter_map(|c| Some((c["idx"].as_u64()?, c["title"].as_str().unwrap_or("").to_string()))).collect();
+    let lines: Vec<String> = chapter_summaries.iter().filter_map(|c| {
+        let i = c["idx"].as_u64()?;
+        Some(format!("- [{}] {}", titles.get(&i).map(String::as_str).unwrap_or(""), c["summary"].as_str()?))
+    }).collect();
+    let total: usize = lines.iter().map(String::len).sum();
+    let step = (total / ROLLUP_WINDOW_CHARS).max(1);
+    let body: String = lines.iter().step_by(step).map(|l| format!("{l}\n")).collect();
+    let p = format!(
+        "{persona}\n\n# Task\n\nBelow are the chapter summaries of the document \"{}\" ({}). Write a summary of the whole document in 3–6 sentences (at most 150 words): what it is, what it covers, and its key facts or decisions.\n\
+         Answer with JSON only, no prose and no code fence: {{\"doc_summary\": \"…\"}}\n\n{body}",
+        d["title"].as_str().unwrap_or(""), d["path"].as_str().unwrap_or("")
+    );
+    let a = ask(&p)?;
+    let sm = a["doc_summary"].as_str().ok_or("no document summary in the answer")?;
+    Ok(json!({"doc": id, "doc_summary": sm, "chapters": chapter_summaries}))
+}
+
 /// The first JSON object in a model answer (tolerates a code fence or a
 /// preamble). An answer that is not valid JSON as a whole (a stray quote in
 /// one summary, a cut-off tail) still yields every `{"id": …, "summary": …}`
@@ -345,7 +552,8 @@ pub fn summarize_waiting(api: &Api, engine: &str, project: &Project, topdir: &st
     let base = format!("/api/projects/{}/rag/work", project.name);
     let mut done = 0;
     for _ in 0..JOBS_PER_RUN {
-        let job = match api.post(&format!("{base}/claim"), &json!({"engine": engine})) {
+        let batch = agent_def["batch"].as_u64().unwrap_or(DEFAULT_BATCH).clamp(1, 32);
+        let job = match api.post(&format!("{base}/claim"), &json!({"engine": engine, "max_chunks": batch})) {
             Ok(j) => j,
             Err(e) => {
                 eprintln!("[engine] {}: GraphRAG claim failed: {e}", project.name);
@@ -361,11 +569,49 @@ pub fn summarize_waiting(api: &Api, engine: &str, project: &Project, topdir: &st
             done += 1;
             continue;
         }
-        let prompt = if kind == "chunks" { chunks_prompt(&persona, &job) } else { rollup_prompt(&persona, &job) };
         let started = std::time::Instant::now();
+        let docs_in = rollup_docs(&job);
+        if kind == "rollup" && docs_in.iter().map(doc_text_len).sum::<usize>() > ROLLUP_WINDOW_CHARS {
+            // too much for one prompt: each document on its own, big ones by chapter windows
+            let ask = |prompt: &str| ask_model(api, project, account, &model, timeout, prompt);
+            let mut docs = Vec::new();
+            let mut errors = Vec::new();
+            for d in &docs_in {
+                match rollup_big(&persona, d, &ask) {
+                    Ok(entry) => docs.push(entry),
+                    Err(e) => errors.push(format!("{}: {e}", d["title"].as_str().unwrap_or(""))),
+                }
+            }
+            let embedder = embed::get_or_download();
+            for entry in docs.iter_mut() {
+                let title = docs_in.iter().find(|d| d["id"] == entry["doc"]).and_then(|d| d["title"].as_str()).unwrap_or("").to_string();
+                if let (Ok(e), Some(sm)) = (&embedder, entry["doc_summary"].as_str()) {
+                    entry["vec_sum"] = e.embed(&[format!("{title} — {}", sm.trim())]).ok().and_then(|mut v| v.pop()).map(|v| json!(v)).unwrap_or(Value::Null);
+                }
+            }
+            let mut report = json!({"engine": engine, "job": "rollup", "job_id": job["job_id"], "model": model, "docs": docs, "error": errors.join("; ")});
+            if let Some(sc) = job["scope"].as_str() {
+                report["scope"] = json!(sc);
+            }
+            if let Ok(e) = &embedder {
+                report["embed_model"] = json!(e.stamp);
+            }
+            let titles = docs_in.iter().filter_map(|d| d["title"].as_str()).collect::<Vec<_>>().join(", ");
+            match api.post(&format!("{base}/done"), &report) {
+                Ok(r) => println!("[engine] {}: GraphRAG rollup (by chapter windows) '{titles}' in {}s ({model}) — {r}", project.name, started.elapsed().as_secs()),
+                Err(e) => eprintln!("[engine] {}: GraphRAG could not report job {}: {e}", project.name, job["job_id"]),
+            }
+            done += 1;
+            continue;
+        }
+        let prompt = if kind == "chunks" { chunks_prompt(&persona, &job) } else { rollup_prompt(&persona, &job) };
         // no tools, no session on disk: a pure text-in, JSON-out call
         let extra = vec!["--tools".to_string(), String::new(), "--max-turns".to_string(), "2".to_string(), "--no-session-persistence".to_string()];
-        let run = crate::work::spawn_claude(project, topdir, account, &prompt, &model, &extra, timeout).map(|raw| crate::work::parse_claude_stream(account, &raw).1);
+        // run from the temp dir, not the checkout: Claude Code would otherwise
+        // load the project's CLAUDE.md into every summary call
+        let _ = topdir;
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let run = crate::work::spawn_claude(project, &cwd, account, &prompt, &model, &extra, timeout).map(|raw| crate::work::parse_claude_stream(account, &raw).1);
         let (answer, error) = match &run {
             Ok(out) if out.subtype == "success" => match parse_json_answer(&out.text) {
                 Some(v) => (v, String::new()),
@@ -578,6 +824,31 @@ mod tests {
         assert!(r.contains("<document id=\"d1\" title=\"D\"") && r.contains("<chapter idx=\"0\" title=\"(untitled)\">\n- [A] s1"));
         // an older server's single-document job
         assert_eq!(rollup_docs(&json!({"doc": {"id": "x"}, "chapters": []}))[0]["id"], "x");
+    }
+
+    #[test]
+    fn big_documents_roll_up_in_chapter_windows() {
+        let ch = |i: u64, n: usize| json!({"idx": i, "title": format!("c{i}"), "summaries": (0..n).map(|_| json!({"heading": "", "summary": "s".repeat(990)})).collect::<Vec<_>>()});
+        let chapters: Vec<Value> = (0..10).map(|i| ch(i, 15)).collect(); // ~15k chars each
+        let w = chapter_windows(&chapters);
+        assert_eq!(w.len(), 5, "two ~15k chapters per 40k window");
+        assert_eq!(w.iter().map(|x| x.len()).sum::<usize>(), 10);
+        // a scripted model: chapter windows, then the document
+        let calls = std::cell::RefCell::new(0);
+        let ask = |p: &str| -> Result<Value, String> {
+            *calls.borrow_mut() += 1;
+            if p.contains("\"chapters\": [") && p.contains("<chapter idx=") {
+                let ids: Vec<u64> = p.match_indices("<chapter idx=\"").map(|(i, _)| p[i + 14..].split('"').next().unwrap().parse().unwrap()).collect();
+                Ok(json!({"chapters": ids.iter().map(|i| json!({"idx": i, "summary": format!("chapter {i}")})).collect::<Vec<_>>()}))
+            } else {
+                Ok(json!({"doc_summary": "the whole"}))
+            }
+        };
+        let d = json!({"id": "d1", "title": "Big", "path": "{topdir}/big.md", "chapters": chapters});
+        let entry = rollup_big("P", &d, &ask).unwrap();
+        assert_eq!(entry["doc_summary"], "the whole");
+        assert_eq!(entry["chapters"].as_array().unwrap().len(), 10);
+        assert_eq!(*calls.borrow(), 6, "5 windows + 1 document call");
     }
 
     #[test]

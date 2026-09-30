@@ -18,7 +18,7 @@ flowmap:
   - step: 1
     from: '{topdir}/iter_engine/src/loop.code.iter.md'
     to: '{topdir}/iter_engine/src/mapsync.code.iter.md'
-    what: "When the sweep's schedule comes due, the engine scheduler loop queues a copy of the scheduled test item and runs it; its shell command is `iter sweep`."
+    what: "When the project's Test sweep schedule comes due, the engine scheduler loop queues a copy of it and starts that copy at once, outside the agent cap and the usage holds; its shell command is `iter sweep`."
     plain: "The schedule starts a sweep."
     evidence: "iter_engine/src/engine.rs: fire_schedules; iter_engine/src/sweep.rs: sweep_verb"
   - step: 2
@@ -62,8 +62,8 @@ flowmap:
 
 # A red test becomes one work item
 
-A project wants its tests run regularly and every failure turned into work without a person watching. `iter sweep --install-schedule --every 4h` sets up a scheduled test item whose command is `iter sweep`.
+A project wants its tests run regularly and every failure turned into work without a person watching. Every project has one Test sweep schedule, created paused by the engine; a person turns it on with Resume schedule (or `iter sweep --install-schedule --every 4h`). It cannot be deleted, only paused.
 
-When the schedule comes due, an engine runs the sweep. It reads the project's stored map and walks it from main, applying each part's test setting, to decide which test groups may run. Each allowed group runs through the test group runner, and its result (green, red or error, with counts) is recorded on the map, where the Project graph shows it.
+When the schedule comes due, an engine runs the sweep at once — no agent slot, no usage hold — as long as the project is Running. It reads the project's stored map and walks it from main, applying each part's test setting, to decide which test groups may run. Each allowed group runs through the test group runner, and its result (green, red or error, with counts) is recorded on the map, where the Project graph shows it.
 
 For every red group the sweep files one fix item for the code agent, locked to the folders of the part that owns the test and carrying the failing output. The item's `check:` and `container:` tags stop a second copy: while a fix item for that group is open, later sweeps file nothing new. A group that errors (the script itself broke) is recorded but not filed, because a broken test tool is not a defect in the code.

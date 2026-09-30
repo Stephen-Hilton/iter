@@ -254,16 +254,22 @@ pub fn sync_verb(c: &Conn, dry_run: bool, force: bool, fix: bool, read_only: boo
 /// last one pushed. Returns the new hash (or the old one when nothing moved).
 /// Quiet unless something was written or failed.
 pub fn sync_if_changed(api: &Api, project_name: &str, topdir: &Path, last_hash: &str) -> String {
+    sync_if_changed_ro(api, project_name, topdir, last_hash, false)
+}
+
+/// `read_only`: a checkout the engine may only read — files without an id get
+/// a derived one in the snapshot (as `iter sync --read-only`), none is written.
+pub fn sync_if_changed_ro(api: &Api, project_name: &str, topdir: &Path, last_hash: &str, read_only: bool) -> String {
     let c = Conn { api: Some(api.clone()), project: project_name.to_string(), topdir: topdir.to_path_buf(), source: "engine".into() };
     let project = Project::load(topdir);
-    if !ids::check(&project).clean() {
+    if !read_only && !ids::check(&project).clean() {
         match fix_ids(&c, &project, false) {
             Ok(ch) if !ch.is_empty() => println!("[engine] {project_name}: gave {} node file(s) an id", ch.len()),
             Ok(_) => {}
             Err(e) => eprintln!("[engine] {project_name}: id repair failed: {e}"),
         }
     }
-    let snap = graph::snapshot(&project);
+    let snap = graph::snapshot_with(&project, &graph::SnapOpts { derive_ids: read_only, actors_file: None });
     if snap.hash == last_hash {
         return snap.hash;
     }

@@ -81,6 +81,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/rag/docs/{id}/chunks", put(pipeline::doc_chunks_put))
         .route("/api/projects/{name}/rag/nodes", put(pipeline::nodes_put))
         .route("/api/projects/{name}/rag/nodes/hashes", get(pipeline::node_hashes))
+        .route("/api/projects/{name}/rag/files", put(pipeline::files_put))
+        .route("/api/projects/{name}/rag/files/hashes", get(pipeline::file_hashes))
         .route("/api/projects/{name}/rag/search", post(search::search))
         .route("/api/projects/{name}/rag/work/claim", post(pipeline::work_claim))
         .route("/api/projects/{name}/rag/work/done", post(pipeline::work_done))
@@ -171,6 +173,11 @@ pub async fn ensure_schema(a: &ArangoBackend) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     }
+    // chunks written before 2026-09-30 carry vec_sum: null while they wait for
+    // a summary; the sparse vector index needs the attribute absent instead
+    a.aql("FOR c IN rag_chunk FILTER HAS(c, 'vec_sum') AND c.vec_sum == null UPDATE c WITH {vec_sum: null} IN rag_chunk OPTIONS {keepNull: false}", json!({}))
+        .await
+        .map_err(|e| e.to_string())?;
     search::ensure_view(a).await
 }
 
@@ -185,7 +192,10 @@ pub async fn settings(a: &ArangoBackend, project: &str) -> Value {
         .filter(|v| !v.is_null());
     let docs_dir = row.as_ref().map(|r| s(r, "docs_dir").to_string()).filter(|d| !d.is_empty()).unwrap_or_else(|| DEFAULT_DOCS_DIR.to_string());
     let gitignore = row.as_ref().and_then(|r| r.get("docs_gitignore")).and_then(|b| b.as_bool()).unwrap_or(false);
-    json!({"docs_dir": docs_dir, "docs_gitignore": gitignore})
+    let list = |k: &str| -> Value { row.as_ref().and_then(|r| r.get(k)).filter(|v| v.is_array()).cloned().unwrap_or(json!([])) };
+    // node_types: which node files the change sweep indexes (empty = all);
+    // repo_globs: other checkout files it indexes where they live (never copied)
+    json!({"docs_dir": docs_dir, "docs_gitignore": gitignore, "node_types": list("node_types"), "repo_globs": list("repo_globs")})
 }
 
 async fn settings_get(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -218,13 +228,28 @@ async fn settings_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
         None => s(&before, "docs_dir").to_string(),
     };
     let gi = body.get("docs_gitignore").and_then(|b| b.as_bool()).unwrap_or(before["docs_gitignore"].as_bool().unwrap_or(false));
+    let strings = |k: &str| -> Result<Vec<String>, ApiError> {
+        match body.get(k) {
+            None => Ok(before[k].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect()),
+            Some(Value::Array(a)) => Ok(a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()),
+            Some(_) => Err(bad(format!("{k} must be a list of strings"))),
+        }
+    };
+    let node_types = strings("node_types")?;
+    let repo_globs = strings("repo_globs")?;
+    for g in &repo_globs {
+        let r = g.trim_start_matches("{topdir}").trim_start_matches('/');
+        if r.split('/').any(|seg| seg == "..") || g.starts_with('/') && !g.starts_with("{topdir}") {
+            return Err(bad(format!("repo_globs stay inside the checkout: {g}")));
+        }
+    }
     if dir == "{topdir}/" && gi {
         return Err(bad("the docs directory is the whole checkout: it cannot be git-ignored"));
     }
     a.aql_retry(
-        "UPSERT {_key: @k} INSERT {_key: @k, project: @p, docs_dir: @d, docs_gitignore: @g, updated: @now, by: @by}
-         UPDATE {docs_dir: @d, docs_gitignore: @g, updated: @now, by: @by} IN rag_setting",
-        json!({"k": crate::arango::doc_key(&name, "-"), "p": name, "d": dir, "g": gi, "now": now_utc(), "by": u.sub}),
+        "UPSERT {_key: @k} INSERT {_key: @k, project: @p, docs_dir: @d, docs_gitignore: @g, node_types: @nt, repo_globs: @rg, updated: @now, by: @by}
+         UPDATE {docs_dir: @d, docs_gitignore: @g, node_types: @nt, repo_globs: @rg, updated: @now, by: @by} IN rag_setting",
+        json!({"k": crate::arango::doc_key(&name, "-"), "p": name, "d": dir, "g": gi, "nt": node_types, "rg": repo_globs, "now": now_utc(), "by": u.sub}),
     )
     .await
     .map_err(backend)?;
@@ -241,7 +266,7 @@ async fn settings_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
         rows.push(crate::datasync::create(st.store.as_ref(), &name, &op, &u.sub).await?["id"].clone());
     }
     st.store.bump_seq(&name, "rag").await?;
-    Ok(Json(json!({"docs_dir": dir, "docs_gitignore": gi, "datasync": rows})))
+    Ok(Json(json!({"docs_dir": dir, "docs_gitignore": gi, "node_types": node_types, "repo_globs": repo_globs, "datasync": rows})))
 }
 
 // ---------- status ----------
@@ -436,11 +461,40 @@ async fn docs_list(_u: AuthUser, State(st): Ctx, Path(name): Path<String>, Query
         )
         .await
         .map_err(backend)?;
+    let checkouts = checkouts(st.store.as_ref(), &name).await;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        out.push(with_store_state(st.store.as_ref(), &name, clean(r)).await);
+        let mut d = with_store_state(st.store.as_ref(), &name, clean(r)).await;
+        d["locations"] = locations(&checkouts, s(&d, "path"));
+        out.push(d);
     }
     Ok(Json(Value::Array(out)))
+}
+
+/// The checkouts of `project`: (engine, topdir, seen in the last 2 minutes),
+/// from every engine record that serves it.
+pub(crate) async fn checkouts(store: &dyn Storage, project: &str) -> Vec<(String, String, bool)> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let key = project.replace('~', "~0").replace('/', "~1");
+    let mut v: Vec<(String, String, bool)> = store
+        .scan("engine")
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let top = e.pointer(&format!("/projects/{key}/dirs/topdir"))?.as_str()?.trim_end_matches('/').to_string();
+            Some((s(&e, "name").to_string(), top, s(&e, "last_seen") >= cutoff.as_str()))
+        })
+        .collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    v
+}
+
+/// Where a document's file sits on each engine's machine: `{topdir}/…`
+/// resolved against every checkout of the project (live engines first).
+pub(crate) fn locations(checkouts: &[(String, String, bool)], path: &str) -> Value {
+    let Some(rel) = path.strip_prefix("{topdir}") else { return json!([]) };
+    Value::Array(checkouts.iter().map(|(e, top, live)| json!({"engine": e, "path": format!("{top}{rel}"), "live": live})).collect())
 }
 
 pub(crate) async fn with_store_state(store: &dyn Storage, project: &str, mut doc: Value) -> Value {
@@ -550,6 +604,7 @@ async fn doc_resummarize(u: AuthUser, State(st): Ctx, Path((name, id)): Path<(St
         .aql_retry(
             "FOR c IN rag_chunk FILTER c.project == @p AND c.doc == @d
              UPDATE c WITH {sum_state: 'pending', summary: '', vec_sum: null, sum_attempts: 0, sum_engine: '', sum_expires: '', sum_error: ''} IN rag_chunk
+             OPTIONS {keepNull: false}
              RETURN 1",
             json!({"p": name, "d": id}),
         )
@@ -655,6 +710,25 @@ async fn schedule_create(u: AuthUser, st: Ctx, Path(name): Path<String>, Json(re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollup_samples_fit_their_budget() {
+        let items: Vec<Value> = (0..100).map(|i| json!({"heading": "", "summary": "x".repeat(92), "i": i})).collect();
+        let out = pipeline::sample_to(items.clone(), 1000);
+        let a = out.as_array().unwrap();
+        assert_eq!(a.len(), 10);
+        assert_eq!((a[0]["i"].as_u64(), a[9]["i"].as_u64()), (Some(0), Some(90)), "evenly spaced");
+        assert_eq!(pipeline::sample_to(items[..3].to_vec(), 1000).as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn locations_resolve_topdir_per_engine() {
+        let c = vec![("mac".to_string(), "/Users/s/dev/p".to_string(), true), ("srv".to_string(), "~/p".to_string(), false)];
+        let l = locations(&c, "{topdir}/docs/a.pdf");
+        assert_eq!(l[0]["path"], "/Users/s/dev/p/docs/a.pdf");
+        assert_eq!((l[1]["engine"].as_str(), l[1]["path"].as_str(), l[1]["live"].as_bool()), (Some("srv"), Some("~/p/docs/a.pdf"), Some(false)));
+        assert_eq!(locations(&c, "iter4/docs/iter4_guide.md"), json!([]));
+    }
 
     #[test]
     fn filenames_and_docs_dirs() {

@@ -72,6 +72,10 @@ pub struct EngineRuntime {
     /// the env_file path from .iter/config.json — named in every
     /// "no token" error so the reader knows which file to edit
     env_file: String,
+    /// projects whose test sweep template is known to exist (2026-09-30:
+    /// the engine creates it paused, once) -> when creating it last failed
+    sweep_ensured: HashSet<String>,
+    sweep_ensure_tried: HashMap<String, Instant>,
 }
 
 use crate::usage;
@@ -81,6 +85,9 @@ use crate::usage;
 /// lease renewal must follow the item actually running (CR 2026-09-25 6.4).
 pub struct Running {
     agent: String,
+    /// a test sweep run (2026-09-30): started on the timer, so it takes no
+    /// cap slot — it neither counts toward maxagents nor the agent's type cap
+    outside_cap: bool,
     project: String,
     cur: Arc<Mutex<(String, String)>>,
     handle: std::thread::JoinHandle<()>,
@@ -235,6 +242,8 @@ impl EngineRuntime {
             explaining: Vec::new(),
             accepting: Vec::new(),
             accept_checked: HashSet::new(),
+            sweep_ensured: HashSet::new(),
+            sweep_ensure_tried: HashMap::new(),
             triaging: Vec::new(),
             summarizing: Vec::new(),
             rag_syncing: HashMap::new(),
@@ -658,7 +667,7 @@ impl EngineRuntime {
                 continue;
             }
             let last = self.map_sync.get(name).map(|(h, _)| h.clone()).unwrap_or_default();
-            let hash = crate::sync::sync_if_changed(&self.api, name, std::path::Path::new(&topdir), &last);
+            let hash = crate::sync::sync_if_changed_ro(&self.api, name, std::path::Path::new(&topdir), &last, dirs.read_only);
             // GraphRAG: a map whose files changed (or this engine's first look)
             // re-indexes the node files whose text changed — hash-diffed, so an
             // unchanged file costs nothing; one sweep per project at a time
@@ -773,6 +782,10 @@ impl EngineRuntime {
         // engine to see them applies them now, not behind the agent queue
         if let Ok(reply) = &heartbeat {
             for p in crate::datasync::waiting_projects(reply) {
+                // a read-only checkout is never written: its edits wait for another engine
+                if engine.projects.get(&p).map(|d| d.read_only).unwrap_or(false) {
+                    continue;
+                }
                 if let Some(topdir) = engine.projects.get(&p).and_then(|d| d.dirs.get("topdir")).map(|t| expand_topdir(t)) {
                     if std::path::Path::new(&topdir).is_dir() {
                         crate::datasync::apply_waiting(&self.api, &self.name, &p, &topdir);
@@ -872,6 +885,9 @@ impl EngineRuntime {
             }
 
             let Some(project) = self.projects.get(project_name).cloned() else { continue };
+            if !engine.projects.get(project_name).map(|d| d.read_only).unwrap_or(true) {
+                self.ensure_test_sweep(project_name);
+            }
             // a close that could not reach iter_data is replayed first, then
             // this engine's own ghosts are repaired — whatever the project
             // state: a ghost holds a cap slot and blocks a drain (2026-09-22)
@@ -906,8 +922,13 @@ impl EngineRuntime {
             if engine.probe_stale_min > 0 && self.running.is_empty() {
                 self.probe_stale_accounts(engine, now);
             }
-            self.fire_schedules(&project);
             let Some(dirs) = engine.projects.get(project_name) else { continue };
+            // read-only checkout: no schedules fire and no work item runs here
+            // (GraphRAG and the map are handled above and in sync_maps)
+            if dirs.read_only {
+                continue;
+            }
+            self.fire_schedules(&project);
             let topdir = expand_topdir(dirs.dirs.get("topdir").map(String::as_str).unwrap_or("."));
             self.dispatch(engine, &project, &topdir, &in_use);
         }
@@ -919,6 +940,44 @@ impl EngineRuntime {
         if !engine.test_requested.is_empty() && engine.test_requested != self.last_test_handled {
             self.last_test_handled = engine.test_requested.clone();
             self.run_test(engine, &chosen_account);
+        }
+    }
+
+    /// Running work that holds a cap slot (test sweep runs do not).
+    fn capped_running(&self) -> usize {
+        self.running.iter().filter(|r| !r.outside_cap).count()
+    }
+
+    /// Every project gets one test sweep template (decided 2026-09-30),
+    /// created PAUSED by the first engine that sees none — a person turns it
+    /// on (Resume schedule) and sets its interval.  iter_data refuses a second
+    /// one, so racing engines make exactly one.  A failed create is retried
+    /// at most every ten minutes.
+    fn ensure_test_sweep(&mut self, project_name: &str) {
+        if self.sweep_ensured.contains(project_name) {
+            return;
+        }
+        let Some(items) = self.items.get(project_name) else { return };
+        if items.iter().any(|i| i.is_test_sweep_template()) {
+            self.sweep_ensured.insert(project_name.to_string());
+            return;
+        }
+        if self.sweep_ensure_tried.get(project_name).map(|t| t.elapsed() < Duration::from_secs(600)).unwrap_or(false) {
+            return;
+        }
+        let body = iter_core::test_sweep_template_body("paused", iter_core::TEST_SWEEP_EVERY_MIN);
+        match self.api.post(&format!("/api/projects/{project_name}/workitems"), &body) {
+            Ok(v) => {
+                println!("[engine] {project_name}: created the test sweep (paused) {}", v["id"].as_str().unwrap_or("?"));
+                self.sweep_ensured.insert(project_name.to_string());
+            }
+            Err(e) if e.status == 409 => {
+                self.sweep_ensured.insert(project_name.to_string());
+            }
+            Err(e) => {
+                eprintln!("[engine] {project_name}: could not create the test sweep: {e}");
+                self.sweep_ensure_tried.insert(project_name.to_string(), Instant::now());
+            }
         }
     }
 
@@ -1140,6 +1199,17 @@ impl EngineRuntime {
                 true
             }
         });
+        // the test sweep (2026-09-30): a run of the engine-owned template
+        // starts as soon as it is queued — no cap slot, no usage or budget
+        // hold (a shell run spends no model time).  It still needs the
+        // project Running: dispatch is only reached then.
+        let mut sweep_started: Vec<String> = Vec::new();
+        for item in items.iter().filter(|i| i.state == "queued" && i.is_test_sweep_run() && !i.needs_approval && deps_satisfied(i)) {
+            println!("[engine] test sweep run {} starts on its timer, outside the cap", &item.id[..8.min(item.id.len())]);
+            if self.start_item(engine, project, topdir, item, &account_name) {
+                sweep_started.push(item.id.clone());
+            }
+        }
         let in_triage = |i: &WorkItem| self.triaging.iter().any(|(id, _)| id == &i.id);
         for i in items.iter().filter(|i| i.state == "queued") {
             let mut w = Wait::default();
@@ -1183,9 +1253,13 @@ impl EngineRuntime {
         Self::detect_deadlocks(&self.api, &self.name, &mut self.announced_cycles, project, &items, &by_id, &live, &mut waits);
         // a human already accepted it at the close gate: closing uses no model
         // time, so it waits neither for a cap slot nor out a usage hold
-        let accepted_now = Self::close_accepted(&self.api, &self.name, &mut self.accept_checked, &mut self.accepting, project, topdir, &items);
+        let mut accepted_now = Self::close_accepted(&self.api, &self.name, &mut self.accept_checked, &mut self.accepting, project, topdir, &items);
         for id in &accepted_now {
             waits.remove(id);
+        }
+        for id in sweep_started {
+            waits.remove(&id);
+            accepted_now.push(id); // started: kept out of the pick loop below
         }
         if hold.is_some() {
             self.reconcile_waits(project, &items, &waits);
@@ -1239,14 +1313,14 @@ impl EngineRuntime {
         for item in run_now {
             println!(
                 "[engine] run-now override: starting {} '{}' (running {} / cap {})",
-                &item.id[..8.min(item.id.len())], item.name, self.running.len(), cap
+                &item.id[..8.min(item.id.len())], item.name, self.capped_running(), cap
             );
             if self.start_item(engine, project, topdir, item, &account_name) {
                 started_now.push(item.id.clone());
                 waits.remove(&item.id);
             }
         }
-        let running_now = self.running.len();
+        let running_now = self.capped_running();
         let set_reason = |waits: &mut HashMap<String, Wait>, id: &str, r: String| {
             if let Some(w) = waits.get_mut(id) {
                 if w.reason.is_none() {
@@ -1309,7 +1383,7 @@ impl EngineRuntime {
         let mut slots = cap.saturating_sub(running_now);
         for item in queued {
             if slots == 0 {
-                set_reason(&mut waits, &item.id, format!("usage cap ({}/{cap})", self.running.len()));
+                set_reason(&mut waits, &item.id, format!("usage cap ({}/{cap})", self.capped_running()));
                 continue;
             }
             if scope_blocked(item) {
@@ -1328,7 +1402,7 @@ impl EngineRuntime {
             }
             // per-agent-type cap (project override "max", else agent default)
             let type_running =
-                self.running.iter().filter(|r| r.agent == item.agent).count();
+                self.running.iter().filter(|r| r.agent == item.agent && !r.outside_cap).count();
             let type_max = project
                 .agents
                 .get(&item.agent)
@@ -1717,6 +1791,7 @@ impl EngineRuntime {
         let counter = self.running_count.clone();
         counter.fetch_add(1, Ordering::SeqCst);
         let agent_type = run_item.agent.clone();
+        let outside_cap = run_item.is_test_sweep_run();
         let project_name = project.name.clone();
         let cur = Arc::new(Mutex::new((run_item.id.clone(), lease)));
         let thread_cur = cur.clone();
@@ -1725,7 +1800,7 @@ impl EngineRuntime {
             crate::work::execute(&api, &engine_name, &project, &topdir, run_item, &account, &thread_cur);
             counter.fetch_sub(1, Ordering::SeqCst);
         });
-        self.running.push(Running { agent: agent_type, project: project_name, cur, handle });
+        self.running.push(Running { agent: agent_type, outside_cap, project: project_name, cur, handle });
         true
     }
 }
@@ -1773,7 +1848,7 @@ mod tests {
         EngineRuntime::new(api, "E1".into(), "/x/.env".into())
     }
     fn running(workid: &str, lease: &str) -> Running {
-        Running { agent: "code".into(), project: "p".into(), cur: Arc::new(Mutex::new((workid.into(), lease.into()))), handle: std::thread::spawn(|| {}) }
+        Running { agent: "code".into(), outside_cap: false, project: "p".into(), cur: Arc::new(Mutex::new((workid.into(), lease.into()))), handle: std::thread::spawn(|| {}) }
     }
 
     /// F4 (CR option (e)): a run far longer than the 600 s lease lifetime

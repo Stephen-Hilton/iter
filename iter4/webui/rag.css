@@ -97,3 +97,21 @@ body.tab-rag #counts,body.tab-rag #ucrow,body.tab-rag #depthticks{display:none !
 .rag-x2{background:none;border:0;color:var(--dim);padding:0 2px;font-size:11px;cursor:pointer}
 .rag-x2:hover{color:var(--bad)}
 .rag-chip .rag-link{font-weight:500}
+
+/* "Show all documents": one card per document */
+.rag-sform .ghost{white-space:nowrap}
+.rag-rmeta .rag-sm{margin-left:8px}
+.rag-alldocs{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.rag-doccard{border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:var(--bg)}
+.rag-doccard header{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.rag-doccard .rag-link:disabled{color:var(--text);cursor:default}
+.rag-small{font-size:12px}
+.rag-docsum{font-size:13px;line-height:1.5;margin:6px 0}
+.rag-loc{font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
+.rag-loc code{font-size:11.5px;overflow-wrap:anywhere}
+.rag-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.rag-dot.live{background:var(--ok)}
+@media (max-width:620px){.rag-sform{flex-wrap:wrap}.rag-sform #rag-all{flex:1 1 100%}}
+#rag-globs{width:100%;margin-top:4px;font:12px ui-monospace,Menlo,monospace;resize:vertical}
+.rag-field+.rag-field{margin-top:10px}
+.rag-toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--ok);color:var(--text);padding:8px 14px;border-radius:8px;z-index:300;font-size:13px}

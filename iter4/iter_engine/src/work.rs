@@ -540,8 +540,11 @@ fn run_all(
     // git postwork is engine-enforced: changes are ALWAYS committed (and
     // pushed when a remote exists) — limited to the item's lock scope plus
     // the project's commit_extra_paths, so a sibling agent's unfinished
-    // files are never committed under this item's name (2026-09-12)
-    if is_repo {
+    // files are never committed under this item's name (2026-09-12).
+    // A test sweep run and `iter rag sync` commit nothing (2026-09-30):
+    // they write nothing into the checkout, and with no lockdirs their scope
+    // would be the whole tree — every running agent's unfinished files.
+    if is_repo && !item.commits_nothing() {
         let outcome = commit_scoped(topdir, item, &project.commit_extra_paths)?;
         if outcome.committed {
             println!("[engine] {} committed its {}", short(&item.id), outcome.scope_label);
@@ -936,7 +939,7 @@ fn run_claude(
     if let Some(m) = &_mcp {
         extra.extend(m.args());
     }
-    let mut session = Session { sid: chain.map(|c| c.sid.clone()).unwrap_or_default(), cwd: codepath.to_string_lossy().into_owned(), model, extra, envs, timeout, account: account.to_string() };
+    let mut session = Session { sid: chain.map(|c| c.sid.clone()).unwrap_or_default(), cwd: codepath.to_string_lossy().into_owned(), model, extra, envs, timeout, account: account.to_string(), recreated: false };
     if !std::path::Path::new(&session.cwd).is_dir() {
         session.cwd = topdir.to_string();
     }
@@ -998,6 +1001,18 @@ struct Session {
     envs: Vec<(String, String)>,
     timeout: u64,
     account: String,
+    /// a turn removed `cwd` and ensure_cwd put it back
+    recreated: bool,
+}
+
+impl Drop for Session {
+    /// a code path put back only so `--resume` could run is removed again
+    /// when nothing was written into it (remove_dir refuses a non-empty dir)
+    fn drop(&mut self) {
+        if self.recreated {
+            let _ = std::fs::remove_dir(&self.cwd);
+        }
+    }
 }
 
 impl Session {
@@ -1008,6 +1023,10 @@ impl Session {
             args.push(self.sid.clone());
         }
         args.extend(self.extra.iter().cloned());
+        // a turn may delete its own code path (an item that removes its lock
+        // folder): recreate it empty, not fall back to topdir — `--resume`
+        // finds the session only from the directory it was started in
+        self.recreated |= ensure_cwd(&self.cwd);
         let raw = spawn_claude_env(project, &self.cwd, &self.account, prompt, &self.model, &args, self.timeout, &self.envs)?;
         let (sid, out) = parse_claude_stream(&self.account, &raw);
         if !sid.is_empty() {
@@ -1015,6 +1034,15 @@ impl Session {
         }
         Ok(out)
     }
+}
+
+/// Recreate a session's working directory when an earlier turn removed it
+/// (2026-09-30, pdy-dev cut-over: a cleanup item deleted its lock folder and
+/// its agentmemory turn died "spawn failed: No such file or directory").
+/// True when it had to recreate it.
+fn ensure_cwd(cwd: &str) -> bool {
+    let p = std::path::Path::new(cwd);
+    !p.is_dir() && std::fs::create_dir_all(p).is_ok()
 }
 
 /// `{topdir}/.iter/bin/iter` -> this binary's `cli` subcommand, so agents run
@@ -2090,6 +2118,21 @@ mod tests {
         assert!(ev.diffstat.contains("a/mine.rs") && !ev.diffstat.contains("a/theirs.rs"), "{}", ev.diffstat);
         assert_eq!(ev.other_scope_commits.len(), 1);
         assert_eq!(ev.other_scope_commits[0].1, "iter: sibling (99998888)");
+    }
+
+    #[test]
+    fn ensure_cwd_recreates_a_removed_code_path() {
+        let d = std::env::temp_dir().join(format!("iter4_cwd_{}", uuid::Uuid::new_v4())).join("lockdir");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(ensure_cwd(&d.to_string_lossy()));
+        assert!(d.is_dir());
+        assert!(!ensure_cwd(&d.to_string_lossy())); // present: left alone
+        // the session puts it back only for its own turns: gone again at drop when empty
+        let s = Session { sid: String::new(), cwd: d.to_string_lossy().into_owned(), model: String::new(), extra: vec![], envs: vec![], timeout: 0, account: String::new(), recreated: true };
+        drop(s);
+        assert!(!d.exists());
+        let _ = std::fs::remove_dir_all(d.parent().unwrap());
     }
 
     #[test]

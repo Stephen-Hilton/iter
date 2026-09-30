@@ -454,6 +454,11 @@ fn default_running() -> String { "Running".into() }
 pub struct EngineProjectDirs {
     #[serde(default)]
     pub dirs: BTreeMap<String, String>,
+    /// the engine only READS this checkout (2026-09-30): the map is pushed
+    /// with derived ids, GraphRAG indexes and summarises it — but no ids are
+    /// written, no graph edit is applied, no work item or schedule runs
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -646,9 +651,65 @@ pub struct WorkItem {
     /// "" = not yet — a queued item without it is held one tick for the judge
     #[serde(default)]
     pub dedup_checked: String,
+    /// iter_data-guarded: marks the engine-owned test sweep (2026-09-30,
+    /// `TEST_SWEEP`). On the template (the item with a `sched`) it makes the
+    /// item undeletable and limits it to `scheduled` or `paused`; a run cloned
+    /// from it carries it too, and the engine starts such a run on the timer,
+    /// outside the agent cap and the usage/budget holds.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
+}
+
+/// The `system` value of the engine-owned test sweep: one per project,
+/// created paused by the engine, never deleted (decided 2026-09-30).
+pub const TEST_SWEEP: &str = "test-sweep";
+/// The test sweep's default interval when the engine creates it.
+pub const TEST_SWEEP_EVERY_MIN: u64 = 240;
+
+/// The create body of the test sweep template (engine auto-create and
+/// `iter sweep --install-schedule` share it). `state` is `paused` when the
+/// engine creates it — a person turns it on — or `scheduled`.
+pub fn test_sweep_template_body(state: &str, every_min: u64) -> serde_json::Value {
+    serde_json::json!({
+        "name": format!("Test sweep, every {}: run the map's test groups and file work for what they find", every_label(every_min)),
+        "agent": "test", "state": state, "exec_shell": "iter sweep", "system": TEST_SWEEP,
+        "sched": {"kind": "every", "every_min": every_min},
+        "lockdirs": [], "blockedby": [], "context": [], "tags": [{"text": "sweep", "color": ""}],
+        "requestedby": "engine", "prework": [], "postwork": [],
+        "request": "The project's test sweep (engine-owned; it can be paused but not deleted). `iter sweep` reads the architecture map, \
+            runs every test group a chain from main includes, records each result on the map, and files work for what it finds: \
+            one `code` item per red group, one `test` item per code node with no tests, and one `ingest` item per node whose text \
+            breaks the node-text standard. When due it runs at once on the timer, outside the agent cap and the usage holds, \
+            but only while the project is Running.",
+    })
+}
+
+fn every_label(min: u64) -> String {
+    if min % 60 == 0 { format!("{}h", min / 60) } else { format!("{min}m") }
 }
 
 impl WorkItem {
+    /// The test sweep's template (not one of its runs).
+    pub fn is_test_sweep_template(&self) -> bool {
+        self.system == TEST_SWEEP && self.sched.is_some()
+    }
+
+    /// A run of the test sweep: started on the timer, outside the agent cap,
+    /// and never committed (the sweep writes nothing into the checkout).
+    pub fn is_test_sweep_run(&self) -> bool {
+        self.system == TEST_SWEEP && self.sched.is_none()
+    }
+
+    /// A shell run the engine knows writes nothing into the checkout, so its
+    /// end-of-run commit is skipped (2026-09-30): a test sweep run, and
+    /// `iter rag sync` (one-way: it reads node files and sends their text to
+    /// iter_data). Both carry no lockdirs, where a commit would take the
+    /// whole tree — every running agent's unfinished files.
+    pub fn commits_nothing(&self) -> bool {
+        let cmd = self.exec_shell.trim();
+        self.is_test_sweep_run() || (self.is_shell() && (cmd == "iter rag sync" || cmd.starts_with("iter rag sync ")))
+    }
+
     /// Runs a shell command, not an LLM session (iter4, decided 2026-09-28):
     /// an `exec` item, or a `test` item that carries an `exec_shell` — the
     /// deterministic test runs, the 95% case of the `test` agent (formerly

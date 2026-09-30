@@ -104,6 +104,15 @@ const WEBUI_FILES: &[(&str, &str, &[u8])] = &[
     ("/vendor/cytoscape-dagre.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape-dagre.js")),
 ];
 
+/// The engine setup script the webui's new-project wizard tells people to
+/// download (also on GitHub at iter4/tools/iter_engine_setup.sh). Served in
+/// both webui modes; it holds no secrets, so no sign-in.
+const ENGINE_SETUP_SH: &[u8] = include_bytes!("../../tools/iter_engine_setup.sh");
+async fn engine_setup_sh() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    ([(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], ENGINE_SETUP_SH).into_response()
+}
+
 async fn embedded_index(uri: axum::http::Uri) -> axum::response::Response {
     use axum::response::IntoResponse;
     let path = uri.path();
@@ -163,7 +172,10 @@ async fn main() {
         None => eprintln!("[iter_data] GraphRAG embedding model {} not found — ingestion and search will refuse (tools/fetch_model.sh)", rag::embed::MODEL_NAME),
     }
 
-    let mut app = api::router(state.clone()).merge(mcp::routes(state)).layer(
+    let mut app = api::router(state.clone())
+        .merge(mcp::routes(state))
+        .route("/iter_engine_setup.sh", axum::routing::get(engine_setup_sh))
+        .layer(
         tower_http::cors::CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(tower_http::cors::Any)

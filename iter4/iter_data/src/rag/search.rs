@@ -145,6 +145,24 @@ fn scopes(req: &SearchReq, project: &str) -> Vec<String> {
     v
 }
 
+/// The vector indexes are shared by every project, and approximate: their top
+/// candidates are drawn from all chunks, then filtered to this project. That
+/// only finds this project's best chunks when it holds most of the index — a
+/// small project beside a big one lost recall (measured 2026-09-30: iter4's
+/// hit@5 fell 0.88 → 0.79 beside pdy-dev's 47k chunks). Small projects keep
+/// exact cosine, which is fast at their size anyway.
+async fn index_pays_off(a: &ArangoBackend, ps: &[String]) -> bool {
+    let r = a
+        .aql("RETURN [LENGTH(FOR c IN rag_chunk FILTER c.project IN @ps RETURN 1), LENGTH(rag_chunk)]", json!({"ps": ps}))
+        .await
+        .ok()
+        .and_then(|r| r.into_iter().next());
+    let (mine, all) = r.and_then(|v| Some((v.get(0)?.as_u64()?, v.get(1)?.as_u64()?))).unwrap_or((0, 0));
+    mine >= INDEX_MIN_PROJECT_CHUNKS && mine * 2 >= all
+}
+/// A project uses the vector indexes from this many chunks (and at least half of all).
+const INDEX_MIN_PROJECT_CHUNKS: u64 = 10_000;
+
 /// Top candidates by one vector field: (chunk key, cosine), best first.
 async fn vector_ranking(a: &ArangoBackend, project: &str, req: &SearchReq, field: &str, qv: &[f32], use_index: bool) -> Result<Vec<(String, f64)>, ApiError> {
     let filters = filter_clause(req);
@@ -154,7 +172,7 @@ async fn vector_ranking(a: &ArangoBackend, project: &str, req: &SearchReq, field
     if use_index {
         // approximate candidates from the index, filtered, re-scored exactly
         let mut b = bind.clone();
-        b.insert("wide".into(), json!(CANDIDATES * 20));
+        b.insert("wide".into(), json!(CANDIDATES * 40));
         let q = format!(
             "FOR key IN (FOR c IN rag_chunk SORT APPROX_NEAR_COSINE(c.{field}, @q) DESC LIMIT @wide RETURN c._key)
                LET c = DOCUMENT(CONCAT('rag_chunk/', key))
@@ -252,7 +270,7 @@ pub async fn run_search(a: &ArangoBackend, project: &str, req: &SearchReq) -> Re
         _ => (true, true),
     };
     let qv = if use_vec { embed_async(vec![query.to_string()]).await.map_err(unavailable)?.remove(0) } else { vec![] };
-    let indexed = use_vec && has_vector_indexes(a).await;
+    let indexed = use_vec && has_vector_indexes(a).await && index_pays_off(a, &scopes(req, project)).await;
     let raw = if use_vec && use_raw { vector_ranking(a, project, req, "vec_raw", &qv, indexed).await? } else { vec![] };
     let sum = if use_vec && use_sum { vector_ranking(a, project, req, "vec_sum", &qv, indexed).await? } else { vec![] };
     let kw = if use_kw { keyword_ranking(a, project, req).await? } else { vec![] };
@@ -414,6 +432,9 @@ async fn node_context(a: &ArangoBackend, project: &str, ids: &[String]) -> Resul
 
 static VECTOR_NOTE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static VECTOR_RETRY_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// one builder at a time: concurrent ingests raced to create the same index
+/// and the loser's "duplicate name" error blocked the second one (2026-09-30)
+static VECTOR_BUILD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn vector_index_state(a: &ArangoBackend) -> Value {
     let idx = a.dbcall("GET", &format!("/_api/index?collection={CHUNK_COLL}"), None).await.ok();
@@ -440,6 +461,11 @@ pub async fn ensure_vector_indexes(a: &ArangoBackend) -> Result<(), String> {
     if has_vector_indexes(a).await {
         return Ok(());
     }
+    let _one = VECTOR_BUILD.lock().await;
+    let have: Vec<String> = vector_index_state(a).await["indexes"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+    if have.len() >= 2 {
+        return Ok(());
+    }
     if let Ok(g) = VECTOR_RETRY_AT.lock() {
         if g.map(|t| t.elapsed() < std::time::Duration::from_secs(600)).unwrap_or(false) {
             return Ok(());
@@ -457,6 +483,9 @@ pub async fn ensure_vector_indexes(a: &ArangoBackend) -> Result<(), String> {
     }
     let n_lists = ((n as f64).sqrt() as u64).clamp(8, 1024);
     for field in ["vec_raw", "vec_sum"] {
+        if have.iter().any(|h| h == field) {
+            continue; // built earlier (or by a concurrent caller)
+        }
         let body = json!({"type": "vector", "name": field, "fields": [field], "sparse": true, "inBackground": true,
                           "params": {"metric": "cosine", "dimension": embed::DIM, "nLists": n_lists}});
         if let Err(e) = a.dbcall("POST", &format!("/_api/index?collection={CHUNK_COLL}"), Some(&body)).await {

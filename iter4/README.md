@@ -51,8 +51,8 @@ iter sync             # fix ids, then push the map: one vertex per *.iter.md, on
 iter sync --read-only --actors path/actors.yaml   # map a checkout without writing into it (derived ids)
 iter graph-apply --file op.json                   # apply one graph edit by hand
 iter init --project <name>                         # scaffold main.iter.md + .iter/config.json + reqs
-iter sweep            # run the map's testgroups (teststate per chain), record results, file one item per red group
-iter sweep --install-schedule --every 4h   # the recurring exec template (user token required)
+iter sweep            # run the map's testgroups (teststate per chain), record results; file a code item per red group, a test item per untested node, an ingest item per unclear node
+iter sweep --install-schedule --every 4h   # turn on the project's engine-owned Test sweep (created paused; user token required)
 ```
 
 Outside an engine these read `--data-url`/`ITER_DATA_URL` (or `.iter/config.json`) and a token from `ITER_ENGINE_TOKEN`/`ITER_TOKEN`. A running engine syncs each project's map on its own, at most once a minute when the tree changed.

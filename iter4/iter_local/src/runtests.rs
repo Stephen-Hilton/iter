@@ -117,6 +117,19 @@ pub fn run_group(
     filter: Option<&str>,
     timeout_min: u64,
 ) -> Result<GroupRunResult, String> {
+    run_group_stamped(tg_file, label, filter, timeout_min, true)
+}
+
+/// `run_group` with the registry stamp optional: the test sweep passes
+/// `false` (2026-09-30) — it records results on the map, and a run that
+/// writes into the checkout would leave files no commit owns.
+pub fn run_group_stamped(
+    tg_file: &Path,
+    label: &str,
+    filter: Option<&str>,
+    timeout_min: u64,
+    stamp: bool,
+) -> Result<GroupRunResult, String> {
     let content =
         std::fs::read_to_string(tg_file).map_err(|e| format!("cannot read {}: {}", tg_file.display(), e))?;
     let groups = testgroups::parse(&content);
@@ -140,6 +153,7 @@ pub fn run_group(
         });
     }
     let full_run = filter.is_none();
+    let out_dir = fresh_test_out_dir(tg_file, label);
 
     let budget = Duration::from_secs(timeout_min.max(1) * 60);
     let started = Instant::now();
@@ -180,7 +194,7 @@ pub fn run_group(
                 gates: true,
             }
         } else {
-            let (exit_code, stdout, stderr, timed_out) = run_script(&script, &test_dir, remaining);
+            let (exit_code, stdout, stderr, timed_out) = run_script(&script, &test_dir, remaining, out_dir.as_deref());
             let detail = if timed_out {
                 format!("timed out (group budget {} min); killed", timeout_min)
             } else {
@@ -228,7 +242,7 @@ pub fn run_group(
     let pass: u64 = gating().map(|r| r.pass).sum();
     let total: u64 = gating().map(|r| r.total).sum();
 
-    if full_run {
+    if full_run && stamp {
         stamp_group(tg_file, label, &workitems::now_iso(), outcome.as_str(), &format!("{}/{}", pass, total))?;
     }
 
@@ -311,9 +325,31 @@ pub fn shared_tests_dir(from: &Path) -> Option<PathBuf> {
     from.ancestors().find(|d| d.join(".iter").is_dir()).map(|d| d.join(".iter").join("tests"))
 }
 
-fn run_script(script: &Path, cwd: &Path, timeout: Duration) -> (i32, String, String, bool) {
+/// `$ITER_TEST_OUT` (decided 2026-09-30): the one place a test script writes
+/// its output files. It lies OUTSIDE the checkout (nothing to commit, nothing
+/// swept into another item's commit) and is emptied at the start of every
+/// run of the group, so only the last run is ever kept — never a history.
+/// One folder per (registry file, group label).
+pub fn test_out_dir(tg_file: &Path, label: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tg_file.canonicalize().unwrap_or_else(|_| tg_file.to_path_buf()).hash(&mut h);
+    let safe: String = label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    std::env::temp_dir().join("iter-testout").join(format!("{safe}-{:08x}", h.finish() as u32))
+}
+
+fn fresh_test_out_dir(tg_file: &Path, label: &str) -> Option<PathBuf> {
+    let dir = test_out_dir(tg_file, label);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok().map(|_| dir)
+}
+
+fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<&Path>) -> (i32, String, String, bool) {
     let mut cmd = Command::new("bash");
     cmd.arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(out) = out_dir {
+        cmd.env("ITER_TEST_OUT", out);
+    }
     if let Some(shared) = shared_tests_dir(cwd) {
         cmd.env("ITER_TESTS_SHARED", shared);
     }
@@ -519,6 +555,20 @@ mod tests {
         assert_eq!((run.pass, run.total), (2, 2), "no ITER_RESULT → 1 test per script");
         let groups = testgroups::parse(&std::fs::read_to_string(&tg).unwrap());
         assert!(groups[0].is_green());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_out_keeps_only_the_last_run() {
+        // run 1 leaves a file in $ITER_TEST_OUT; run 2 must start with it gone
+        let script = "if [ -e \"$ITER_TEST_OUT/old.txt\" ]; then exit 1; fi\necho run > \"$ITER_TEST_OUT/old.txt\"\nexit 0\n";
+        let (root, tg) = setup("testout", &[("t1.sh", script)]);
+        assert_eq!(run_group(&tg, "g1", None, DEFAULT_GROUP_TIMEOUT_MIN).unwrap().outcome, Outcome::Green);
+        let out = test_out_dir(&tg, "g1");
+        assert!(out.join("old.txt").is_file(), "the output is kept after the run");
+        assert!(!out.starts_with(&root), "outside the checkout");
+        assert_eq!(run_group(&tg, "g1", None, DEFAULT_GROUP_TIMEOUT_MIN).unwrap().outcome, Outcome::Green, "emptied before the next run");
+        let _ = std::fs::remove_dir_all(&out);
         let _ = std::fs::remove_dir_all(&root);
     }
 
