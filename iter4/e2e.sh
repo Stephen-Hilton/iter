@@ -1,0 +1,1355 @@
+#!/usr/bin/env bash
+# iter4 end-to-end: iter_data (ArangoDB) + iter_engine + SampleV3.
+# Usage: iter4/e2e.sh
+# Uses the dev ArangoDB on :8529 (./deploy.sh local starts it) and a throwaway
+# database iter4_e2e_<random>, dropped on success and failure. iter4 stores
+# everything in ArangoDB (2026-09-29): there is no other backend to test.
+set -euo pipefail
+
+BACKEND="arango"
+REPO="$(cd "$(dirname "$0")" && pwd)"   # the iter4 directory
+ARANGO_URL_E2E="${ARANGO_URL_E2E:-http://127.0.0.1:8529}"
+ARANGO_PW_E2E="${ARANGO_ROOT_PASSWORD:-iter4dev}"
+ARANGO_DB_E2E="iter4_e2e_$RANDOM$RANDOM"
+SCRATCH="${E2E_SCRATCH:-$(mktemp -d /tmp/iter4-e2e.XXXXXX)}"
+PORT=$((18300 + RANDOM % 1000))
+BASE="http://127.0.0.1:$PORT"
+PROJECT="SampleV3"
+PASS_ADMIN="e2e-admin-pw"
+DATA_PID=""
+
+say()  { printf '\033[36m[e2e]\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m[e2e] FAIL:\033[0m %s\n' "$*"; cleanup; exit 1; }
+pass() { printf '\033[32m[e2e] ok:\033[0m %s\n' "$*"; }
+
+drop_e2e_db() {
+  curl -s -o /dev/null -X DELETE -u "root:$ARANGO_PW_E2E" "$ARANGO_URL_E2E/_api/database/$ARANGO_DB_E2E" || true
+}
+cleanup() {
+  drop_e2e_db
+  [ -n "${PROBE_PID:-}" ] && kill "$PROBE_PID" 2>/dev/null || true
+  [ -n "$DATA_PID" ] && kill "$DATA_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT
+
+command -v jq >/dev/null || fail "jq is required"
+
+say "backend=$BACKEND scratch=$SCRATCH port=$PORT"
+mkdir -p "$SCRATCH"
+
+# ---------- build ----------
+say "building binaries"
+(cd "$REPO" && ~/.cargo/bin/cargo build -p iter_data -p iter_engine >/dev/null 2>&1) || fail "cargo build"
+DATA_BIN="$REPO/target/debug/iter_data"
+ENGINE_BIN="$REPO/target/debug/iter_engine"
+# usage snapshots live under $HOME/.claude by default — the developer's REAL
+# account snapshots would gate the e2e engine (a 100% five-hour window reads
+# as cap 0), so isolate them from the very first engine run
+export ITER_USAGE_DIR="$SCRATCH/usage"
+mkdir -p "$ITER_USAGE_DIR"
+
+# ---------- start iter_data ----------
+ITER_ADMIN_PASSWORD=$PASS_ADMIN ARANGO_URL="$ARANGO_URL_E2E" ARANGO_PASSWORD="$ARANGO_PW_E2E" "$DATA_BIN" \
+  --arango-db "$ARANGO_DB_E2E" \
+  --listen "127.0.0.1:$PORT" \
+  --secret-file "$SCRATCH/jwt.secret" \
+  --env-file /dev/null \
+  --webui-dir "$REPO/webui" > "$SCRATCH/iter_data.log" 2>&1 &
+DATA_PID=$!
+
+for i in $(seq 1 60); do
+  curl -sf "$BASE/health" >/dev/null 2>&1 && break
+  [ "$i" = 60 ] && { cat "$SCRATCH/iter_data.log"; fail "iter_data did not start"; }
+  sleep 1
+done
+pass "iter_data up ($(curl -sf "$BASE/health" | jq -r .backend))"
+
+# ---------- auth ----------
+TOKEN=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json \
+  -d "{\"user\":\"admin\",\"password\":\"$PASS_ADMIN\"}" | jq -r .token)
+[ -n "$TOKEN" ] && [ "$TOKEN" != null ] || fail "admin login"
+AUTH=(-H "authorization: Bearer $TOKEN" -H content-type:application/json)
+pass "admin login"
+
+# bad password must fail
+curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H content-type:application/json \
+  -d '{"user":"admin","password":"wrong"}' | grep -q 401 || fail "bad password accepted"
+pass "bad password rejected"
+
+# unauthenticated API must fail
+curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects" | grep -q 401 || fail "unauthenticated read allowed"
+pass "unauthenticated request rejected"
+
+# ---------- users: engine principal ----------
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/users/engine01" \
+  -d '{"role":"engine","password":"unused-login-pw","email":""}' >/dev/null || fail "create engine user"
+ENGINE_TOKEN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/users/engine01/token" -d '{"ttl_days":365}' | jq -r .token)
+[ -n "$ENGINE_TOKEN" ] && [ "$ENGINE_TOKEN" != null ] || fail "mint engine token"
+pass "engine user + long-lived token"
+
+# ---------- sample project on disk ----------
+SAMPLE="$SCRATCH/sample"
+cp -R "$REPO/e2e/sampleV3" "$SAMPLE"
+# stored as main.iter.md.sample so iter4's own map never reads the sample
+# project's main file as a second main of iter4
+mv "$SAMPLE/main.iter.md.sample" "$SAMPLE/main.iter.md"
+(cd "$SAMPLE" && git init -q && git add -A && git -c user.email=e2e@iter -c user.name=e2e commit -qm seed)
+pass "sample project git-initialized"
+
+# ---------- project / agents / engine records ----------
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/code" \
+  -d '{"desc":"coder","max":2,"timeoutsec":600,"model":"opus","promptbody":"You are the code agent."}' >/dev/null || fail "agent put"
+
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null <<EOF || fail "project put"
+{"desc":"sample project","state":"Running","gitrepo":"",
+ "maxagents":{">98%":0,"else":2},
+ "agents":{"code":{"max":1}},
+ "failure":{"maxattempts":2,"first_retry_second":1,"retry_backoff_exponent":2},
+ "engines":["Engine01"],"accounts":[]}
+EOF
+
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null <<EOF || fail "engine put"
+{"host":"$(hostname)","state":"Stopped","ticksec":1,"full_refresh_minutes":360,"probe_stale_min":0,
+ "queuelock":{"retryms":50,"breaksec":60},
+ "projects":{"$PROJECT":{"dirs":{"topdir":"$SAMPLE"}}}}
+EOF
+pass "project/agent/engine records created"
+
+# versions rows should exist already
+SEQ0=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/versions" | jq '[.[]|select(.table=="project")][0].seq')
+[ "$SEQ0" -ge 1 ] || fail "versions seq missing after project write"
+pass "versions seq bumping (project seq=$SEQ0)"
+
+# ---------- workitems ----------
+WA=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"write A","agent":"exec","exec_shell":"echo A-done > out_a.txt; sleep 1","priority":3,"lockdirs":["{topdir}/"]}' | jq -r .id)
+WB=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"write B after A\",\"agent\":\"exec\",\"exec_shell\":\"test -f out_a.txt && echo B-done > out_b.txt\",\"priority\":4,\"blockedby\":[\"$WA\"],\"lockdirs\":[\"{topdir}/\"]}" | jq -r .id)
+WC=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"write C","agent":"exec","exec_shell":"echo C-done > out_c.txt","priority":5,"lockdirs":["{topdir}/src/"]}' | jq -r .id)
+[ -n "$WA" ] && [ -n "$WB" ] && [ -n "$WC" ] || fail "workitem creation"
+pass "workitems queued: A=$WA B=$WB C=$WC"
+
+# default state is queued; version is 1
+ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA" | jq -r .state)
+[ "$ST" = queued ] || fail "default create-state should be queued (got $ST)"
+
+# request detail row + read back
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WA/details/0" \
+  -d '{"key":"request","valuetype":"text","value":"please write out_a.txt"}' >/dev/null || fail "detail put"
+DK=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA/details" | jq -r '.[0].key')
+[ "$DK" = request ] || fail "detail read"
+pass "workitem detail rows"
+
+# widget validation: bad widget must bounce with 400
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WA/details/5" \
+  -d '{"key":"question","valuetype":"json","value":{"title":"","fields":[{"key":"x","type":"nope"}]}}')
+[ "$CODE" = 400 ] || fail "invalid widget accepted (HTTP $CODE)"
+pass "malformed question widget bounced"
+
+# versioned write conflict: stale expect_version -> 409
+ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WC")
+V=$(echo "$ITEM" | jq -r .version)
+echo "$ITEM" | jq '.priority=2' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WC?expect_version=$V" -d @- >/dev/null || fail "versioned write"
+CODE=$(echo "$ITEM" | jq '.priority=9' | curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WC?expect_version=$V" -d @-)
+[ "$CODE" = 409 ] || fail "stale write not rejected (HTTP $CODE)"
+pass "versioned writes: fresh accepted, stale 409"
+
+# ---------- central locks ----------
+# lease-bound locks (CR 2026-09-25): a lock goes only to a running item (a
+# claim carrying a lease); two paused stand-ins are claimed by hand here and
+# deleted afterwards so nothing below sees them
+LH=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"lock holder","agent":"exec","exec_shell":"true","state":"paused","lockdirs":["{topdir}/x/"]}' | jq -r .id)
+LO=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"lock other","agent":"exec","exec_shell":"true","state":"paused","lockdirs":["{topdir}/x/"]}' | jq -r .id)
+claim() { # claim <id> <state> <lease>
+  local J V; J=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1"); V=$(echo "$J" | jq -r .version)
+  echo "$J" | jq --arg s "$2" --arg l "$3" '.state=$s | .lease=$l' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$1?expect_version=$V" -d @- >/dev/null || fail "claim $1"
+}
+claim "$LH" in-progress L1; claim "$LO" in-progress L2
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" \
+  -d "{\"path\":\"{topdir}/x/\",\"workid\":\"$LH\",\"lease\":\"L1\",\"engine\":\"e2e\",\"ttl_sec\":60}" >/dev/null || fail "lock acquire"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" \
+  -d "{\"path\":\"{topdir}/x/\",\"workid\":\"$LO\",\"lease\":\"L2\",\"engine\":\"e2e\",\"ttl_sec\":60}")
+[ "$CODE" = 409 ] || fail "second holder got the lock (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" \
+  -d "{\"path\":\"{topdir}/x/\",\"workid\":\"$LH\",\"engine\":\"e2e\",\"ttl_sec\":60}" >/dev/null || fail "re-acquire by holder"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/release" \
+  -d "{\"path\":\"{topdir}/x/\",\"workid\":\"$LH\"}" >/dev/null || fail "lock release"
+pass "central lock: acquire / conflict / re-acquire / release"
+# the refusal: an item that is not running (lease cleared) gets no lock (always enforced since 2026-09-28)
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" -d "{\"path\":\"{topdir}/y/extra.rs\",\"workid\":\"$LH\"}" >/dev/null || fail "acquire outside lockdirs while running"
+claim "$LH" paused ""
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/locks" | jq --arg w "$LH" '[.[]|select(.workid==$w)]|length')" = 0 ] || fail "clearing the lease left the run's rows"
+RESP=$(curl -s -w '\n%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" -d "{\"path\":\"{topdir}/y/extra.rs\",\"workid\":\"$LH\"}")
+[ "$(echo "$RESP" | tail -1)" = 409 ] && [ "$(echo "$RESP" | head -1 | jq -r .refused)" = "not running" ] || fail "lock for a stopped item not refused: $RESP"
+claim "$LO" paused ""
+for w in "$LH" "$LO"; do curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/projects/$PROJECT/workitems/$w" >/dev/null || fail "delete $w"; done
+pass "lease-bound locks: clearing the lease drops every row of the run; a lock for an item that is not running is refused (409 not running)"
+
+# ---------- engine run ----------
+mkdir -p "$SAMPLE/.iter"
+cat > "$SAMPLE/.iter/config.json" <<EOF
+{"data_url":"$BASE","token_envar":"ITER_ENGINE_TOKEN","engine_name":"Engine01","env_file":"$SAMPLE/.env"}
+EOF
+echo "ITER_ENGINE_TOKEN=$ENGINE_TOKEN" > "$SAMPLE/.env"
+
+say "running engine (max 20 ticks @1s)"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 20 > "$SCRATCH/engine.log" 2>&1) || true
+
+grep -q "start" "$SCRATCH/engine.log" || { cat "$SCRATCH/engine.log"; fail "engine never started an item"; }
+
+for f in out_a.txt out_b.txt out_c.txt; do
+  [ -f "$SAMPLE/$f" ] || { cat "$SCRATCH/engine.log"; fail "missing $SAMPLE/$f"; }
+done
+pass "all three workitems produced output (dependency B ran after A)"
+
+for W in "$WA" "$WB" "$WC"; do
+  ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$W" | jq -r .state)
+  [ "$ST" = complete ] || fail "workitem $W state=$ST (expected complete)"
+done
+pass "all workitems complete in iter_data"
+
+# response details written
+RK=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA/details" | jq -r '[.[]|select(.key=="response")]|length')
+[ "$RK" -ge 1 ] || fail "no response detail on A"
+pass "response detail rows written"
+
+# locks all released
+NLOCKS=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/locks" | jq 'length')
+[ "$NLOCKS" = 0 ] || fail "locks left behind: $NLOCKS"
+pass "locks released"
+
+# engine heartbeat + git postwork commit happened
+LS=$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .last_seen)
+[ -n "$LS" ] && [ "$LS" != '""' ] || fail "no heartbeat"
+NCOMMITS=$(cd "$SAMPLE" && git rev-list --count HEAD)
+[ "$NCOMMITS" -ge 2 ] || fail "engine did not commit its work (commits=$NCOMMITS)"
+pass "heartbeat written; git postwork committed ($NCOMMITS commits)"
+
+# ---------- deep dependencies + failed blocker + drain settle (2026-09-04) ----------
+DP=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"deep plan","agent":"exec","exec_shell":"true","state":"complete","lockdirs":["{topdir}/dp/"]}' | jq -r .id)
+DC=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"deep child\",\"agent\":\"exec\",\"exec_shell\":\"echo child > out_dchild.txt\",\"createdby\":\"$DP\",\"state\":\"parked\",\"lockdirs\":[\"{topdir}/dc/\"]}" | jq -r .id)
+DD=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"deep dependent\",\"agent\":\"exec\",\"exec_shell\":\"echo dep > out_ddep.txt\",\"blockedby\":[\"$DP\"],\"lockdirs\":[\"{topdir}/dd/\"]}" | jq -r .id)
+DS=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"shallow dependent\",\"agent\":\"exec\",\"exec_shell\":\"echo shallow > out_dshallow.txt\",\"blockedby\":[\"$DP\"],\"blockedby_shallow\":true,\"lockdirs\":[\"{topdir}/ds/\"]}" | jq -r .id)
+DF=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"failed blocker","agent":"exec","exec_shell":"false","state":"failed","lockdirs":["{topdir}/df/"]}' | jq -r .id)
+DG=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"depends on failed\",\"agent\":\"exec\",\"exec_shell\":\"echo never > out_dnever.txt\",\"blockedby\":[\"$DF\"],\"lockdirs\":[\"{topdir}/dg/\"]}" | jq -r .id)
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-deep.log" 2>&1) || true
+[ ! -f "$SAMPLE/out_ddep.txt" ] || fail "deep dependent ran while the blocker's child was still open"
+[ -f "$SAMPLE/out_dshallow.txt" ] || { cat "$SCRATCH/engine-deep.log"; fail "shallow dependent did not run"; }
+[ ! -f "$SAMPLE/out_dnever.txt" ] || fail "item depending on a FAILED blocker ran"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$DG" | jq -r .state)" = queued ] || fail "failed-blocker dependent should stay queued (blocked)"
+pass "dependencies are deep: waited on the blocker's child; shallow opt-out ran; failed blocker holds its dependent in place"
+# reopen the failed blocker (it now succeeds) -> its dependent flows naturally
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$DF")
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$DF/reopen" -d '{"reason":"retry"}' >/dev/null || fail "reopen failed blocker"
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$DF")
+echo "$FRESH" | jq '.exec_shell="true"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$DF?expect_version=$(echo "$FRESH" | jq -r .version)" -d @- >/dev/null
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-deep3.log" 2>&1) || true
+[ -f "$SAMPLE/out_dnever.txt" ] || { cat "$SCRATCH/engine-deep3.log"; fail "dependent did not flow after the failed blocker was retried"; }
+pass "retrying the failed blocker released its dependent without any manual requeue"
+# release the child -> dependent runs on the next pass
+ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$DC")
+echo "$ITEM" | jq '.state="queued"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$DC?expect_version=$(echo "$ITEM" | jq -r .version)" -d @- >/dev/null
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-deep2.log" 2>&1) || true
+[ -f "$SAMPLE/out_ddep.txt" ] || { cat "$SCRATCH/engine-deep2.log"; fail "deep dependent did not run after the child completed"; }
+pass "deep dependent released once the blocker's descendants completed"
+# Draining settles to Stopped when nothing is running (engine-driven)
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.state="Draining"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-settle.log" 2>&1) || true
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq -r .state)" = Stopped ] || fail "Draining did not settle to Stopped"
+grep -q "drained -> Stopped" "$SCRATCH/engine-settle.log" || fail "engine did not log the settle"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.state="Running"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+pass "Draining is transitional: settled to Stopped once drained"
+
+# ---------- stop mid-run + retry backoff (2026-09-04) ----------
+SL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"long runner to stop","agent":"exec","exec_shell":"sleep 30; echo never > out_stopped.txt","priority":1,"lockdirs":["{topdir}/stop/"]}' | jq -r .id)
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-stop.log" 2>&1) &
+ENGPID=$!
+for i in $(seq 1 20); do [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$SL" | jq -r .state)" = in-progress ] && break; sleep 0.5; done
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$SL")
+[ "$(echo "$FRESH" | jq -r .state)" = in-progress ] || fail "stop scenario: item never started"
+echo "$FRESH" | jq '.stop_requested=true' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$SL?expect_version=$(echo "$FRESH" | jq -r .version)" -d @- >/dev/null || fail "set stop_requested"
+wait $ENGPID || true
+[ ! -f "$SAMPLE/out_stopped.txt" ] || fail "stopped item ran to completion"
+SJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$SL")
+[ "$(echo "$SJ" | jq -r .state)" = parked ] || { cat "$SCRATCH/engine-stop.log"; fail "stopped item state=$(echo "$SJ" | jq -r .state) (expected parked)"; }
+echo "$SJ" | jq -r .lasterror | grep -q "STOPPED by user" || fail "stop note missing"
+[ "$(echo "$SJ" | jq -r .stop_requested)" = false ] || fail "stop flag not cleared"
+pass "stop mid-run: session killed within a tick, item parked with note, flag cleared"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.failure={"maxattempts":3,"first_retry_second":600,"retry_backoff_exponent":2}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+RB=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"always fails","agent":"exec","exec_shell":"exit 3","priority":1,"lockdirs":["{topdir}/rb/"]}' | jq -r .id)
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-backoff.log" 2>&1) || true
+RJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RB")
+[ "$(echo "$RJ" | jq -r .attempt)" = 1 ] || fail "backoff: expected exactly one attempt in 4 ticks, got $(echo "$RJ" | jq -r .attempt)"
+[ "$(echo "$RJ" | jq -r .state)" = queued ] || fail "backoff: state $(echo "$RJ" | jq -r .state)"
+[ -n "$(echo "$RJ" | jq -r .retry_after)" ] && [ "$(echo "$RJ" | jq -r .retry_after)" \> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ] || fail "backoff: retry_after not in the future ($(echo "$RJ" | jq -r .retry_after))"
+grep -q "retry after 600s" "$SCRATCH/engine-backoff.log" || fail "backoff log line missing"
+pass "retry backoff: a failed attempt waits first_retry_second before the next pick"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.failure={"maxattempts":2,"first_retry_second":1,"retry_backoff_exponent":2}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RB")
+echo "$FRESH" | jq '.state="parked"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$RB?expect_version=$(echo "$FRESH" | jq -r .version)" -d @- >/dev/null
+
+# ---------- Run Now override (2026-09-04) ----------
+# cap 1: a long item occupies the only slot; a run_now item must start anyway
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={"else":1}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "cap=1 project update"
+RL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"long occupant","agent":"exec","exec_shell":"sleep 6; echo long > out_long.txt","priority":1,"lockdirs":["{topdir}/a/"]}' | jq -r .id)
+RN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"run now please","agent":"exec","exec_shell":"echo now > out_now.txt","priority":9,"lockdirs":["{topdir}/b/"],"run_now":true}' | jq -r .id)
+RW=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"ordinary waiter","agent":"exec","exec_shell":"echo wait > out_wait.txt","priority":2,"lockdirs":["{topdir}/c/"]}' | jq -r .id)
+say "running engine with cap 1 + run_now"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-runnow.log" 2>&1) || true
+grep -q "run-now override: starting" "$SCRATCH/engine-runnow.log" || { cat "$SCRATCH/engine-runnow.log"; fail "no run-now override in engine log"; }
+[ -f "$SAMPLE/out_now.txt" ] || { cat "$SCRATCH/engine-runnow.log"; fail "run_now item did not run past the cap"; }
+[ ! -f "$SAMPLE/out_wait.txt" ] || fail "ordinary item started while the cap was saturated"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RN" | jq -r .run_now)" = false ] || fail "run_now flag not consumed on claim"
+pass "run now: started past a full cap; ordinary work waited; flag consumed"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-runnow2.log" 2>&1) || true
+for W in "$RL" "$RN" "$RW"; do
+  [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$W" | jq -r .state)" = complete ] || fail "run-now scenario item $W not complete"
+done
+pass "run now: everything drained to complete afterwards"
+
+# ---------- lock waits are visible (pdy-dev bug report 2026-09-07) ----------
+# cap 1: a holder occupies the slot and locks {topdir}/lk/; a waiter on {topdir}/lk/sub/
+# is blocked by the LOCK (a dependency on the holder), another item on a free path by
+# the usage cap, a third needs approval.  Each says so on its record; nothing is silent.
+LH=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"lock holder","agent":"exec","exec_shell":"sleep 5; echo h > out_lh.txt","priority":1,"lockdirs":["{topdir}/lk/"]}' | jq -r .id)
+LW=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"lock waiter","agent":"exec","exec_shell":"echo w > out_lw.txt","priority":2,"lockdirs":["{topdir}/lk/sub/"],"tags":[{"text":"mine","color":""}]}' | jq -r .id)
+LU=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"cap waiter","agent":"exec","exec_shell":"echo u > out_lu.txt","priority":3,"lockdirs":["{topdir}/lu/"]}' | jq -r .id)
+LA=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"approval waiter","agent":"exec","exec_shell":"true","priority":3,"needs_approval":true,"lockdirs":["{topdir}/la/"]}' | jq -r .id)
+say "running engine with cap 1 + a lock holder"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-lockwait.log" 2>&1) &
+ENGPID=$!
+for i in $(seq 1 30); do [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LW" | jq -r '.blockedby_locks[0]')" = "$LH" ] && break; sleep 0.5; done
+LWJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LW")
+[ "$(echo "$LWJ" | jq -r '.blockedby_locks[0]')" = "$LH" ] || { cat "$SCRATCH/engine-lockwait.log"; fail "lock waiter's blockedby_locks=$(echo "$LWJ" | jq -c .blockedby_locks) (expected the holder $LH)"; }
+[ "$(echo "$LWJ" | jq -r '[.tags[].text]|join("|")')" = "mine|blocked by: lock {topdir}/lk/" ] || fail "lock waiter tags: $(echo "$LWJ" | jq -c .tags)"
+[ "$(echo "$LWJ" | jq -r '.blockedby|length')" = 0 ] || fail "lock wait leaked into blockedby (must stay a separate, engine-owned field)"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LU" | jq -r '.tags[0].text')" = "blocked by: usage cap (1/1)" ] || fail "cap waiter tag: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LU" | jq -c .tags)"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LA" | jq -r '.tags[0].text')" = "blocked by: needs approval" ] || fail "approval waiter tag: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LA" | jq -c .tags)"
+wait $ENGPID || true
+grep -q "${LW:0:8} blocked by ${LH:0:8} (lock {topdir}/lk/)" "$SCRATCH/engine-lockwait.log" || { cat "$SCRATCH/engine-lockwait.log"; fail "engine did not log the lock dependency"; }
+grep -q "${LU:0:8} 'cap waiter': blocked by: usage cap (1/1)" "$SCRATCH/engine-lockwait.log" || fail "engine did not log the cap wait"
+pass "lock wait: recorded as blockedby_locks on the waiter + 'blocked by: lock <path>' tag, human tags kept; cap and approval waits tagged; engine lines say why"
+# the holder is done: the waiter runs and both engine-owned marks go with the claim
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-lockwait2.log" 2>&1) || true
+for W in "$LH" "$LW" "$LU"; do
+  [ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$W" | jq -r .state)" = complete ] || { cat "$SCRATCH/engine-lockwait2.log"; fail "lock-wait scenario item $W not complete"; }
+done
+LWJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LW")
+[ "$(echo "$LWJ" | jq -r '.blockedby_locks|length')" = 0 ] || fail "blockedby_locks not cleared after the run: $(echo "$LWJ" | jq -c .blockedby_locks)"
+[ "$(echo "$LWJ" | jq -r '[.tags[].text]|join("|")')" = "mine" ] || fail "engine tag not cleared after the run: $(echo "$LWJ" | jq -c .tags)"
+# a waiter a human parks mid-wait loses the marks too (they mean nothing off the queue)
+LAJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LA")
+echo "$LAJ" | jq '.state="parked"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$LA?expect_version=$(echo "$LAJ" | jq -r .version)" -d @- >/dev/null
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-lockwait3.log" 2>&1) || true
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$LA" | jq -r '.tags|length')" = 0 ] || fail "parked waiter kept its 'blocked by' tag"
+pass "lock wait: marks cleared on start and on leaving the queue"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={">98%":0,"else":2}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+
+# ---------- closed items: immutable, docs append, reopen ----------
+ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA")
+V=$(echo "$ITEM" | jq -r .version)
+CODE=$(echo "$ITEM" | jq '.priority=1' | curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WA?expect_version=$V" -d @-)
+[ "$CODE" = 403 ] || fail "closed workitem PUT accepted (HTTP $CODE)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WA/details/0" \
+  -d '{"key":"request","valuetype":"text","value":"rewritten history"}')
+[ "$CODE" = 403 ] || fail "closed workitem detail PUT accepted (HTTP $CODE)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$WA/details" \
+  -d '{"key":"response","valuetype":"text","value":"fake response"}')
+[ "$CODE" = 403 ] || fail "closed workitem accepted a non-doc append (HTTP $CODE)"
+# tags are the one summary-row exception on closed items
+echo "$ITEM" | jq '.tags=[{"text":"regressed","color":"#f54927"}]' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$WA?expect_version=$V" -d @- >/dev/null || fail "tag-only edit on closed item rejected"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA" | jq -r '.tags[0].text')" = regressed ] || fail "tag edit not persisted"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA" | jq -r .state)" = complete ] || fail "tag edit changed state"
+pass "closed item: summary PUT, detail PUT and non-doc append rejected (403); tag-only edit allowed"
+
+NDET=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA/details" | jq 'length')
+DOC=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$WA/details" \
+  -d '{"key":"doc","valuetype":"text","value":"closeout: verified by hand"}') || fail "doc append on closed item"
+[ "$(echo "$DOC" | jq -r .by)" = admin ] || fail "doc row not stamped with principal ($(echo "$DOC" | jq -c .))"
+[ -n "$(echo "$DOC" | jq -r .ts)" ] && [ "$(echo "$DOC" | jq -r .ts)" != null ] || fail "doc row not stamped with ts"
+# the engine helper appends as the engine principal, by id prefix
+(cd "$SAMPLE" && ITER_ENGINE_TOKEN=$ENGINE_TOKEN "$ENGINE_BIN" --config .iter/config.json --doc "${WA:0:12}" --text "closeout from an agent" > "$SCRATCH/doc.log" 2>&1) || { cat "$SCRATCH/doc.log"; fail "--doc helper"; }
+grep -q "appended" "$SCRATCH/doc.log" || { cat "$SCRATCH/doc.log"; fail "--doc did not report success"; }
+DETS=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA/details")
+[ "$(echo "$DETS" | jq 'length')" = $((NDET + 2)) ] || fail "expected $((NDET+2)) detail rows, got $(echo "$DETS" | jq 'length')"
+echo "$DETS" | jq -e '[.[]|select(.key=="doc")]|length==2' >/dev/null || fail "two doc rows expected"
+echo "$DETS" | jq -e '[.[]|select(.key=="doc" and .by=="engine01")]|length==1' >/dev/null || fail "engine doc row lacks engine principal"
+# orders are unique and dense (atomic allocation)
+[ "$(echo "$DETS" | jq '[.[].order]|unique|length')" = "$(echo "$DETS" | jq 'length')" ] || fail "duplicate detail orders"
+pass "closed item: doc rows append via API and --doc helper, provenance-stamped, orders unique"
+
+# reopen: engine role 403, admin ok -> queued + doc row; then it runs again
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ENGINE_TOKEN" -H content-type:application/json \
+  -X POST "$BASE/api/projects/$PROJECT/workitems/$WA/reopen" -d '{"reason":"rogue"}')
+[ "$CODE" = 403 ] || fail "engine role reopened a closed item (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$WA/reopen" -d '{"reason":"rerun after fix"}' >/dev/null || fail "admin reopen"
+ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA" | jq -r .state)
+[ "$ST" = queued ] || fail "reopened item state=$ST"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA/details" | jq -e '[.[]|select(.key=="doc" and (.value|test("reopened by admin.*rerun after fix")))]|length==1' >/dev/null || fail "reopen doc row missing"
+rm -f "$SAMPLE/out_a.txt"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-reopen.log" 2>&1) || true
+[ -f "$SAMPLE/out_a.txt" ] || { cat "$SCRATCH/engine-reopen.log"; fail "reopened item did not run again"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WA" | jq -r .state)" = complete ] || fail "reopened item did not complete"
+pass "reopen: users-only, back to queued with a doc record, ran and closed again"
+
+
+# ---------- approval flow ----------
+WD=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"sensitive change","agent":"exec","exec_shell":"echo approved-ran > out_d.txt","state":"question","needs_approval":true}' | jq -r .id)
+(cd "$SAMPLE" && ITER_ENGINE_TOKEN=$ENGINE_TOKEN "$ENGINE_BIN" --config .iter/config.json --adduser steve > "$SCRATCH/adduser.log" 2>&1) || { cat "$SCRATCH/adduser.log"; fail "--adduser"; }
+grep -q "registered pubkey" "$SCRATCH/adduser.log" || { cat "$SCRATCH/adduser.log"; fail "pubkey not registered"; }
+[ -f "$SAMPLE/.iter/users/steve.pem" ] || fail "keyfile missing"
+grep -q "users/" "$SAMPLE/.iter/.gitignore" || fail ".iter/.gitignore missing users/ ignore"
+(cd "$SAMPLE" && ITER_ENGINE_TOKEN=$ENGINE_TOKEN ITER_APPROVE_KEYPATH="$SAMPLE/.iter/users/steve.pem" \
+  "$ENGINE_BIN" --config .iter/config.json --approve "${WD:0:12}" > "$SCRATCH/approve.log" 2>&1) || { cat "$SCRATCH/approve.log"; fail "--approve"; }
+ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WD" | jq -r .state)
+[ "$ST" = queued ] || fail "approved item state=$ST (expected queued)"
+pass "adduser + signed approval flow (item re-queued)"
+
+# ---- user timezone (2026-09-04): stored on the user record, echoed by login; data stays UTC ----
+curl -sf "${AUTH[@]}" "$BASE/api/users/admin" | jq '.timezone="America/Los_Angeles"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/users/admin" -d @- >/dev/null || fail "self timezone put"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/users/admin" | jq -r .timezone)" = "America/Los_Angeles" ] || fail "timezone not stored"
+LOGIN2=$(curl -s -X POST "$BASE/auth/login" -H content-type:application/json -d "{\"user\":\"admin\",\"password\":\"$PASS_ADMIN\"}")
+[ "$(echo "$LOGIN2" | jq -r .timezone)" = "America/Los_Angeles" ] || fail "login does not echo the timezone: $LOGIN2"
+pass "user timezone: stored on the record (self-service PUT), echoed by login"
+
+# ---- viewer role (2026-09-04): reads everything, writes nothing but their own profile ----
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/users/gerald" -d '{"role":"viewer","password":"view-only-pw","email":""}' >/dev/null || fail "create viewer"
+VTOK=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"gerald","password":"view-only-pw"}' | jq -r .token)
+[ -n "$VTOK" ] && [ "$VTOK" != null ] || fail "viewer login"
+VAUTH=(-H "authorization: Bearer $VTOK" -H content-type:application/json)
+[ "$(curl -sf "${VAUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq 'length')" -ge 1 ] || fail "viewer cannot read workitems"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${VAUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"viewer write","agent":"exec","exec_shell":"true"}')
+[ "$CODE" = 403 ] || fail "viewer could create a workitem (HTTP $CODE)"
+ANYID=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r '.[0].id')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${VAUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$ANYID/explain" -d '{}')
+[ "$CODE" = 403 ] || fail "viewer could request an ELI5 (HTTP $CODE)"
+curl -sf "${VAUTH[@]}" "$BASE/api/users/gerald" | jq '.timezone="Asia/Riyadh"' | curl -sf "${VAUTH[@]}" -X PUT "$BASE/api/users/gerald" -d @- >/dev/null || fail "viewer self profile put"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/users/gerald" | jq -r '.role+" "+.timezone')" = "viewer Asia/Riyadh" ] || fail "viewer profile edit changed the role or lost the timezone"
+pass "viewer role: reads, 403 on queue writes and ELI5, may edit own profile"
+
+# widget helper
+echo '{"title":"t","fields":[{"key":"a","type":"text","value":""}]}' > "$SCRATCH/w.json"
+"$ENGINE_BIN" --question-widget "$SCRATCH/w.json" | grep -q "OK" || fail "--question-widget valid case"
+echo '{"title":"","fields":[]}' > "$SCRATCH/w2.json"
+("$ENGINE_BIN" --question-widget "$SCRATCH/w2.json" || true) | grep -q "INVALID" || fail "--question-widget invalid case"
+pass "--question-widget helper"
+
+# ---------- scheduled workitems (itersched port) ----------
+# template with last_fired in the past -> due on the first check; fires ONCE
+TPL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"sched: heartbeat file","agent":"exec","exec_shell":"echo sched-ran >> out_sched.txt","state":"scheduled","priority":8,"sched":{"kind":"every","every_min":5,"last_fired":"2026-09-01T00:00:00Z"}}' | jq -r .id)
+[ -n "$TPL" ] && [ "$TPL" != null ] || fail "schedule template create"
+
+# users-only: the engine role must NOT be able to create schedules
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ENGINE_TOKEN" -H content-type:application/json \
+  -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"rogue schedule","agent":"exec","state":"scheduled","sched":{"kind":"every","every_min":1}}')
+[ "$CODE" = 403 ] || fail "engine role created a schedule (HTTP $CODE)"
+pass "schedules are users-only (engine role got 403)"
+
+say "running engine for schedule fire"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-sched.log" 2>&1) || true
+grep -q "schedule 'sched: heartbeat file' fired" "$SCRATCH/engine-sched.log" || { cat "$SCRATCH/engine-sched.log"; fail "schedule did not fire"; }
+[ -f "$SAMPLE/out_sched.txt" ] || fail "scheduled clone did not run"
+NCLONES=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq "[.[]|select(.source_schedule==\"$TPL\")]|length")
+[ "$NCLONES" = 1 ] || fail "expected exactly 1 clone, got $NCLONES (dedup/refire broken)"
+TPLSTATE=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$TPL" | jq -r .state)
+[ "$TPLSTATE" = scheduled ] || fail "template state changed to $TPLSTATE"
+LF=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$TPL" | jq -r .sched.last_fired)
+[ "$LF" != "2026-09-01T00:00:00Z" ] || fail "last_fired not updated"
+pass "schedule fired once, clone completed, template intact, last_fired claimed"
+
+# ---------- usage%-driven account gating ----------
+export ITER_USAGE_DIR="$SCRATCH/usage"
+mkdir -p "$ITER_USAGE_DIR"
+FUTURE=$(( $(date +%s) + 86400 )); export FUTURE
+# fake api.anthropic.com/v1/messages for the idle probe: logs the auth header,
+# answers with anthropic-ratelimit-unified-* headers (5h 42%, 7d 10%); a
+# "$PROBE_LOG.reject" flag file turns it into a 429 at 5h 100% (hard limit)
+PROBE_LOG="$SCRATCH/probe.log"; : > "$PROBE_LOG"
+cat > "$SCRATCH/probe_server.py" <<'PYS'
+import http.server, os, sys
+PORT, LOG, FUT = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        with open(LOG, 'a') as f:
+            f.write("auth=%s beta=%s\n" % (self.headers.get('Authorization'), self.headers.get('anthropic-beta')))
+        rej = os.path.exists(LOG + '.reject')
+        body = b'{"type":"error","error":{"type":"rate_limit_error"}}' if rej else b'{"type":"message","content":[{"type":"text","text":"#"}]}'
+        self.send_response(429 if rej else 200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('anthropic-ratelimit-unified-status', 'rejected' if rej else 'allowed_warning')
+        self.send_header('anthropic-ratelimit-unified-5h-status', 'rejected' if rej else 'allowed')
+        self.send_header('anthropic-ratelimit-unified-5h-utilization', '1.0' if rej else '0.42')
+        self.send_header('anthropic-ratelimit-unified-5h-reset', FUT)
+        self.send_header('anthropic-ratelimit-unified-7d-status', 'allowed_warning')
+        self.send_header('anthropic-ratelimit-unified-7d-utilization', '0.10')
+        self.send_header('anthropic-ratelimit-unified-7d-reset', FUT)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', PORT), H).serve_forever()
+PYS
+PROBE_PORT="${ITER_E2E_PROBE_PORT:-8399}"
+python3 "$SCRATCH/probe_server.py" "$PROBE_PORT" "$PROBE_LOG" "$FUTURE" &
+PROBE_PID=$!
+export ITER_USAGE_PROBE_URL="http://127.0.0.1:$PROBE_PORT/v1/messages"
+ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT")
+# an account with no token is never picked (2026-09-11), so the fake token must exist before the account does
+export FAKE_TOKEN="tok-test-1yr"
+echo "$ITEM" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "project accounts update"
+cat > "$ITER_USAGE_DIR/iter3-usage-TestAcct.json" <<EOF
+{"ts":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","rate_limits":{"five_hour":{"used_percentage":99.9,"resets_at":$FUTURE},"seven_day":{"used_percentage":50.0,"resets_at":$FUTURE}}}
+EOF
+WU=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"usage-gated work","agent":"exec","exec_shell":"echo gated > out_gated.txt","priority":3}' | jq -r .id)
+(cd "$SAMPLE" && ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-usage.log" 2>&1) || true
+[ ! -f "$SAMPLE/out_gated.txt" ] || fail "engine ran work while all accounts were at stop%"
+grep -q "all accounts at stop%" "$SCRATCH/engine-usage.log" || fail "no stop-hold log line"
+ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WU" | jq -r .state)
+[ "$ST" = queued ] || fail "gated item state=$ST (expected queued)"
+pass "all-accounts-at-stop%: engine held all activity"
+cat > "$ITER_USAGE_DIR/iter3-usage-TestAcct.json" <<EOF
+{"ts":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","rate_limits":{"five_hour":{"used_percentage":10.0,"resets_at":$FUTURE},"seven_day":{"used_percentage":5.0,"resets_at":$FUTURE}}}
+EOF
+(cd "$SAMPLE" && ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-usage2.log" 2>&1) || true
+[ -f "$SAMPLE/out_gated.txt" ] || { cat "$SCRATCH/engine-usage2.log"; fail "engine did not resume after usage dropped"; }
+ACCT=$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .account)
+[ "$ACCT" = TestAcct ] || fail "engine did not report chosen account (got '$ACCT')"
+pass "usage refresh resumed work; chosen account reported centrally"
+
+# ---------- draining monitoring ----------
+ITEM=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT")
+V=$(echo "$ITEM" | jq -r .version 2>/dev/null || true)
+echo "$ITEM" | jq '.state="Draining"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "set Draining"
+WD2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"work during drain","agent":"exec","exec_shell":"echo drained > out_drain.txt","priority":1}' | jq -r .id)
+(cd "$SAMPLE" && ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-drain.log" 2>&1) || true
+[ ! -f "$SAMPLE/out_drain.txt" ] || fail "engine started new work while Draining"
+ST=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$WD2" | jq -r .state)
+[ "$ST" = queued ] || fail "drain item state=$ST"
+STATUS=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/status")
+# nothing was running, so the transitional Draining settled to Stopped on the engine's first tick
+[ "$(echo "$STATUS" | jq -r .project_state)" = Stopped ] || fail "status project_state (expected settled Stopped, got $(echo "$STATUS" | jq -r .project_state))"
+[ "$(echo "$STATUS" | jq -r .all_drained)" = true ] || fail "status all_drained"
+echo "$STATUS" | jq -e '.engines|length >= 1' >/dev/null || fail "status has no engines"
+pass "Draining: no new picks; settled to Stopped; status endpoint reports drain state + engine liveness"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.state="Running"' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+
+# ---------- close gate (spec: Close Gate, 2026-09-03) ----------
+# A fake `claude` on PATH answers worker and verifier sessions from the prompt
+# text, so the gate's state machine runs end to end without spending tokens.
+FAKEBIN="$SCRATCH/fakebin"; mkdir -p "$FAKEBIN"
+export GATE_LOG="$SCRATCH/gate_log.txt"; : > "$GATE_LOG"
+export GATE_PROMPTS="$SCRATCH/prompts"; mkdir -p "$GATE_PROMPTS"
+cat > "$FAKEBIN/claude" <<'FAKE'
+#!/usr/bin/env bash
+# fake claude for e2e: -p <prompt> ... ; prints a Claude Code json result object
+allargs="$*"; prompt=""; while [ $# -gt 0 ]; do case "$1" in -p) prompt="$2"; shift;; esac; shift; done
+name=$(grep -o -m1 -E '(Title|Workitem): gate-[a-z0-9]*' <<<"$prompt" | sed -E 's/.*: //')
+if grep -q "# Explain this work item simply (ELI5)" <<<"$prompt"; then
+  printf '%s\n' "$prompt" > "$GATE_PROMPTS/eli5-prompt.txt"
+  echo "explain tools=$allargs" >> "$GATE_LOG"
+  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"session_id":"fake-sid","total_cost_usd":0.05,"usage":{"input_tokens":500,"output_tokens":80},"result":"EXPLAINED-MARKER: when a customer asks for chips, we first check they paid."}\n'; exit 0
+fi
+if ! grep -q "# Step: mainwork" <<<"$prompt" && ! grep -q "iter close-gate verifier" <<<"$prompt"; then
+  # prework / selfcheck turns of the same session: record, acknowledge, move on
+  [ -n "$name" ] && [ -n "${ITER_WORKID:-}" ] && echo "$name" > "$GATE_PROMPTS/.name-$ITER_WORKID"
+  [ -z "$name" ] && [ -n "${ITER_WORKID:-}" ] && [ -f "$GATE_PROMPTS/.name-$ITER_WORKID" ] && name=$(cat "$GATE_PROMPTS/.name-$ITER_WORKID")
+  printf '%s\n' "$prompt" > "$GATE_PROMPTS/$(date +%s%N)-$name.txt" 2>/dev/null || true
+  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"fake-sid","result":"all done"}\n'; exit 0
+fi
+emit() {
+  printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.33,"resetsAt":%s},"seven_day":{"utilization":0.07,"resetsAt":%s}}}}\n' "${FUTURE:-0}" "${FUTURE:-0}"
+  printf '{"type":"result","subtype":"%s","is_error":false,"num_turns":3,"session_id":"fake-sid","total_cost_usd":0.25,"usage":{"input_tokens":1000,"output_tokens":200},"result":%s}\n' "$1" "$(jq -Rn --arg t "$2" '$t')"; }
+if grep -q "iter close-gate verifier" <<<"$prompt"; then
+  echo "verifier $name" >> "$GATE_LOG"
+  # a verifier model that cannot start (the 2026-09-07 incident: exit 1 after the init line)
+  case "$allargs" in *"--model crashme"*) echo '{"type":"system","subtype":"init","session_id":"dead"}'; exit 1;; esac
+  printf '%s\n' "$prompt" > "$GATE_PROMPTS/verifier-$name.txt" 2>/dev/null || true
+  if grep -q "DONE-MARKER" <<<"$prompt"; then emit success '{"verdict":"complete","open":[],"reason":"all obligations met"}'
+  else emit success '{"verdict":"incomplete","open":["file the ten build items"],"reason":"the message says it is waiting on a review"}'; fi
+  exit 0
+fi
+[ -n "$name" ] && [ -n "${ITER_WORKID:-}" ] && echo "$name" > "$GATE_PROMPTS/.name-$ITER_WORKID"
+[ -z "$name" ] && [ -n "${ITER_WORKID:-}" ] && [ -f "$GATE_PROMPTS/.name-$ITER_WORKID" ] && name=$(cat "$GATE_PROMPTS/.name-$ITER_WORKID")
+echo "worker $name" >> "$GATE_LOG"
+echo "token=${CLAUDE_CODE_OAUTH_TOKEN:-none} name=$name" >> "$GATE_PROMPTS/tokens.txt"
+printf '%s\n' "$prompt" > "$GATE_PROMPTS/$(date +%s%N)-$name.txt" 2>/dev/null || true
+case "$name" in
+  gate-cli)
+    # an agent using the iter CLI from inside its run
+    "$ITER_BIN" capability > "$GATE_PROMPTS/capability-index.txt" 2>&1
+    "$ITER_BIN" capability _ask_the_human > "$GATE_PROMPTS/capability-doc.txt" 2>&1
+    "$ITER_BIN" add --type code --title "cli child" --mainwork "child work" --codepath "$ITER_TOPDIR/src" --depends-on "${GATE_DEP: -12}" --context "{topdir}/README.md" > "$GATE_PROMPTS/add.txt" 2>&1
+    "$ITER_BIN" add --type code --title "self dep" --mainwork "x" --depends-on "$ITER_WORKID" > "$GATE_PROMPTS/add-self.txt" 2>&1 || true
+    "$ITER_BIN" doc "note from the agent" > "$GATE_PROMPTS/doc.txt" 2>&1
+    "$ITER_BIN" status > "$GATE_PROMPTS/status.txt" 2>&1
+    "$ITER_BIN" ask --question "Which color?" > "$GATE_PROMPTS/ask.txt" 2>&1
+    emit success "asked; ending turn" ;;
+  gate-reject)
+    "$ITER_BIN" reject --reason "premise no longer holds" > "$GATE_PROMPTS/reject.txt" 2>&1
+    emit success "rejected" ;;
+  gate-turncap)
+    if grep -q "Close-gate feedback" <<<"$prompt"; then emit success "DONE-MARKER: finished after the cut-off"
+    else emit error_max_turns "partial work, ran out of turns"; fi ;;
+  gate-recovers)
+    if grep -q "Close-gate feedback" <<<"$prompt"; then emit success "DONE-MARKER: filed the ten items"
+    else emit success "Plan written. I'm waiting for the review to finish."; fi ;;
+  gate-child)
+    # attempt 1 files one child and ends unfinished; attempt 2 must be told about it
+    if grep -q "Work items this item has already created" <<<"$prompt"; then
+      printf '%s\n' "$prompt" > "$GATE_PROMPTS/gate-child-retry.txt"
+      emit success "DONE-MARKER: the disk guard item was already filed; nothing more to file"
+    else
+      "$ITER_BIN" add --type code --title "disk guard child" --mainwork "guard the disk" --codepath "$ITER_TOPDIR/src/guard" > "$GATE_PROMPTS/add-child.txt" 2>&1
+      emit success "Filed the disk guard item. I'm waiting for the review to finish."
+    fi ;;
+  gate-crash) emit success "DONE-MARKER: all obligations done, live proof attached" ;;
+  gate-scope1|gate-scope2)
+    # two agents on one checkout (bugfix 2026-09-12): every session dirties BOTH lock scopes
+    T="${ITER_TOPDIR:-.}"; mkdir -p "$T/scope1" "$T/scope2"; echo "$name $$" >> "$T/scope1/work.txt"; echo "$name $$" >> "$T/scope2/work.txt"
+    emit success "DONE-MARKER: wrote my own scope only" ;;
+  gate-cluster)
+    # attempt 1 needs the cluster during the restart window and blocks; the
+    # re-run reads the block back as its "previous attempt" and finishes
+    if grep -q "blocked by: cluster restart" <<<"$prompt"; then emit success "DONE-MARKER: the cluster is back; smoke test done"
+    else "$ITER_BIN" block --cluster-restart --reason "need corridor-dev1 for the smoke test" > "$GATE_PROMPTS/block.txt" 2>&1; emit success "blocked on the restart; ending turn"; fi ;;
+  *) emit success "Plan written. I'm waiting for the review to finish." ;;
+esac
+FAKE
+chmod +x "$FAKEBIN/claude"
+
+# agent tooling (central copies of V2's .iter text) + a project head with global context files
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/tooling/_shared" -d '{"kind":"shared","desc":"all agents","body":"SHARED-RULES-MARKER {critreview_max_rounds}"}' >/dev/null || fail "tooling put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/tooling/_ask_the_human" -d '{"kind":"capability","desc":"ask the human a question","body":"ASK-DOC-BODY"}' >/dev/null || fail "tooling put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/tooling/user" -d '{"kind":"source","desc":"","body":"SOURCE-USER-MARKER"}' >/dev/null || fail "tooling put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/tooling/premise-check" -d '{"kind":"prepost","desc":"","body":"PREMISE-STEP-MARKER"}' >/dev/null || fail "tooling put"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ENGINE_TOKEN" -H content-type:application/json -X PUT "$BASE/api/tooling/rogue" -d '{"kind":"shared","body":"x"}')
+[ "$CODE" = 403 ] || fail "engine role could write tooling (HTTP $CODE)"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/tooling" | jq 'length')" = 4 ] || fail "tooling list"
+pass "agent tooling rows: admin writes, engine role read-only"
+mkdir -p "$SAMPLE/reqs" "$SAMPLE/src"
+printf -- '---\nprojectname: "SampleV3"\nglobalcontextfiles: ["{topdir}/reqs/*.md"]\n---\nhead\n' > "$SAMPLE/main.iter.md"
+echo "req" > "$SAMPLE/reqs/techreq.md"; echo "marker" > "$SAMPLE/src/src.code.iter.md"; echo "top" > "$SAMPLE/top.code.iter.md"
+
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/gatetest" \
+  -d '{"desc":"close-gate test agent","max":3,"timeoutsec":60,"model":"","promptbody":"You are the gate test agent.","closegate":{"verify":"haiku","max_bounces":1}}' >/dev/null || fail "gatetest agent put"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.agents.gatetest={"max":3}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "project gatetest override"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/gatecrash" \
+  -d '{"desc":"close-gate test agent whose verifier cannot start","max":3,"timeoutsec":60,"model":"","promptbody":"You are the gate test agent.","closegate":{"verify":"crashme","max_bounces":1}}' >/dev/null || fail "gatecrash agent put"
+mk_gate_item() {
+  curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+    -d "{\"name\":\"$1\",\"agent\":\"gatetest\",\"priority\":2}" | jq -r .id
+}
+GR=$(mk_gate_item gate-recovers); GS=$(mk_gate_item gate-stuck); GT=$(mk_gate_item gate-turncap); GK=$(mk_gate_item gate-child)
+GX=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"gate-crash","agent":"gatecrash","priority":2}' | jq -r .id)
+GC=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"gate-cli","agent":"gatetest","priority":1,"lockdirs":["{topdir}/src/"],"prework":["premise-check"],"requestedby":"user"}' | jq -r .id)
+GJ=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"gate-reject","agent":"gatetest","priority":1,"lockdirs":["{topdir}/reqs/"]}' | jq -r .id)
+for W in "$GR" "$GS" "$GT" "$GC" "$GJ" "$GK" "$GX"; do
+  curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$W/details/0" \
+    -d '{"key":"request","valuetype":"text","value":"write the plan AND file its build items as workitems"}' >/dev/null || fail "gate request detail"
+done
+export GATE_DEP="$GR"
+say "running engine with fake claude for the close gate"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 26 > "$SCRATCH/engine-gate.log" 2>&1) || true
+
+st_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .state; }
+gb_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .gate_bounces; }
+keys_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1/details" | jq -r '[.[].key]|join(",")'; }
+
+[ "$(st_of "$GR")" = complete ] || { cat "$SCRATCH/engine-gate.log"; fail "gate-recovers state=$(st_of "$GR") (expected complete after one bounce)"; }
+[ "$(gb_of "$GR")" = 1 ] || fail "gate-recovers gate_bounces=$(gb_of "$GR") (expected 1)"
+keys_of "$GR" | grep -q "verify" || fail "gate-recovers has no verify detail row"
+[ "$(grep -c "worker gate-recovers" "$GATE_LOG")" = 2 ] || fail "gate-recovers worker runs=$(grep -c "worker gate-recovers" "$GATE_LOG") (expected 2)"
+pass "close gate: verifier bounced an unfinished item once; continuation run completed it"
+
+[ "$(st_of "$GS")" = question ] || { cat "$SCRATCH/engine-gate.log"; fail "gate-stuck state=$(st_of "$GS") (expected question)"; }
+[ "$(gb_of "$GS")" = 2 ] || fail "gate-stuck gate_bounces=$(gb_of "$GS") (expected 2)"
+GSQ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GS/details" | jq -c '[.[]|select(.key=="question" and .value.gate=="close")]|last')
+[ -n "$GSQ" ] && [ "$GSQ" != null ] || fail "gate-stuck has no close-gate question widget"
+echo "$GSQ" | jq -e '.value.fields[0].key=="action"' >/dev/null || fail "gate widget shape"
+pass "close gate: bounce budget exhausted -> question state with a gate widget"
+
+[ "$(st_of "$GT")" = complete ] || { cat "$SCRATCH/engine-gate.log"; fail "gate-turncap state=$(st_of "$GT") (expected complete)"; }
+[ "$(grep -c "verifier gate-turncap" "$GATE_LOG")" = 1 ] || fail "turn-cap run should skip the verifier (verifier calls=$(grep -c "verifier gate-turncap" "$GATE_LOG"), expected 1)"
+pass "close gate: error_max_turns held deterministically (no verifier spend), continuation completed"
+
+# ---- pdy-dev bug report 2026-09-07 (close gate): evidence counts children whether or not the gate requires them,
+#      the retry is told what it already filed, and a verifier that cannot run never parks the item on a human ----
+[ "$(st_of "$GK")" = complete ] || { cat "$SCRATCH/engine-gate.log"; fail "gate-child state=$(st_of "$GK") (expected complete after one bounce)"; }
+GKV=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GK/details" | jq -c '[.[]|select(.key=="verify")]|first')
+[ "$(echo "$GKV" | jq -r .value.evidence.children)" = 1 ] || fail "gate-child verify evidence children=$(echo "$GKV" | jq -r .value.evidence.children) (expected 1: requires_children is unset, the count must still be taken)"
+grep -q "workitems created by this item: 1" "$GATE_PROMPTS/verifier-gate-child.txt" || { cat "$GATE_PROMPTS/verifier-gate-child.txt"; fail "verifier was not told about the child"; }
+grep -q "created by this item: 0" "$GATE_PROMPTS/verifier-gate-child.txt" && fail "verifier told 'created by this item: 0' for an item with one child" || true
+[ -f "$GATE_PROMPTS/gate-child-retry.txt" ] || { cat "$GATE_PROMPTS/add-child.txt" 2>/dev/null; fail "retry prompt never carried the 'already created' section"; }
+GKC=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r --arg c "$GK" '.[]|select(.createdby==$c)|.id' | head -1)
+[ -n "$GKC" ] || fail "gate-child created no child"
+grep -q "$GKC \[" "$GATE_PROMPTS/gate-child-retry.txt" && grep -q "disk guard child" "$GATE_PROMPTS/gate-child-retry.txt" && grep -q "Do NOT file these again" "$GATE_PROMPTS/gate-child-retry.txt" || { grep -n "already created" -A4 "$GATE_PROMPTS/gate-child-retry.txt"; fail "retry prompt does not list the child (id, state, title)"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r --arg c "$GK" '[.[]|select(.createdby==$c)]|length')" = 1 ] || fail "the retry filed the child again"
+pass "close gate: children counted without requires_children (verifier told 1, not 0); retry listed the filed item and did not re-file it"
+
+[ "$(st_of "$GX")" = complete ] || { cat "$SCRATCH/engine-gate.log"; fail "gate-crash state=$(st_of "$GX") (expected complete: a verifier that cannot run is not a verdict)"; }
+[ "$(grep -c "verifier gate-crash" "$GATE_LOG")" = 2 ] || fail "crashed verifier retried $(grep -c "verifier gate-crash" "$GATE_LOG") time(s) (expected exactly 2 tries)"
+GXV=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GX/details" | jq -c '[.[]|select(.key=="verify")]|last')
+[ "$(echo "$GXV" | jq -r .value.verdict)" = unavailable ] || fail "gate-crash verify row verdict=$(echo "$GXV" | jq -r .value.verdict) (expected unavailable)"
+echo "$GXV" | jq -r .value.reason | grep -q "verifier unavailable" || fail "gate-crash verify reason: $(echo "$GXV" | jq -r .value.reason)"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GX/details" | jq -e '[.[]|select(.key=="question")]|length==0' >/dev/null || fail "gate-crash raised a human question for a tooling failure"
+grep -q "verifier could not run for ${GX:0:8}" "$SCRATCH/engine-gate.log" || fail "engine did not log the unavailable verifier"
+pass "close gate: verifier crash retried once, then closed on the worker's evidence with a 'verifier unavailable' row — no human question"
+
+# ---- V2-parity prompt + agent CLI (2026-09-04) ----
+P1=$(ls "$GATE_PROMPTS"/*-gate-cli.txt | head -1)
+for m in "SHARED-RULES-MARKER 3" "# Capabilities" "_ask_the_human: ask the human a question" "# Project context" "reqs/techreq.md" "main.iter.md" "SOURCE-USER-MARKER" "# Work item" "Work item id: $GC" "# Context files" "src/src.code.iter.md" "top.code.iter.md" "# Step: prework:premise-check" "PREMISE-STEP-MARKER"; do
+  grep -qF -- "$m" "$P1" || { echo "--- first prompt:"; head -60 "$P1"; fail "spin-up prompt lacks: $m"; }
+done
+N=$(ls "$GATE_PROMPTS"/*-gate-cli.txt | wc -l | tr -d ' ')
+[ "$N" -ge 2 ] || fail "expected a multi-turn session for gate-cli (prework, mainwork, …), saw $N turn(s)"
+grep -q "# Step: mainwork" "$(ls "$GATE_PROMPTS"/*-gate-cli.txt | sed -n 2p)" || fail "second turn is not mainwork"
+pass "spin-up prompt: agent body + shared rules + capability index + project head + source + work item + context (marker chain) + prose prework as its own turn"
+grep -q "_ask_the_human: ask the human a question" "$GATE_PROMPTS/capability-index.txt" || fail "iter capability index"
+grep -q "ASK-DOC-BODY" "$GATE_PROMPTS/capability-doc.txt" || fail "iter capability <name>"
+grep -q "^added " "$GATE_PROMPTS/add.txt" || { cat "$GATE_PROMPTS/add.txt"; fail "iter add"; }
+CHILD=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r '.[]|select(.name=="cli child")|.id')
+[ -n "$CHILD" ] || fail "cli child not created"
+CJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CHILD")
+[ "$(echo "$CJ" | jq -r .createdby)" = "$GC" ] || fail "child createdby"
+[ "$(echo "$CJ" | jq -r .requestedby)" = "agent:gatetest" ] || fail "child requestedby"
+[ "$(echo "$CJ" | jq -r '.blockedby[0]')" = "$GR" ] || fail "child blockedby (12-char suffix resolution)"
+grep -q "cannot depend on the item that creates it" "$GATE_PROMPTS/add-self.txt" || fail "self-dependency should be refused"
+[ "$(echo "$CJ" | jq -r '.lockdirs[0]')" = "{topdir}/src" ] || fail "child lockdir mapping: $(echo "$CJ" | jq -c .lockdirs)"
+[ "$(echo "$CJ" | jq -r '.context[0]')" = "{topdir}/README.md" ] || fail "child context"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CHILD/details" | jq -r '.[0].value')" = "child work" ] || fail "child request row"
+grep -q "open work item" "$GATE_PROMPTS/status.txt" || fail "iter status"
+grep -q "appended" "$GATE_PROMPTS/doc.txt" || fail "iter doc"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC" | jq -r .state)" = question ] || fail "iter ask did not park the caller in question (got $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC" | jq -r .state))"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC/details" | jq -e '[.[]|select(.key=="question" and .value.title=="Which color?")]|length==1' >/dev/null || fail "ask widget missing"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC/details" | jq -e '[.[]|select(.key=="response")]|length==1' >/dev/null || fail "response row not written for the asked item"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GJ" | jq -r .state)" = parked ] || fail "iter reject did not park the caller"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GJ" | jq -r .lasterror | grep -q "rejected: premise" || fail "reject reason not recorded"
+pass "agent CLI: capability index/doc, add (child of caller, deep dep, lockdir + context), doc, status, ask -> question kept at close, reject -> parked"
+
+# ---- local-file verbs served by V3 itself (2026-09-04: no V2 binary, no config.iter.json) ----
+mkdir -p "$SAMPLE/src/test" "$SAMPLE/usecases"
+printf 'echo "ITER_RESULT pass=2 fail=0 total=2"\nexit 0\n' > "$SAMPLE/src/test/t-ok.sh"
+printf 'echo "ITER_RESULT pass=0 fail=1 total=1"\nexit 1\n' > "$SAMPLE/src/test/t-bad.sh"
+chmod +x "$SAMPLE/src/test/"*.sh
+cat > "$SAMPLE/src/test/testgroup.iter.md" <<'TG'
+# sample tests
+
+<!-- iterapp:testgroups
+{"label":"green","desc":"passes","testlist":[{"id":"t-ok","name":"ok","desc":"","shell":"t-ok.sh"}]}
+{"label":"mixed","desc":"one red","testlist":[{"id":"t-ok","name":"ok","desc":"","shell":"t-ok.sh"},{"id":"t-bad","name":"bad","desc":"","shell":"t-bad.sh"}]}
+-->
+TG
+cat > "$SAMPLE/usecases/greet.usecase.iter.md" <<'UC'
+---
+name: greet
+children:
+  codenodes: []
+---
+# greet
+A user asks for a greeting.
+UC
+LV=(env ITER_TOPDIR="$SAMPLE" ITER_DATA_URL="$BASE" ITER_ENGINE_TOKEN="$ENGINE_TOKEN" ITER_PROJECT="$PROJECT" "$ENGINE_BIN" cli)
+# runtests: neutral green -> 0, mixed -> 1; the block's result/counts update
+"${LV[@]}" runtests --group green > "$SCRATCH/rt-green.txt" 2>&1 || fail "runtests green exit $? : $(cat "$SCRATCH/rt-green.txt")"
+grep -q 'tests 2/2 100% — testgroup "green" PASSED' "$SCRATCH/rt-green.txt" || { cat "$SCRATCH/rt-green.txt"; fail "runtests green output"; }
+RC=0; "${LV[@]}" runtests --group mixed > "$SCRATCH/rt-mixed.txt" 2>&1 || RC=$?; [ "$RC" = 1 ] || { cat "$SCRATCH/rt-mixed.txt"; fail "runtests mixed exit $RC (expected 1)"; }
+grep -q '"label":"mixed"' "$SAMPLE/src/test/testgroup.iter.md" && grep -q '"result":"failed"' "$SAMPLE/src/test/testgroup.iter.md" || fail "testgroup block not updated with the run"
+# claims inside a run: --fixed on a red group records a FALSE claim on the calling item (the close gate holds it)
+CL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"claim holder","agent":"gatetest","priority":9,"lockdirs":["{topdir}/claim/"]}' | jq -r .id)
+RC=0; ITER_WORKID="$CL" "${LV[@]}" runtests --group mixed --fixed > "$SCRATCH/rt-fixed.txt" 2>&1 || RC=$?; [ "$RC" = 3 ] || { cat "$SCRATCH/rt-fixed.txt"; fail "false --fixed claim exit $RC (expected 3)"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CL/details" | jq -r '[.[]|select(.key=="claim")]|last|.value|"\(.claim) \(.upheld) \(.outcome)"')" = "fixed false failed" ] || fail "claim row not recorded"
+ITER_WORKID="$CL" "${LV[@]}" runtests --group green --fixed > /dev/null 2>&1 || fail "true --fixed claim should exit 0"
+# --broken on a green group = stale: parked with the reason
+RC=0; ITER_WORKID="$CL" "${LV[@]}" runtests --group green --broken > "$SCRATCH/rt-broken.txt" 2>&1 || RC=$?; [ "$RC" = 3 ] || fail "false --broken exit $RC (expected 3)"
+[ "$(st_of "$CL")" = parked ] || fail "stale --broken claim did not park the item (state $(st_of "$CL"))"
+# validate: template by role; a scan of the sample
+"${LV[@]}" validate --file "$SAMPLE/src/new.code.iter.md" --template > "$SCRATCH/val-tpl.txt" 2>&1 || fail "validate --template"
+grep -q "^---" "$SCRATCH/val-tpl.txt" || { cat "$SCRATCH/val-tpl.txt"; fail "template has no frontmatter"; }
+"${LV[@]}" validate > "$SCRATCH/val.txt" 2>&1 || true
+grep -q "^validate: [0-9]* file(s) checked" "$SCRATCH/val.txt" || { cat "$SCRATCH/val.txt"; fail "validate did not run"; }
+# markers: the scan as json; teststate --list; usecase --add/--list
+"${LV[@]}" markers > "$SCRATCH/markers.json" 2>&1 || fail "markers"
+jq -e '.testgroups|length>=1' "$SCRATCH/markers.json" >/dev/null 2>&1 || jq -e '.nodes' "$SCRATCH/markers.json" >/dev/null || { head -20 "$SCRATCH/markers.json"; fail "markers json"; }
+"${LV[@]}" teststate --list > "$SCRATCH/teststate.txt" 2>&1 || fail "teststate --list"
+grep -q "teststate (flag → effective)" "$SCRATCH/teststate.txt" || fail "teststate output"
+"${LV[@]}" usecase --file usecases/greet.usecase.iter.md --add "src/src.code.iter.md" > /dev/null 2>&1 || fail "usecase --add"
+[ "$("${LV[@]}" usecase --file usecases/greet.usecase.iter.md --list 2>/dev/null)" = "src/src.code.iter.md" ] || fail "usecase --list"
+# add --question @file stores the FILE's text (not the path) — the widget's title is its first line
+printf 'Situation. The cache has no memory alarm.\n\nThe decision needed: may it open a metrics port?\n' > "$SCRATCH/q.md"
+QF=$("${LV[@]}" add --type code --title "question by file" --mainwork "build it" --question "@$SCRATCH/q.md" 2>&1 | sed -n 's/^added \([^ ]*\).*/\1/p' | head -1)
+[ -n "$QF" ] || fail "add --question @file did not add"
+QW=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -r --arg n "question by file" '.[]|select(.name==$n)|.id' | head -1)
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$QW/details" | jq -r '[.[]|select(.key=="question")][0].value.title')" = "Situation. The cache has no memory alarm." ] || fail "question widget stored the path, not the file text"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$QW/details" | jq -r '[.[]|select(.key=="question")][0].value.detail' | grep -c "metrics port")" = 1 ] || fail "question detail lacks the file body"
+# the V2-only verbs say so; nothing V2 is on the agent's environment
+{ "${LV[@]}" testsweep 2>&1 || true; } | grep -q "retired with the V2 binary" || fail "retired verb message"
+grep -q "ITER_V2" "$P1" && fail "prompt/env still mentions V2" || true
+pass "local-file verbs native to V3: runtests (neutral/claims -> claim rows, stale parks), validate (+template), markers, teststate, usecase; V2 verbs retired"
+
+# ---------- lock shape (pdy-dev bug report 2026-09-07, defect 3) ----------
+# an agent record declares what its items may lock; iter_data refuses on create and on
+# any PUT that changes lockdirs, naming the rule and the overlap count; warnings ride back
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/planshape" \
+  -d '{"desc":"plan-like","max":1,"promptbody":"x","lockshape":{"allow":["{topdir}/devops/plan"],"outside":"refuse"}}' >/dev/null || fail "planshape agent put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/noshape" \
+  -d '{"desc":"explain-like","max":1,"promptbody":"x","lockshape":{"none":true}}' >/dev/null || fail "noshape agent put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/codeshape" \
+  -d '{"desc":"code-like","max":1,"promptbody":"x","lockshape":{"max_overlap":1}}' >/dev/null || fail "codeshape agent put"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/testshape" \
+  -d '{"desc":"testwriter-like","max":1,"promptbody":"x","lockshape":{"allow":["{topdir}/**/{test_dir}"]}}' >/dev/null || fail "testshape agent put"
+# three open items under devops so the refusal can quote the cost
+for n in a b c; do curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d "{\"name\":\"devops $n\",\"agent\":\"exec\",\"exec_shell\":\"true\",\"state\":\"paused\",\"lockdirs\":[\"{topdir}/devops/$n/\"]}" >/dev/null; done
+RESP=$(curl -s -w '\n%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"wide plan","agent":"planshape","lockdirs":["{topdir}/devops"]}')
+[ "$(echo "$RESP" | tail -1)" = 400 ] || fail "wide plan lock accepted (HTTP $(echo "$RESP" | tail -1))"
+echo "$RESP" | head -1 | jq -r .error | grep -q "refused: codepath {topdir}/devops is outside the planshape agent's lock shape and overlaps 3 open item(s); a planshape item locks the directory it writes ({topdir}/devops/plan)" || fail "refusal text: $(echo "$RESP" | head -1)"
+PS=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"narrow plan","agent":"planshape","state":"paused","lockdirs":["{topdir}/devops/plan/corridor"]}' | jq -r .id)
+[ -n "$PS" ] && [ "$PS" != null ] || fail "in-shape plan lock refused"
+PSJ=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$PS")
+CODE=$(echo "$PSJ" | jq '.lockdirs=["{topdir}/devops"]' | curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$PS?expect_version=$(echo "$PSJ" | jq -r .version)" -d @-)
+[ "$CODE" = 400 ] || fail "PUT widening the lock accepted (HTTP $CODE)"
+echo "$PSJ" | jq '.priority=1' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$PS?expect_version=$(echo "$PSJ" | jq -r .version)" -d @- >/dev/null || fail "an edit that leaves lockdirs alone was refused"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"explain with lock","agent":"noshape","lockdirs":["{topdir}/x"]}')
+[ "$CODE" = 400 ] || fail "lockshape.none accepted a lockdir (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"explain no lock","agent":"noshape","state":"paused","lockdirs":[]}' >/dev/null || fail "lockshape.none refused an item with no lock"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"tests in the wrong place","agent":"testshape","lockdirs":["{topdir}/core/repos/x"]}')
+[ "$CODE" = 400 ] || fail "testwriter lock outside {test_dir} accepted (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"tests in place","agent":"testshape","state":"paused","lockdirs":["{topdir}/core/repos/x/tests"]}' >/dev/null || fail "testwriter lock on <container>/tests refused"
+WARN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"wide code","agent":"codeshape","state":"paused","lockdirs":["{topdir}/devops/"]}' | jq -r '.warnings[0]')
+echo "$WARN" | grep -q "warning: codepath {topdir}/devops/ overlaps 4 open item(s) (lockshape.max_overlap 1)" || fail "max_overlap warning: $WARN"
+# a project override softens the rule key by key (refuse -> warn)
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.agents.planshape={"lockshape":{"outside":"warn"}}' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+WARN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"wide plan tolerated","agent":"planshape","state":"paused","lockdirs":["{topdir}/devops"]}' | jq -r '.warnings[0]')
+echo "$WARN" | grep -q "warning: codepath {topdir}/devops is outside" || fail "override to warn not honored: $WARN"
+# `iter add` reports the refusal (and the server's warnings) to the agent
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq 'del(.agents.planshape)' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+RC=0; ITER_AGENT=planshape "${LV[@]}" add --type planshape --title "cli wide plan" --mainwork "x" --codepath "$SAMPLE/core" > "$SCRATCH/add-refused.txt" 2>&1 || RC=$?
+[ "$RC" = 1 ] || { cat "$SCRATCH/add-refused.txt"; fail "iter add exit $RC for a refused lock (expected 1)"; }
+grep -q "iter: create refused: codepath {topdir}/core is outside the planshape agent's lock shape" "$SCRATCH/add-refused.txt" || { cat "$SCRATCH/add-refused.txt"; fail "iter add refusal text"; }
+"${LV[@]}" add --type codeshape --title "cli wide code" --mainwork "x" --codepath "$SAMPLE/devops" > "$SCRATCH/add-warned.txt" 2>&1 || { cat "$SCRATCH/add-warned.txt"; fail "iter add with a warning should still add"; }
+grep -q "iter add: warning: codepath {topdir}/devops overlaps" "$SCRATCH/add-warned.txt" || { cat "$SCRATCH/add-warned.txt"; fail "iter add did not print the server warning"; }
+pass "lock shape: refused outside the agent's allow list (rule + overlap count named), on create and on a lockdirs PUT only; none/{test_dir}/max_overlap; project override to warn; iter add reports both"
+# answered question flows back into the next run's mainwork
+QO=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC/details" | jq -r '[.[]|select(.key=="question")]|last|.order')
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC/details" | jq -c "[.[]|select(.key==\"question\")]|last|.value.fields[0].value=\"blue\"|{key:\"question\",valuetype:\"json\",value:.value}" \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$GC/details/$QO" -d @- >/dev/null || fail "answer widget"
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GC")
+echo "$FRESH" | jq '.state="queued"|.name="gate-answered"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$GC?expect_version=$(echo "$FRESH" | jq -r .version)" -d @- >/dev/null
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-answered.log" 2>&1) || true
+PA=$(grep -l "# Step: mainwork" "$GATE_PROMPTS"/*-gate-answered.txt 2>/dev/null | head -1)
+[ -n "$PA" ] || { cat "$SCRATCH/engine-answered.log"; fail "no mainwork turn after the answer"; }
+grep -q "A question on this work item was answered" "$PA" && grep -q "Answer: blue" "$PA" || fail "answered question not surfaced in mainwork"
+pass "answered question surfaces at the top of the next mainwork turn"
+# agent delete (admin only) + engine self-register
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ENGINE_TOKEN" -X DELETE "$BASE/api/agents/gatetest")
+[ "$CODE" = 403 ] || fail "engine role deleted an agent (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/throwaway" -d '{"desc":"x","promptbody":"y"}' >/dev/null
+curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/agents/throwaway" | jq -e '.deleted==true' >/dev/null || fail "agent delete"
+pass "agent delete: admin only"
+cat > "$SAMPLE/.iter/config-new.json" <<EOF
+{"data_url":"$BASE","token_envar":"ITER_ENGINE_TOKEN","engine_name":"EngineNew","env_file":"$SAMPLE/.env"}
+EOF
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config-new.json --ticks 2 > "$SCRATCH/engine-selfreg.log" 2>&1) || true
+grep -q "registered 'EngineNew'" "$SCRATCH/engine-selfreg.log" || { cat "$SCRATCH/engine-selfreg.log"; fail "engine did not self-register"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/EngineNew" | jq -r .name)" = EngineNew ] || fail "self-registered engine record missing"
+pass "engine self-registers on first start"
+# delete: refused while heartbeating (409), allowed once stale; the project's engines list drops it
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.engines += ["Ghost"]' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Ghost" -d "{\"host\":\"x\",\"state\":\"Running\",\"ticksec\":5,\"last_seen\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"projects\":{}}" >/dev/null || fail "ghost engine put"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X DELETE "$BASE/api/engines/Ghost"); [ "$CODE" = 409 ] || fail "deleting a heartbeating engine should be 409 (got $CODE)"
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Ghost" | jq '.last_seen="2000-01-01T00:00:00Z"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Ghost" -d @- >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ENGINE_TOKEN" -X DELETE "$BASE/api/engines/Ghost"); [ "$CODE" = 403 ] || fail "engine role deleted an engine (HTTP $CODE)"
+curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/engines/Ghost" >/dev/null || fail "delete stale engine"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/api/engines/Ghost")" = 404 ] || fail "ghost engine still there"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq -e '.engines|index("Ghost")|not' >/dev/null || fail "project still lists the deleted engine"
+pass "engine record delete: admin-only, refused while heartbeating, project engine lists cleaned"
+
+# ---- spend recording + daily cap (2026-09-04) ----
+SP=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/spend")
+[ "$(echo "$SP" | jq 'length')" -ge 1 ] || fail "no spend rows after agent runs"
+[ "$(echo "$SP" | jq -r '.[0].usd > 0')" = true ] || fail "spend usd not accumulated: $(echo "$SP" | jq -c '.[0]')"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR/details" | jq -e '[.[]|select(.key=="spend" and .value.usd>0)]|length>=1' >/dev/null || fail "no spend detail row on a run item"
+pass "spend: per-run row on the item + project daily total from claude's cost report"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxdailycost=0' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+BC=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"budget blocked","agent":"exec","exec_shell":"echo b > out_budget.txt","priority":0,"lockdirs":["{topdir}/bud/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-budget.log" 2>&1) || true
+[ ! -f "$SAMPLE/out_budget.txt" ] || fail "engine picked work with maxdailycost=0"
+grep -q "daily budget is zero" "$SCRATCH/engine-budget.log" || fail "budget hold not logged"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$BC" | jq -r '.tags[0].text')" = "blocked by: daily budget" ] || fail "budget-held item not tagged: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$BC" | jq -c .tags)"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxdailycost=null' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+pass "maxdailycost=0 holds all picks (null = unlimited restored)"
+
+# ---- account rotation with long-lived tokens (2026-09-04) ----
+# two accounts by env-var NAME; usage files drive the ladder; the fake claude records which token it was given
+export ACCT_A_TOKEN="tok-A-1yr" ACCT_B_TOKEN="tok-B-1yr"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"A","token_envar":"ACCT_A_TOKEN","order":1,"switch":80,"stop":99},{"name":"B","token_envar":"ACCT_B_TOKEN","order":2,"switch":80,"stop":99}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "accounts update"
+FUT=$(( $(date +%s) + 86400 ))
+snap() { printf '{"ts":"%s","rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$FUT" "$3" "$FUT" > "$ITER_USAGE_DIR/iter3-usage-$1.json"; }
+snap A 85 10; snap B 5 5      # A over its switch% -> B must be used
+: > "$GATE_PROMPTS/tokens.txt"
+R1=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-rot1","agent":"gatetest","priority":0,"lockdirs":["{topdir}/rot1/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 5 > "$SCRATCH/engine-rot1.log" 2>&1) || true
+grep -q "token=tok-B-1yr name=gate-rot1" "$GATE_PROMPTS/tokens.txt" || { cat "$GATE_PROMPTS/tokens.txt"; cat "$SCRATCH/engine-rot1.log"; fail "engine did not route the run to account B's token"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .account)" = B ] || fail "engine record does not show account B"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .usage.account)" = B ] || fail "usage snapshot on the chip is not B's"
+[ "$(jq -r '.rate_limits.five_hour.used_percentage|round' "$ITER_USAGE_DIR/iter3-usage-B.json")" = 33 ] || fail "the run's rate_limit_event was not written to B's snapshot: $(cat "$ITER_USAGE_DIR/iter3-usage-B.json")"
+[ "$(jq -r .source "$ITER_USAGE_DIR/iter3-usage-B.json")" = stream ] || fail "snapshot source is not 'stream'"
+pass "per-run usage: the session's stream-json rate_limit_event (5h 33%) landed in the billed account's snapshot"
+snap A 85 10; snap B 90 5     # both over switch%, both under stop% -> pass 2 picks A (lowest order)
+: > "$GATE_PROMPTS/tokens.txt"
+R2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-rot2","agent":"gatetest","priority":0,"lockdirs":["{topdir}/rot2/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 5 > "$SCRATCH/engine-rot2.log" 2>&1) || true
+grep -q "token=tok-A-1yr name=gate-rot2" "$GATE_PROMPTS/tokens.txt" || { cat "$GATE_PROMPTS/tokens.txt"; fail "second pass did not fall back to account A"; }
+snap A 99 10; snap B 99 5     # both at stop% -> nothing runs
+R3=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-rot3","agent":"exec","exec_shell":"echo r3 > out_rot3.txt","priority":0,"lockdirs":["{topdir}/rot3/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-rot3.log" 2>&1) || true
+[ ! -f "$SAMPLE/out_rot3.txt" ] || fail "engine ran with every account at stop%"
+grep -q "all accounts at stop%" "$SCRATCH/engine-rot3.log" || fail "stop-hold not logged"
+pass "account rotation: A over switch -> B's token used and reported; both over switch -> lowest order under stop; all at stop -> hold"
+
+# ---- account token hot reload (2026-09-11): a named account with no token is never substituted; the env_file is re-read while running ----
+# one account whose variable is set nowhere: nothing runs, the probe says why, the item says why, the test is red
+unset DEV9_TOKEN
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"Dev9","token_envar":"DEV9_TOKEN","order":1,"switch":80,"stop":99}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "Dev9 account update"
+rm -f "$ITER_USAGE_DIR/iter3-usage-Dev9.json"
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=1' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null || fail "engine probe_stale_min (hot reload)"
+: > "$GATE_PROMPTS/tokens.txt"
+HR=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-hot1","agent":"gatetest","priority":0,"lockdirs":["{topdir}/hot1/"]}' | jq -r .id)
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/engines/Engine01/test" -d '{}' >/dev/null || fail "engine test request (tokenless)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-hot1.log" 2>&1) || true
+grep -q "usage probe 'Dev9' skipped: DEV9_TOKEN not set" "$SCRATCH/engine-hot1.log" || { cat "$SCRATCH/engine-hot1.log"; fail "tokenless account: probe skip not logged"; }
+grep -q "no account token is set — 1 accounts configured, none usable" "$SCRATCH/engine-hot1.log" || { cat "$SCRATCH/engine-hot1.log"; fail "tokenless hold not logged"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR" | jq -r '.tags[0].text')" = "blocked by: no account token" ] || fail "tokenless-held item not tagged: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR" | jq -c .tags)"
+[ "$(st_of "$HR")" = queued ] || fail "tokenless account: item left queued state ($(st_of "$HR"))"
+grep -q "token=" "$GATE_PROMPTS/tokens.txt" && fail "a run happened with no account token: $(cat "$GATE_PROMPTS/tokens.txt")"
+ENG=$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01")
+[ "$(echo "$ENG" | jq -r .hold)" = "no account token" ] || fail "heartbeat hold is not 'no account token': $(echo "$ENG" | jq -c '{hold,account}')"
+[ "$(echo "$ENG" | jq -r '.accounts[]|select(.name=="Dev9").token')" = unset ] || fail "heartbeat does not flag Dev9's token as unset: $(echo "$ENG" | jq -c .accounts)"
+[ "$(echo "$ENG" | jq -r .test_result.ok)" = false ] || fail "connectivity test on a tokenless account was not red: $(echo "$ENG" | jq -c .test_result)"
+[ "$(echo "$ENG" | jq -r .test_result.error)" = "no token for account 'Dev9' (DEV9_TOKEN unset)" ] || fail "test error text: $(echo "$ENG" | jq -c .test_result)"
+grep -q "connectivity test FAILED: no token for account 'Dev9' (DEV9_TOKEN unset)" "$SCRATCH/engine-hot1.log" || fail "test failure not logged"
+[ ! -f "$ITER_USAGE_DIR/iter3-usage-Dev9.json" ] || fail "a snapshot was written for an account that never ran: $(cat "$ITER_USAGE_DIR/iter3-usage-Dev9.json")"
+pass "tokenless account: never picked (blocked by: no account token), probe skip logged, test red and named, no snapshot written"
+# the token appears in the env_file WHILE the engine runs (a fresh process would read it at startup):
+# picked up on the next tick, the held item runs billed to it, the record says set
+: > "$GATE_PROMPTS/tokens.txt"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 10 > "$SCRATCH/engine-hot2.log" 2>&1) &
+HOTPID=$!
+sleep 3
+echo 'DEV9_TOKEN=tok-dev9' >> "$SAMPLE/.env"
+wait $HOTPID || true
+grep -q "env_file reloaded: +DEV9_TOKEN" "$SCRATCH/engine-hot2.log" || { cat "$SCRATCH/engine-hot2.log"; fail "env_file reload not logged"; }
+grep -q "tok-dev9" "$SCRATCH/engine-hot2.log" && fail "the reload line printed a token value"
+grep -q "token=tok-dev9 name=gate-hot1" "$GATE_PROMPTS/tokens.txt" || { cat "$GATE_PROMPTS/tokens.txt"; cat "$SCRATCH/engine-hot2.log"; fail "the run was not billed to the hot-loaded token"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r '.accounts[]|select(.name=="Dev9").token')" = set ] || fail "heartbeat does not show Dev9's token as set"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .hold)" = "" ] || fail "hold not cleared after the token appeared"
+[ "$(jq -r .source "$ITER_USAGE_DIR/iter3-usage-Dev9.json")" = stream ] || fail "the run's rate_limit_event did not land in Dev9's own snapshot"
+# the line is deleted again while the engine runs: removed on the next tick, nothing picked, the reason named
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 9 > "$SCRATCH/engine-hot3.log" 2>&1) &
+HOTPID=$!
+sleep 2
+grep -v '^DEV9_TOKEN=' "$SAMPLE/.env" > "$SAMPLE/.env.new" && mv "$SAMPLE/.env.new" "$SAMPLE/.env"
+sleep 2
+HR2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"hot2 work","agent":"exec","exec_shell":"echo h > out_hot2.txt","priority":0,"lockdirs":["{topdir}/hot2/"]}' | jq -r .id)
+wait $HOTPID || true
+grep -q "env_file reloaded: -DEV9_TOKEN" "$SCRATCH/engine-hot3.log" || { cat "$SCRATCH/engine-hot3.log"; fail "token removal not logged"; }
+[ ! -f "$SAMPLE/out_hot2.txt" ] || fail "engine ran work after its only token was removed"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -r '.tags[0].text')" = "blocked by: no account token" ] || { cat "$SCRATCH/engine-hot3.log"; fail "item not tagged after the token was removed: $(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$HR2" | jq -c .tags)"; }
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=0' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
+pass "account hot reload: +DEV9_TOKEN picked up without a restart (run billed to it, record says set), -DEV9_TOKEN stops picks and names the reason"
+
+# ---- scoped end-of-run commit (bugfix 2026-09-12): two items with disjoint lockdirs share one checkout; each fake session
+#      dirties both directories; each item's commit and evidence must hold only its own scope, and neither may bounce ----
+export FAKE_TOKEN="tok-test-1yr"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}] | .commit_extra_paths=["Agent_Recommendations.md"]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "scope project update"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq -c .commit_extra_paths)" = '["Agent_Recommendations.md"]' ] || fail "commit_extra_paths not stored"
+snap TestAcct 10 5
+(cd "$SAMPLE" && git add -A >/dev/null 2>&1 && git -c user.email=e2e@iter -c user.name=e2e commit -qm "e2e: settle before the scope test" >/dev/null 2>&1) || true
+echo "shared note" > "$SAMPLE/Agent_Recommendations.md"
+SC1=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-scope1","agent":"gatetest","priority":0,"lockdirs":["{topdir}/scope1/"]}' | jq -r .id)
+SC2=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"gate-scope2","agent":"gatetest","priority":0,"lockdirs":["{topdir}/scope2/"]}' | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 12 > "$SCRATCH/engine-scope.log" 2>&1) || true
+[ "$(st_of "$SC1")" = complete ] || { cat "$SCRATCH/engine-scope.log"; fail "gate-scope1 state=$(st_of "$SC1") (expected complete)"; }
+[ "$(st_of "$SC2")" = complete ] || { cat "$SCRATCH/engine-scope.log"; fail "gate-scope2 state=$(st_of "$SC2") (expected complete)"; }
+[ "$(gb_of "$SC1")" = 0 ] && [ "$(gb_of "$SC2")" = 0 ] || fail "a scope item bounced (gate_bounces $(gb_of "$SC1") / $(gb_of "$SC2")): the other agent's files leaked into its evidence"
+C1=$(cd "$SAMPLE" && git log --format=%H --grep="(${SC1:0:8})" | head -1); C2=$(cd "$SAMPLE" && git log --format=%H --grep="(${SC2:0:8})" | head -1)
+[ -n "$C1" ] && [ -n "$C2" ] || fail "end-of-run commits missing: '$C1' '$C2'"
+F1=$(cd "$SAMPLE" && git show --format= --name-only "$C1"); F2=$(cd "$SAMPLE" && git show --format= --name-only "$C2")
+grep -q "^scope1/work.txt" <<<"$F1" && ! grep -q "^scope2/" <<<"$F1" || fail "gate-scope1's commit is not limited to its lock scope: $(echo "$F1" | tr '\n' ' ')"
+grep -q "^scope2/work.txt" <<<"$F2" && ! grep -q "^scope1/" <<<"$F2" || fail "gate-scope2's commit is not limited to its lock scope: $(echo "$F2" | tr '\n' ' ')"
+printf '%s\n%s\n' "$F1" "$F2" | grep -q "^Agent_Recommendations.md" || fail "the project's commit_extra_paths file was not committed by either item"
+grep -q "left [0-9]* uncommitted path(s) outside its lock scope untouched" "$SCRATCH/engine-scope.log" || { cat "$SCRATCH/engine-scope.log"; fail "leftover count not logged"; }
+grep -q "left [0-9]* uncommitted path(s).*scope[12]/work.txt" "$SCRATCH/engine-scope.log" && fail "the leftover line named another item's file"
+[ -f "$GATE_PROMPTS/verifier-gate-scope1.txt" ] && [ -f "$GATE_PROMPTS/verifier-gate-scope2.txt" ] || fail "verifier prompts not recorded"
+grep -qE "limited to (this item's|its) lock scope" "$GATE_PROMPTS/verifier-gate-scope1.txt" || { cat "$GATE_PROMPTS/verifier-gate-scope1.txt"; fail "verifier not told the diffstat is scoped"; }
+grep -q "scope2/" "$GATE_PROMPTS/verifier-gate-scope1.txt" && fail "gate-scope1's verifier evidence names the other item's directory"
+grep -q "scope1/" "$GATE_PROMPTS/verifier-gate-scope2.txt" && fail "gate-scope2's verifier evidence names the other item's directory"
+grep -q "(${SC1:0:8})" "$GATE_PROMPTS/verifier-gate-scope1.txt" || fail "verifier not shown this item's own commit"
+# since F8/F9 (iter4) a sibling commit touching this scope (e.g. the shared
+# commit_extra_paths file) is LISTED, but only under "Commits by other items";
+# what must never happen is counting it as this item's own commit
+OWN=$(grep -o "Commits carrying this item.s id, all attempts: .*" "$GATE_PROMPTS/verifier-gate-scope1.txt" | sed 's/Commits by other items.*//')
+grep -q "(${SC2:0:8})" <<<"$OWN" && fail "gate-scope1's evidence counts the sibling's commit as its own"
+grep -q "(${SC2:0:8})" "$GATE_PROMPTS/verifier-gate-scope1.txt" && ! grep -q "Commits by other items in this scope (not this item's work):.*(${SC2:0:8})" "$GATE_PROMPTS/verifier-gate-scope1.txt" && fail "gate-scope1's evidence names the sibling's commit without labelling it another item's"
+grep -q "outside the item's lock scope is NOT evidence" "$GATE_PROMPTS/verifier-gate-scope1.txt" || fail "verifier prompt lacks the shared-checkout rule"
+grep -E "(${SC1:0:8}|${SC2:0:8}) left [1-9][0-9]* uncommitted path" "$SCRATCH/engine-scope.log" >/dev/null || { cat "$SCRATCH/engine-scope.log"; fail "neither scope item reported the other's dirty files as left untouched"; }
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.commit_extra_paths=[]' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+pass "scoped end-of-run commit: each item committed its own lock scope (+ commit_extra_paths), the sibling's files stayed uncommitted and unnamed, evidence and verifier prompt scoped, no bounces"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.accounts=[{"name":"TestAcct","token_envar":"FAKE_TOKEN","order":1,"switch":80,"stop":99}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+snap TestAcct 10 5
+
+# connectivity test: webui POSTs /test, the engine nudges (fake claude) and reports back with usage
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/engines/Engine01/test" -d '{}' >/dev/null || fail "engine test request"
+[ -n "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r .test_requested)" ] || fail "test_requested not set"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-test.log" 2>&1) || true
+grep -q "connectivity test OK" "$SCRATCH/engine-test.log" || { cat "$SCRATCH/engine-test.log"; fail "engine did not run the connectivity test"; }
+ENG=$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01")
+[ "$(echo "$ENG" | jq -r .test_requested)" = "" ] || fail "test_requested not cleared"
+[ "$(echo "$ENG" | jq -r .test_result.ok)" = true ] || fail "test_result not ok: $(echo "$ENG" | jq -c .test_result)"
+[ "$(echo "$ENG" | jq -r .usage.account)" = TestAcct ] || fail "usage snapshot not reported on heartbeat: $(echo "$ENG" | jq -c .usage)"
+[ "$(echo "$ENG" | jq -r '.usage.five_hour_pct|floor')" = 10 ] || fail "usage pct wrong: $(echo "$ENG" | jq -c .usage)"
+[ "$(grep -c "verifier\|worker" "$GATE_LOG")" -ge 1 ] || true
+pass "engine test: nudge ran on haiku via fake claude, result + usage reported to iter_data"
+
+# ---- idle usage probe: direct 1-token call, numbers from the headers (2026-09-04) ----
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=1' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null || fail "engine probe_stale_min"
+STALE=$(date -u -v-2H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+stale_snap() { printf '{"ts":"%s","rate_limits":{"five_hour":{"used_percentage":10,"resets_at":%s},"seven_day":{"used_percentage":5,"resets_at":%s}}}\n' "$STALE" "$FUTURE" "$FUTURE" > "$ITER_USAGE_DIR/iter3-usage-TestAcct.json"; }
+stale_snap
+export FAKE_TOKEN="tok-test-1yr"
+: > "$PROBE_LOG"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-probe.log" 2>&1) || true
+grep -q "usage probe 'TestAcct': 5h 42% 7d 10% (allowed_warning)" "$SCRATCH/engine-probe.log" || { cat "$SCRATCH/engine-probe.log"; fail "idle probe did not run"; }
+grep -q "auth=Bearer tok-test-1yr beta=oauth-2025-04-20" "$PROBE_LOG" || { cat "$PROBE_LOG"; fail "probe did not send the account token as Bearer"; }
+[ "$(jq -r '.rate_limits.five_hour.used_percentage|round' "$ITER_USAGE_DIR/iter3-usage-TestAcct.json")" = 42 ] || fail "probe snapshot not written"
+[ "$(jq -r .source "$ITER_USAGE_DIR/iter3-usage-TestAcct.json")" = probe ] || fail "snapshot source is not 'probe'"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq -r '.usage.five_hour_pct|floor')" = 42 ] || fail "probed usage not on the heartbeat"
+# --probe from the shell does the same
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --probe > "$SCRATCH/probe-cli.log" 2>&1) || true
+grep -q "usage: 5h 42% 7d 10%" "$SCRATCH/probe-cli.log" || { cat "$SCRATCH/probe-cli.log"; fail "iter_engine --probe did not report usage"; }
+pass "idle usage probe: direct 1-token call with the account token; 5h/7d from the headers -> snapshot + heartbeat; --probe from the shell"
+# hard limit: the server rejects with 429 but still sends the headers -> the account reads 100% and nothing is picked
+touch "$PROBE_LOG.reject"
+stale_snap
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"probe-429 work","agent":"exec","exec_shell":"echo x > out_probe429.txt","priority":0,"lockdirs":["{topdir}/p429/"]}' >/dev/null || fail "probe-429 item"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" ITER_USAGE_DIR="$ITER_USAGE_DIR" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-probe429.log" 2>&1) || true
+grep -q "usage probe 'TestAcct': 5h 100% 7d 10% (rejected)" "$SCRATCH/engine-probe429.log" || { cat "$SCRATCH/engine-probe429.log"; fail "429 probe did not yield 100%"; }
+[ ! -f "$SAMPLE/out_probe429.txt" ] || fail "engine ran work on an account the server rejects"
+grep -q "all accounts at stop%" "$SCRATCH/engine-probe429.log" || fail "hard-limit hold not logged"
+rm -f "$PROBE_LOG.reject"
+snap TestAcct 10 5
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.probe_stale_min=0' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
+pass "hard limit: a 429 with headers reads as 100% -> no work picked, hold until a window resets"
+
+# human answers the stuck item's widget with "accept" -> engine closes it without a run
+GSO=$(echo "$GSQ" | jq -r .order)
+echo "$GSQ" | jq '.value.fields[0].value="accept" | {key:.key,valuetype:.valuetype,value:.value}' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$GS/details/$GSO" -d @- >/dev/null || fail "answer gate widget"
+FRESH=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GS")
+echo "$FRESH" | jq '.state="queued"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$GS?expect_version=$(echo "$FRESH" | jq -r .version)" -d @- >/dev/null || fail "requeue after answer"
+BEFORE=$(grep -c "worker gate-stuck" "$GATE_LOG")
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 4 > "$SCRATCH/engine-gate2.log" 2>&1) || true
+[ "$(st_of "$GS")" = complete ] || { cat "$SCRATCH/engine-gate2.log"; fail "gate-stuck after accept state=$(st_of "$GS") (expected complete)"; }
+[ "$(grep -c "worker gate-stuck" "$GATE_LOG")" = "$BEFORE" ] || fail "accept should close without running an agent"
+pass "close gate: human 'accept' closes the item complete without spending a run"
+
+# ---- ELI5 / explain (2026-09-04): on a CLOSED item, at once, outside the cap ----
+curl -sf "${AUTH[@]}" -X PUT "$BASE/api/agents/explain" -d '{"model":"sonnet","max":1,"timeoutsec":300,"promptbody":"# Agent Definition: explain\n\nYou are the **explain** agent.\n"}' >/dev/null || fail "explain agent put"
+GRX=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR"); [ "$(echo "$GRX" | jq -r .state)" = complete ] || fail "gate-recovers is not closed"
+# Engine01 heartbeated seconds ago (previous run): age its record so no engine counts as live for this first request
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq '.last_seen="2000-01-01T00:00:00Z"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
+R=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$GR/explain" -d '{}') || fail "explain request"
+[ -n "$(echo "$R" | jq -r .requested)" ] || fail "explain not stamped: $R"
+[ "$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$GR/explain" -d '{}' | jq -r .already)" = true ] || fail "second explain request should report already"
+[ -n "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR" | jq -r .explain_requested)" ] || fail "explain_requested not on the item"
+# no engine is heartbeating right now -> unassigned; a rival engine claims it, then Engine01 must be refused (409) and run nothing
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR" | jq -r .explain_engine)" = "" ] || fail "explain assigned with no live engine"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$GR/explain/claim" -d '{"engine":"Rival"}' >/dev/null || fail "rival claim"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$GR/explain/claim" -d '{"engine":"Engine01"}')
+[ "$CODE" = 409 ] || fail "second engine's claim should be 409 (got $CODE)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-eli5-rival.log" 2>&1) || true
+grep -q "explained " "$SCRATCH/engine-eli5-rival.log" && fail "Engine01 ran an ELI5 assigned to another engine"
+# release it (rival never ran): clear + re-request; with Engine01 heartbeating from the last run it is the one live engine -> assigned to it
+curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/projects/$PROJECT/workitems/$GR/explain" >/dev/null
+curl -sf "${AUTH[@]}" "$BASE/api/engines/Engine01" | jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_seen=$ts|.state="Running"' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/engines/Engine01" -d @- >/dev/null
+R=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$GR/explain" -d '{}')
+[ "$(echo "$R" | jq -r .engine)" = Engine01 ] || fail "explain not assigned to the live engine: $R"
+# the project is Stopped-or-Running either way; cap 0 must not matter: set maxagents else=0 for this run
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={"else":0}' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-eli5.log" 2>&1) || true
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq '.maxagents={"else":4}' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+grep -q "ELI5 requested .* explaining now, outside the cap" "$SCRATCH/engine-eli5.log" || { cat "$SCRATCH/engine-eli5.log"; fail "engine did not pick up the ELI5 request"; }
+grep -q "explained .* 'gate-recovers'" "$SCRATCH/engine-eli5.log" || { cat "$SCRATCH/engine-eli5.log"; fail "engine did not report the explanation"; }
+EX=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR/details" | jq -r '[.[]|select(.key=="explained")]|last|.value')
+grep -q "EXPLAINED-MARKER" <<<"$EX" || fail "no 'explained' detail row on the closed item: $(keys_of "$GR")"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR" | jq -r '.explain_requested+.explain_engine')" = "" ] || fail "explain_requested/explain_engine not cleared"
+[ "$(st_of "$GR")" = complete ] || fail "explain changed the item's state"
+grep -q -- "--allowedTools Read,Glob,Grep --disallowedTools Bash,Edit,Write" "$GATE_LOG" || { grep -A3 "explain tools" "$GATE_LOG" | tail -5; fail "explain session was not read-only"; }
+for m in "# Explain this work item simply (ELI5)" "READ-ONLY" "Title: gate-recovers" "### request" "### response" "main.iter.md" "reqs/techreq.md"; do
+  grep -qF -- "$m" "$GATE_PROMPTS/eli5-prompt.txt" || { head -40 "$GATE_PROMPTS/eli5-prompt.txt"; fail "ELI5 prompt lacks: $m"; }
+done
+grep -q "### spend" "$GATE_PROMPTS/eli5-prompt.txt" && fail "ELI5 prompt should not carry spend rows"
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$GR/details" | jq '[.[]|select(.key=="spend" and .value.agent=="explain")]|length')" = 1 ] || fail "explain spend row missing"
+pass "ELI5: one engine only (random live engine at request, claim 409s a rival) -> explains a closed item at once with cap 0 (read-only tools), 'Explained Simply' row appended, flags cleared, spend recorded"
+
+# ---- cluster-restart block (built 2026-09-09; iter3/plans/cluster_restart_block.buildplan.md) ----
+# `iter block --cluster-restart` parks the calling item tagged blocked-by-cluster-restart with
+# its attempt put back; the engine derives "blocked by: cluster restart" while the cluster is
+# unavailable (by the clock, or by the newest restart window's clusterhealth row), requeues a
+# parked tagged item once healthy, never picks a tagged queued item until then, and strips the
+# tag on the claim. No faked clock: the window is moved around the real UTC time instead.
+hhmm_utc() { date -u -v"$1"H +%H:%M 2>/dev/null || date -u -d "$1 hours" +%H:%M; }
+set_window() { # schedule-id from until
+  curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq --arg s "$1" --arg f "$2" --arg u "$3" '.cluster_restart={schedule:$s,tz:"UTC",from:$f,until:$u}' \
+    | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null || fail "cluster_restart window put"
+}
+tags_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r '[.tags[].text]|join("|")'; }
+attempt_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .attempt; }
+lasterror_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1" | jq -r .lasterror; }
+mkdir -p "$SAMPLE/src/cluster"
+CB=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"gate-cluster","agent":"gatetest","priority":1,"lockdirs":["{topdir}/src/cluster/"],"tags":[{"text":"usecase:ops","color":"#3b6fb6"}]}' | jq -r .id)
+# 1. inside the restart window by the clock: the (untagged) item is dispatched as usual, the agent
+#    needs the cluster and blocks; the engine keeps the parked state and does not requeue it
+set_window "" "$(hhmm_utc -1)" "$(hhmm_utc +1)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-cluster1.log" 2>&1) || true
+[ "$(st_of "$CB")" = parked ] || { cat "$SCRATCH/engine-cluster1.log"; cat "$GATE_PROMPTS/block.txt" 2>/dev/null; fail "gate-cluster state=$(st_of "$CB") after iter block (expected parked)"; }
+[ "$(attempt_of "$CB")" = 0 ] || fail "gate-cluster attempt=$(attempt_of "$CB") after the block (expected 0: the claim's increment given back)"
+tags_of "$CB" | grep -q "^usecase:ops|blocked-by-cluster-restart" || fail "gate-cluster tags after the block: $(tags_of "$CB")"
+grep -q "requeued (parked -> queued" "$SCRATCH/engine-cluster1.log" && fail "engine requeued the item inside the window" || true
+lasterror_of "$CB" | grep -q "^blocked by: cluster restart — need corridor-dev1 for the smoke test" || fail "lasterror after the block: $(lasterror_of "$CB")"
+keys_of "$CB" | grep -q "doc" || fail "no doc row from iter block: $(keys_of "$CB")"
+grep -q "moved it to parked during the run" "$SCRATCH/engine-cluster1.log" || { cat "$SCRATCH/engine-cluster1.log"; fail "engine did not keep the parked state"; }
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 1 ] || fail "gate-cluster worker runs=$(grep -c "worker gate-cluster" "$GATE_LOG") (expected 1)"
+pass "iter block --cluster-restart: parked, durable tag set, attempt put back to 0, lasterror + doc row written"
+
+# 2. still inside the window: the parked item shows the derived tag and is NOT requeued
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-cluster2.log" 2>&1) || true
+[ "$(st_of "$CB")" = parked ] || fail "gate-cluster state=$(st_of "$CB") inside the window (expected parked)"
+[ "$(tags_of "$CB")" = "usecase:ops|blocked-by-cluster-restart|blocked by: cluster restart" ] || fail "tags inside the window: $(tags_of "$CB")"
+grep -q "cluster unavailable — clock: inside the" "$SCRATCH/engine-cluster2.log" || { cat "$SCRATCH/engine-cluster2.log"; fail "engine did not announce the clock block"; }
+pass "clock rule: parked tagged item shows 'blocked by: cluster restart' and stays parked"
+
+# 3. a human (or the nightly requeue script) queues it, tag kept: still not picked while the newest
+#    restart window's clusterhealth row is red, even outside the clock window
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq '.state="queued"' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$CB?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq .version)" -d @- >/dev/null || fail "manual requeue"
+TPL=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window\",\"agent\":\"exec\",\"state\":\"scheduled\",\"priority\":60,\"exec_shell\":\"true\",\"sched\":{\"kind\":\"daily\",\"at\":\"$(hhmm_utc +12)\",\"tz\":\"UTC\"}}" | jq -r .id)
+RED=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window (red)\",\"agent\":\"exec\",\"state\":\"parked\",\"priority\":60,\"exec_shell\":\"true\",\"source_schedule\":\"$TPL\"}" | jq -r .id)
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$RED/details" \
+  -d '{"key":"clusterhealth","valuetype":"json","value":{"cluster":"corridor-dev1","bringup_exit":0,"status_exit":3,"at":"e2e"}}' >/dev/null || fail "clusterhealth row"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RED" | jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.state="complete"|.ts.complete=$t' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$RED?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$RED" | jq .version)" -d @- >/dev/null || fail "red clone complete"
+set_window "$TPL" "$(hhmm_utc +2)" "$(hhmm_utc +3)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-cluster3.log" 2>&1) || true
+[ "$(st_of "$CB")" = queued ] || { cat "$SCRATCH/engine-cluster3.log"; fail "gate-cluster state=$(st_of "$CB") with a red window (expected queued, not picked)"; }
+[ "$(tags_of "$CB")" = "usecase:ops|blocked-by-cluster-restart|blocked by: cluster restart" ] || fail "tags with a red window: $(tags_of "$CB")"
+grep -q "recorded a red status (bringup_exit 0, status_exit 3)" "$SCRATCH/engine-cluster3.log" || { cat "$SCRATCH/engine-cluster3.log"; fail "engine did not read the red clusterhealth row"; }
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 1 ] || fail "a red window let gate-cluster run"
+pass "red window: queued tagged item held on the clusterhealth row (status_exit 3), 'blocked by: cluster restart' shown"
+
+# 4. the next window is an exec clone that POSTs its own green row through the exec environment
+#    (ITER_WORKID / ITER_DATA_URL / ITER_ENGINE_TOKEN): the item is released, dispatched, tag
+#    stripped on the claim, attempt back to 1, and the re-run reads the block back as its previous attempt
+GREEN=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d "{\"name\":\"cluster restart window (green)\",\"agent\":\"exec\",\"priority\":0,\"source_schedule\":\"$TPL\",\"exec_shell\":\"curl -sf -H \\\"authorization: Bearer \$ITER_ENGINE_TOKEN\\\" -H content-type:application/json -X POST \\\"\$ITER_DATA_URL/api/projects/\$ITER_PROJECT/workitems/\$ITER_WORKID/details\\\" -d '{\\\"key\\\":\\\"clusterhealth\\\",\\\"valuetype\\\":\\\"json\\\",\\\"value\\\":{\\\"cluster\\\":\\\"corridor-dev1\\\",\\\"bringup_exit\\\":0,\\\"status_exit\\\":0}}' && echo green\"}" | jq -r .id)
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 8 > "$SCRATCH/engine-cluster4.log" 2>&1) || true
+[ "$(st_of "$GREEN")" = complete ] || { cat "$SCRATCH/engine-cluster4.log"; fail "green window exec clone state=$(st_of "$GREEN")"; }
+keys_of "$GREEN" | grep -q "clusterhealth" || fail "exec clone could not POST its clusterhealth row (exec env): $(keys_of "$GREEN")"
+grep -q "cluster back up and healthy — restart window .* clusterhealth exits 0/0" "$SCRATCH/engine-cluster4.log" || { cat "$SCRATCH/engine-cluster4.log"; fail "engine did not read the green row"; }
+[ "$(st_of "$CB")" = complete ] || { cat "$SCRATCH/engine-cluster4.log"; fail "gate-cluster state=$(st_of "$CB") after the green window (expected complete)"; }
+[ "$(tags_of "$CB")" = "usecase:ops" ] || fail "tags after the claim: $(tags_of "$CB") (both block tags must be stripped)"
+[ "$(attempt_of "$CB")" = 1 ] || fail "gate-cluster attempt=$(attempt_of "$CB") after the re-run (expected 1: the block gave one back, this claim took one)"
+[ "$(grep -c "worker gate-cluster" "$GATE_LOG")" = 2 ] || fail "gate-cluster worker runs=$(grep -c "worker gate-cluster" "$GATE_LOG") (expected 2)"
+grep -lq "Last error: blocked by: cluster restart — need corridor-dev1 for the smoke test" "$GATE_PROMPTS"/*-gate-cluster.txt || fail "the re-run's prompt did not read the block back"
+pass "green window: exec clone addressed itself via the exec env, engine released the tagged item, tag stripped on claim, attempt 1, prompt carried the block reason"
+
+# 5. the parked path releases too: block again inside the window, then a green clock releases it by requeue
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems/$CB/reopen" -d '{}' >/dev/null || fail "reopen gate-cluster"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq '.state="parked"|.tags+=[{"text":"blocked-by-cluster-restart","color":"#c47a1f"}]' \
+  | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT/workitems/$CB?expect_version=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB" | jq .version)" -d @- >/dev/null || fail "park with tag"
+set_window "" "$(hhmm_utc +2)" "$(hhmm_utc +3)"
+(cd "$SAMPLE" && PATH="$FAKEBIN:$PATH" "$ENGINE_BIN" --config .iter/config.json --ticks 6 > "$SCRATCH/engine-cluster5.log" 2>&1) || true
+grep -q "cluster back up and healthy — requeued (parked -> queued, tag kept until it starts)" "$SCRATCH/engine-cluster5.log" || { cat "$SCRATCH/engine-cluster5.log"; fail "engine did not requeue the parked tagged item"; }
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$CB/details" | jq -r '[.[]|select(.key=="doc")]|last|.value' | grep -q "requeued by engine" || fail "no requeue doc row"
+[ "$(st_of "$CB")" = complete ] || { cat "$SCRATCH/engine-cluster5.log"; fail "gate-cluster state=$(st_of "$CB") after the requeue (expected complete)"; }
+[ "$(tags_of "$CB")" = "usecase:ops" ] || fail "tags after the requeue+claim: $(tags_of "$CB")"
+pass "parked path: a parked item tagged blocked-by-cluster-restart is requeued by the engine once healthy (doc row), then claimed with the tag stripped"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT" | jq 'del(.cluster_restart)' | curl -sf "${AUTH[@]}" -X PUT "$BASE/api/projects/$PROJECT" -d @- >/dev/null
+
+# ---- lost locks (2026-09-28): the outage case ----
+# A run whose lock rows lapse (iter_data unreachable longer than the lease; the
+# sweep removed them) re-takes them when the paths are still free and carries
+# on; when another item took a path meanwhile the run is killed and the item
+# re-queued, its attempt not counted; a refused renewal (another run owns the
+# item) kills the run and leaves the record alone.  The rows are deleted here
+# by hand — the same state an outage plus the sweep leaves — and renewal runs
+# every second (ITER_LOCK_RENEW_EVERY_SEC) instead of every minute.
+item_json() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1"; }
+docs_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems/$1/details" | jq -r '[.[]|select(.key=="doc")|.value]|join("\n")'; }
+rows_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/locks" | jq --arg w "$1" '[.[]|select(.workid==$w and .kind=="lock")]|length'; }
+wait_until() { local t=$1; shift; for _ in $(seq 1 $((t * 2))); do "$@" && return 0; sleep 0.5; done; return 1; }
+rm -f "$SAMPLE/outage.txt"
+OUT=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" \
+  -d '{"name":"outage run","agent":"exec","exec_shell":"sleep 25; echo done > outage.txt","state":"queued","priority":0,"lockdirs":["{topdir}/outage/"]}' | jq -r .id)
+[ -n "$OUT" ] && [ "$OUT" != null ] || fail "create outage item"
+(cd "$SAMPLE" && ITER_LOCK_RENEW_EVERY_SEC=1 "$ENGINE_BIN" --config .iter/config.json --ticks 70 > "$SCRATCH/engine-outage.log" 2>&1) &
+OUTAGE_ENGINE=$!
+running_now() { [ "$(item_json "$OUT" | jq -r .state)" = in-progress ] && [ "$(rows_of "$OUT")" -ge 1 ]; }
+wait_until 25 running_now || { cat "$SCRATCH/engine-outage.log"; fail "the outage run never started"; }
+LEASE=$(item_json "$OUT" | jq -r .lease)
+# (a) rows gone, every path still free
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/release_all" -d "{\"workid\":\"$OUT\"}" >/dev/null || fail "drop the rows"
+retaken() { docs_of "$OUT" | grep -q "re-took them"; }
+wait_until 15 retaken || { cat "$SCRATCH/engine-outage.log"; fail "lapsed rows were not re-taken"; }
+[ "$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/locks" | jq -r --arg w "$OUT" '[.[]|select(.workid==$w)][0].lease')" = "$LEASE" ] || fail "the re-taken row is not under the run's lease"
+[ "$(item_json "$OUT" | jq -r .state)" = in-progress ] || fail "the run did not continue after the re-take"
+pass "lost locks, paths still free: re-taken under the run's own lease, the run continued (doc row)"
+# (b) rows gone again, and another running item takes the path meanwhile
+TK=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"path taker","agent":"exec","exec_shell":"true","state":"paused","lockdirs":["{topdir}/outage/"]}' | jq -r .id)
+claim "$TK" in-progress LT
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/release_all" -d "{\"workid\":\"$OUT\"}" >/dev/null || fail "drop the rows again"
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" -d "{\"path\":\"{topdir}/outage/\",\"workid\":\"$TK\",\"lease\":\"LT\"}" >/dev/null || fail "the taker's lock"
+requeued() { [ "$(item_json "$OUT" | jq -r .state)" = queued ]; }
+wait_until 15 requeued || { cat "$SCRATCH/engine-outage.log"; fail "the run was not re-queued: $(item_json "$OUT" | jq -c '{state,lasterror}')"; }
+J=$(item_json "$OUT")
+[ "$(echo "$J" | jq -r .attempt)" = 0 ] || fail "the re-queued run's attempt was counted: $(echo "$J" | jq -c '{attempt}')"
+[ "$(echo "$J" | jq -r .lease)" = "" ] || fail "the re-queued item kept a lease"
+echo "$J" | jq -r .lasterror | grep -q "${TK: -12}" || fail "lasterror does not name the item holding the path: $(echo "$J" | jq -r .lasterror)"
+docs_of "$OUT" | grep -q "run stopped by engine and re-queued" || fail "no re-queue doc row"
+grep -q "is now held by ${TK: -12} — stopping the run and re-queueing it" "$SCRATCH/engine-outage.log" || { cat "$SCRATCH/engine-outage.log"; fail "engine line missing"; }
+pass "lost locks, a path taken meanwhile: session killed, item re-queued with its attempt given back, the holder named"
+# (c) the path frees, the item runs again; then another run takes the item over
+claim "$TK" paused ""
+running_again() { [ "$(item_json "$OUT" | jq -r .state)" = in-progress ] && [ "$(item_json "$OUT" | jq -r .lease)" != "$LEASE" ]; }
+wait_until 20 running_again || { cat "$SCRATCH/engine-outage.log"; fail "the re-queued item did not run again"; }
+claim "$OUT" in-progress LX
+abandoned() { docs_of "$OUT" | grep -q "run abandoned by engine"; }
+wait_until 15 abandoned || { cat "$SCRATCH/engine-outage.log"; fail "a refused renewal did not abandon the run"; }
+J=$(item_json "$OUT")
+[ "$(echo "$J" | jq -r '.state + " " + .lease')" = "in-progress LX" ] || fail "the abandoned run wrote the record: $(echo "$J" | jq -c '{state,lease}')"
+pass "refused renewal: session killed, the record left to the run that owns it (doc row)"
+kill "$OUTAGE_ENGINE" 2>/dev/null || true; wait "$OUTAGE_ENGINE" 2>/dev/null || true
+[ ! -f "$SAMPLE/outage.txt" ] || fail "a killed session still wrote its output"
+claim "$OUT" paused ""
+for w in "$OUT" "$TK"; do curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/projects/$PROJECT/workitems/$w" >/dev/null || fail "delete $w"; done
+pass "lost locks: neither killed session got to finish its work"
+
+# ---- graph edits via datasync (2026-09-29): build a project from the Project graph ----
+# An edit is accepted at once as a pending datasync row; the engine sees
+# `datasync_waiting` in its heartbeat reply, claims the row, applies it in the
+# checkout, commits exactly its files and reports applied with the commit.
+gedit() { curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/graph/edits" -d "$1" | jq -r .id; }
+ds_of() { curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/datasync" | jq -r --arg i "$1" '.[]|select(.id==$i)|.state'; }
+E1=$(gedit '{"op":"new_node","kind":"context","name":"Data","description":"where the rows live"}')
+[ "$(ds_of "$E1")" = pending ] || fail "graph edit not accepted as pending: $(ds_of "$E1")"
+HB=$(curl -sf -H "authorization: Bearer $ENGINE_TOKEN" -H "content-type: application/json" -X POST "$BASE/api/engines/Engine01/heartbeat" -d '{"state":"Running"}')
+[ "$(echo "$HB" | jq -r --arg p "$PROJECT" '.datasync_waiting[$p]')" = 1 ] || fail "heartbeat reply does not carry datasync_waiting: $(echo "$HB" | jq -c .datasync_waiting)"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-gedit1.log" 2>&1) || true
+[ "$(ds_of "$E1")" = applied ] || { cat "$SCRATCH/engine-gedit1.log"; fail "graph edit 1 state=$(ds_of "$E1")"; }
+for f in data/data.code.iter.md data/data.bizreq.iter.md data/data.techreq.iter.md data/test/data.tests.iter.md; do
+  [ -f "$SAMPLE/$f" ] || fail "graph edit did not write $f"
+done
+grep -q "data/data.code.iter.md" "$SAMPLE/main.iter.md" || fail "main.iter.md does not link the new context"
+C1=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/datasync" | jq -r --arg i "$E1" '.[]|select(.id==$i)|.commit')
+(cd "$SAMPLE" && git show --name-only --format=%s "$C1" | head -1 | grep -q "graph edit") || fail "the graph edit commit $C1 is not in the checkout"
+(cd "$SAMPLE" && git show --name-only --format= "$C1" | grep -qv "^data/\|^main.iter.md") && fail "the graph edit commit carries files it did not write"
+E2=$(gedit '{"op":"new_node","kind":"container","name":"Ledger API","parent":"{topdir}/data"}')
+E3=$(gedit '{"op":"new_node","kind":"container","name":"Store","parent":"{topdir}/data"}')
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 3 > "$SCRATCH/engine-gedit2.log" 2>&1) || true
+[ "$(ds_of "$E2") $(ds_of "$E3")" = "applied applied" ] || { cat "$SCRATCH/engine-gedit2.log"; fail "graph edits 2/3: $(ds_of "$E2") $(ds_of "$E3")"; }
+# an edit whose folder a running item holds waits until the lock goes
+LK=$(curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/workitems" -d '{"name":"holds data/store","agent":"exec","exec_shell":"true","state":"paused","lockdirs":["{topdir}/data/store/"]}' | jq -r .id)
+claim "$LK" in-progress LK1
+curl -sf "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/locks/acquire" -d "{\"path\":\"{topdir}/data/store/\",\"workid\":\"$LK\",\"lease\":\"LK1\"}" >/dev/null || fail "lock for the holder"
+E4=$(gedit '{"op":"connect","from":"data/ledger_api","to":"data/store","interface":{"name":"store-read","description":"rows by key"}}')
+E5=$(gedit '{"op":"new_global","kind":"usecase","name":"Read a row","codenodes":["data/ledger_api","data/store"]}')
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-gedit3.log" 2>&1) || true
+[ "$(ds_of "$E4")" = pending ] || { cat "$SCRATCH/engine-gedit3.log"; fail "an edit under a running item's lock did not wait: $(ds_of "$E4")"; }
+[ "$(ds_of "$E5")" = applied ] || fail "an unlocked edit behind a waiting one did not apply: $(ds_of "$E5")"
+grep -q "waits: {topdir}/data/store/ is locked by running item" "$SCRATCH/engine-gedit3.log" || { cat "$SCRATCH/engine-gedit3.log"; fail "no wait line"; }
+claim "$LK" paused ""
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-gedit4.log" 2>&1) || true
+[ "$(ds_of "$E4")" = applied ] || { cat "$SCRATCH/engine-gedit4.log"; fail "the waiting edit did not apply once the lock went: $(ds_of "$E4")"; }
+curl -sf "${AUTH[@]}" -X DELETE "$BASE/api/projects/$PROJECT/workitems/$LK" >/dev/null || true
+grep -q "store-read.interface.iter.md" "$SAMPLE/data/ledger_api/ledger_api.code.iter.md" || fail "the caller does not list the interface in inputs"
+grep -q "store-read.interface.iter.md" "$SAMPLE/data/store/store.code.iter.md" || fail "the provider does not list the interface in outputs"
+V=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/graph/view")
+echo "$V" | jq -e '[.edges[]|select(.type=="contains" and .source=="data" and .target=="data/ledger_api")]|length==1' >/dev/null || fail "view: data does not contain ledger_api"
+echo "$V" | jq -e '[.edges[]|select(.type=="interface" and .source=="data/ledger_api" and .target=="data/store" and .interface=="store-read")]|length==1' >/dev/null || fail "view: no ledger_api -> store connection"
+echo "$V" | jq -e '[.usecases[]|select(.name=="Read a row")][0].sequence|index("data/store")' >/dev/null || fail "view: the use case does not touch store"
+# hierarchical use cases: the parts it names and their owners are tagged; the
+# use case links to the top of each chain only; a tag lookup returns them all
+echo "$V" | jq -e '[.usecases[]|select(.name=="Read a row")][0] | (.members|sort)==["data","data/ledger_api","data/store"] and .tops==["data"]' >/dev/null || fail "view: use case members/tops: $(echo "$V" | jq -c '[.usecases[]|select(.name=="Read a row")][0]|{members,tops}')"
+UCID=$(echo "$V" | jq -r '[.usecases[]|select(.name=="Read a row")][0].id')
+echo "$V" | jq -e --arg u "$UCID" '[.edges[]|select(.type=="usecase_touches" and .source==$u)]|map(.target)==["data"]' >/dev/null || fail "view: the use case links below its top ($UCID)"
+UL=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/graph/usecases/$UCID") || fail "use-case tag lookup failed ($UCID)"
+echo "$UL" | jq -e '([.nodes[].name]|sort)==["Data","Ledger API","Store"] and (.tops|length)==1' >/dev/null || fail "tag lookup: $(echo "$UL" | jq -c '[.nodes[].name],.tops')"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -e '[.[]|select(.agent=="usecase" and (.name|startswith("Use case: name the parts")))]|length==1' >/dev/null || fail "adding a use case did not queue the usecase agent"
+# TDD from the map: planned tests on a node, the test agent queued to build them;
+# an edge removed with its reason
+E6=$(gedit '{"op":"define_tests","node":"{topdir}/data/store/store.code.iter.md","tests":[{"name":"boots","desc":"the store starts"},{"name":"reads a row","desc":"a stored row comes back"}],"queue_agent":true}')
+E7=$(gedit '{"op":"disconnect","from":"data/ledger_api","to":"data/store","interface":{"name":"store-read"},"reason":"reads go through the cache now"}')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/graph/edits" -d '{"op":"unlink_child","parent":"data","child":"data/store"}')
+[ "$CODE" = 400 ] || fail "removing an edge without a reason got HTTP $CODE (expected 400)"
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-gedit5.log" 2>&1) || true
+[ "$(ds_of "$E6") $(ds_of "$E7")" = "applied applied" ] || { cat "$SCRATCH/engine-gedit5.log"; fail "tdd/disconnect edits: $(ds_of "$E6") $(ds_of "$E7")"; }
+grep -q "## Planned tests" "$SAMPLE/data/store/test/store.tests.iter.md" && grep -q "2. \*\*reads a row\*\*" "$SAMPLE/data/store/test/store.tests.iter.md" || fail "planned tests not written: $(cat "$SAMPLE/data/store/test/store.tests.iter.md")"
+curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/workitems" | jq -e '[.[]|select(.agent=="test" and (.name|startswith("Tests first")))]|length==1' >/dev/null || fail "the test agent was not queued for the planned tests"
+grep -q "store-read" "$SAMPLE/data/store/store.code.iter.md" && fail "the disconnect left the interface on the provider"
+C7=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/datasync" | jq -r --arg i "$E7" '.[]|select(.id==$i)|.commit')
+(cd "$SAMPLE" && git show -s --format=%B "$C7" | grep -q "Reason: reads go through the cache now") || fail "the removal's reason is not in its commit"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST "$BASE/api/projects/$PROJECT/graph/edits" -d '{"op":"frobnicate"}')
+[ "$CODE" = 400 ] || fail "an unknown graph edit op got HTTP $CODE (expected 400)"
+# every node type is editable: an actor is added and drawn to the part it uses
+E8=$(gedit '{"op":"new_actor","name":"Tester","description":"reads rows by hand"}')
+E9=$(gedit '{"op":"actor_uses","actor":"actor:tester","to":"data/store","interface":{"name":"store-page","label":"Reads rows by hand"}}')
+(cd "$SAMPLE" && "$ENGINE_BIN" --config .iter/config.json --ticks 2 > "$SCRATCH/engine-gedit6.log" 2>&1) || true
+[ "$(ds_of "$E8") $(ds_of "$E9")" = "applied applied" ] || { cat "$SCRATCH/engine-gedit6.log"; fail "actor edits: $(ds_of "$E8") $(ds_of "$E9")"; }
+V=$(curl -sf "${AUTH[@]}" "$BASE/api/projects/$PROJECT/graph/view")
+echo "$V" | jq -e '[.edges[]|select(.type=="interface" and .source=="actor:tester" and .target=="data/store" and .label=="Reads rows by hand")]|length==1' >/dev/null || fail "view: no labelled actor edge tester -> store"
+pass "graph edits via datasync: accepted as pending, datasync_waiting on the heartbeat, applied on the engine's tick with a commit of exactly their files; an edit under a running item's lock waits and applies once it goes; the map shows the result; planned tests written and the test agent queued (TDD); an edge removed with its reason in the commit; an actor added and linked to the part it uses, captioned with the interface's label"
+
+# webui served
+[ "$(curl -sf "$BASE/" | grep -c "ITER")" -ge 1 ] || fail "webui not served"
+pass "webui static page served"
+
+
+say "ALL E2E CHECKS PASSED ($BACKEND) — logs in $SCRATCH"
