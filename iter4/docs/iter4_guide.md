@@ -351,6 +351,10 @@ In `*.tests.iter.md` files (usually `test/<name>.tests.iter.md` beside the node)
 
 `iter_engine cli runtests --group <label>` runs one group. Inside an agent session, `iter runtests --broken` proves a bug is reproduced (red) and `--fixed` proves it is fixed (green); the close gate will not complete an item whose `--fixed` claim was false.
 
+### How much testing is enough?
+
+As many tests as the code's input space calls for — how many practical permutations it accepts, not how long it is. A function taking one boolean needs about two tests; one taking an open JSON document needs a representative collection. Every test group covers four kinds: **golden** (the expected paths, always at least one), **malformed** (allowable malformed, incomplete or missing inputs), **longtail** (rare but valid inputs) and **failure** (what the code must refuse). The `test` agent judges the input space and records it on the group's line in the testgroup block: `input_space` (what the code accepts and roughly how many permutations) and `coverage` (tests needed per kind, 0 = cannot apply), and gives every test a `kind`. The sweep only compares those targets with the registered tests: a group that is unassessed, has unclassified tests, or is short of a target gets a top-up item.
+
 ### What is the test sweep?
 
 `iter_engine cli sweep` runs every test group the map allows (`*.tests.iter.md`, and the older `*.testgroup.iter.md`), records each result on the map, and files work for what it finds, never a second item while the first is open:
@@ -358,6 +362,7 @@ In `*.tests.iter.md` files (usually `test/<name>.tests.iter.md` beside the node)
 - one `code` fix item per red group (tagged with the use cases it touches); when the fix is very complex or risky, that item files a `plan` item instead and waits for it (`iter wait --on`), then proves the fix; a group whose script itself broke is recorded but files nothing;
 - one `test` item per leaf code node the map includes that has no tests at all — no tests file, or one with no test registered — which writes its first tests and links them from the node (at most 5 new per sweep, `--tests-max`);
 - one `ingest` item per node whose text breaks the standard (at most 10 new per sweep, `--text-max`).
+- one `test` top-up item per node whose tests fall short of their coverage (at most 5 new per sweep, `--coverage-max`) — see "How much testing is enough?".
 
 Every project has exactly one **Test sweep** schedule, owned by the engine: the first engine to serve the project creates it **paused**, every 4 hours. Resume it in the Work queue to turn it on; Pause turns it off. It cannot be deleted or closed, and Pause & edit changes its interval or command flags. When due it runs at once on its timer — it takes no agent slot and ignores the usage and budget holds, since a shell run spends no model time — but only while the project is Running. It writes nothing into the checkout (results live on the map), so its runs make no commit; neither do `iter rag sync` runs.
 

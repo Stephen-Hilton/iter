@@ -118,6 +118,9 @@ pub struct SweepOpts {
     /// file a `test` item for each code node with no tests, at most this many
     /// new ones per sweep (0 = skip)
     pub tests_max: usize,
+    /// file a `test` top-up item for each node whose tests fall short of
+    /// their coverage, at most this many new ones per sweep (0 = skip)
+    pub coverage_max: usize,
 }
 
 /// `iter sweep`. Exit 0 all green, 1 something red/error, 2 could not run.
@@ -224,6 +227,9 @@ pub fn sweep_verb(c: &Conn, o: &SweepOpts) -> i32 {
     if o.tests_max > 0 && o.group.is_none() {
         untested_sweep(api, c, &vertices, &edges, o);
     }
+    if o.coverage_max > 0 && o.group.is_none() {
+        coverage_sweep(api, c, &vertices, &edges, o);
+    }
     if o.text_max > 0 && o.group.is_none() {
         text_sweep(api, c, &vertices, o);
     }
@@ -262,6 +268,108 @@ pub fn untested(vertices: &[Value], edges: &[Value]) -> Vec<Value> {
     out
 }
 
+/// Nodes whose registered tests fall short of their coverage (2026-09-30):
+/// for each node some chain from main includes, every group in its linked
+/// tests files whose `coverage_gaps` (computed when the map was built) is not
+/// empty. A node with no registered test at all is `untested`'s, not this.
+/// Returns (node, [(tests file path, group label, gaps)]), sorted by path.
+pub fn under_covered(vertices: &[Value], edges: &[Value]) -> Vec<(Value, Vec<(String, String, Vec<String>)>)> {
+    let states = chain_states(vertices, edges);
+    let mut out = Vec::new();
+    for owner in vertices {
+        let id = owner["id"].as_str().unwrap_or("");
+        if !states.get(id).map(|s| s.contains(&Chain::Include)).unwrap_or(false) {
+            continue;
+        }
+        let files: Vec<&Value> = edges
+            .iter()
+            .filter(|e| e["from"] == id && (e["kind"] == "tests" || e["kind"] == "testgroups"))
+            .filter_map(|e| vertices.iter().find(|t| t["id"] == e["to"]))
+            .collect();
+        let groups = || files.iter().flat_map(|f| f["groups"].as_array().cloned().unwrap_or_default().into_iter().map(move |g| (*f, g)));
+        if groups().map(|(_, g)| g["tests"].as_u64().unwrap_or(0)).sum::<u64>() == 0 {
+            continue;
+        }
+        let short: Vec<(String, String, Vec<String>)> = groups()
+            .filter(|(_, g)| g["tests"].as_u64().unwrap_or(0) > 0)
+            .filter_map(|(f, g)| {
+                let gaps: Vec<String> = g["coverage_gaps"].as_array()?.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                (!gaps.is_empty()).then(|| (f["path"].as_str().unwrap_or("").to_string(), g["label"].as_str().unwrap_or("").to_string(), gaps))
+            })
+            .collect();
+        if !short.is_empty() {
+            out.push((owner.clone(), short));
+        }
+    }
+    out.sort_by(|a, b| a.0["path"].as_str().cmp(&b.0["path"].as_str()));
+    out
+}
+
+/// The coverage half of the sweep (2026-09-30): each node whose tests fall
+/// short becomes one `test` top-up item. The test agent judges the input
+/// space (how many practical permutations the code accepts) and writes the
+/// targets; the sweep only compares the targets with what is registered.
+/// Deduplicated per node by `check:test-coverage` + `container:<path>`.
+fn coverage_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &SweepOpts) {
+    let nodes = under_covered(vertices, edges);
+    println!("coverage: {} node(s) have tests short of their coverage", nodes.len());
+    let mut filed = 0;
+    for (v, short) in &nodes {
+        if filed >= o.coverage_max {
+            println!("coverage: stopping at {} new item(s) this sweep (--coverage-max)", o.coverage_max);
+            break;
+        }
+        let path = v["path"].as_str().unwrap_or("");
+        let name = v["name"].as_str().unwrap_or("");
+        if o.dry_run {
+            println!("  would file: coverage top-up for {path} ({} group(s))", short.len());
+            filed += 1;
+            continue;
+        }
+        let listing: Vec<String> = short.iter().map(|(f, l, g)| format!("- {f} [{l}]: {}", g.join("; "))).collect();
+        let mut lockdirs: Vec<String> = short.iter().filter_map(|(f, _, _)| f.rsplit_once('/').map(|(d, _)| format!("{d}/"))).collect();
+        lockdirs.sort();
+        lockdirs.dedup();
+        let request = format!(
+            "The tests of map node \"{name}\" ({path}) fall short of their coverage. Bring each group below up to it.\n\n{}\n\n\
+             Coverage is measured in four kinds of test, sized by the input space — how many practical permutations the code under test accepts (a function taking one boolean needs about two tests in all; one taking an open JSON document needs a collection of each kind, not millions):\n\
+             - golden: the expected paths — every normal use, at least one;\n\
+             - malformed: allowable malformed, incomplete or missing inputs the code must tolerate;\n\
+             - longtail: rare but valid inputs — limits, sizes, unusual encodings, odd combinations;\n\
+             - failure: inputs or states the code must refuse, and how it refuses.\n\n\
+             For each group:\n\
+             - Read the code under test and write `input_space` on the group's line in the testgroup block: what it accepts and roughly how many practical permutations that allows.\n\
+             - Set `coverage` to the number of tests each kind needs, e.g. `{{\"golden\":3,\"malformed\":4,\"longtail\":2,\"failure\":3}}`. Use 0 only for a kind that cannot apply, and say why in `input_space`.\n\
+             - Give every registered test a `kind` (golden, malformed, longtail or failure); classify existing tests before writing new ones, and never delete one.\n\
+             - Write the missing tests, one deterministic shell script each (exit 0 = passes, 1 = fails, last line `ITER_RESULT pass=… fail=… total=…`), writing any output files only under `$ITER_TEST_OUT`, and register them.\n\
+             - Run each group with `iter runtests --group <label>` and report what is green and what is red. Do not change the code under test: a red test is filed as a `code` item by the next sweep.",
+            listing.join("\n"),
+        );
+        let mut tags = vec![
+            json!({"text": format!("{}test-coverage", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""}),
+            json!({"text": format!("{}{}", iter_core::dedup::CONTAINER_TAG_PREFIX, path), "color": ""}),
+            json!({"text": "sweep", "color": ""}),
+        ];
+        for u in usecases_touching(vertices, edges, v["id"].as_str().unwrap_or("")) {
+            tags.push(json!({"text": format!("usecase:{u}"), "color": ""}));
+        }
+        let workid = std::env::var("ITER_WORKID").unwrap_or_default();
+        let body = json!({"name": format!("Test coverage: top up the tests for {name}"), "agent": "test", "state": "queued",
+            "lockdirs": lockdirs, "blockedby": [], "context": [], "model": "", "tags": tags,
+            "createdby": workid, "requestedby": if workid.is_empty() { "user" } else { "agent:exec" }, "prework": [], "postwork": [],
+            "request": request});
+        match api.post(&format!("/api/projects/{}/workitems", c.project), &body) {
+            Ok(created) if crate::cli::already_open(&created) => {}
+            Ok(created) => {
+                filed += 1;
+                let id = created["id"].as_str().unwrap_or("");
+                println!("  filed coverage item …{} for {path}", &id[id.len().saturating_sub(12)..]);
+            }
+            Err(e) => eprintln!("  could not file the coverage item for {path}: {e}"),
+        }
+    }
+}
+
 /// The no-tests half of the sweep (2026-09-30): each untested code node
 /// becomes one `test` item that plans, writes and runs its first tests and
 /// links them from the node file, so the next sweep runs them (and turns red
@@ -291,6 +399,7 @@ fn untested_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &
             "Map node \"{name}\" ({path}) has no tests (no tests file, or one with no test registered), so the test sweep cannot tell whether its code works. Write its first tests.\n\n\
              - Read the node file and the code it owns ({}) to learn what the part DOES — its inputs, outputs and the promises other parts rely on.\n\
              - Create {tests_file} (or fill the tests file the node already links) with a `## Planned tests` list, simplest first, and a testgroup block.\n\
+             - Size the tests by the input space: write `input_space` (what the code accepts, roughly how many practical permutations) and `coverage` targets for the four kinds — golden (expected paths), malformed (allowable malformed, incomplete or missing inputs), longtail (rare but valid inputs), failure (what it must refuse) — on the group's line, and give every test its `kind`.\n\
              - Write one deterministic shell script per test beside it (exit 0 = passes, 1 = fails, last line `ITER_RESULT pass=… fail=… total=…`) and register each in the testgroup block, in order.\n\
              - Link the tests from the node file: add `\"{{thisfiledir}}/test/*.tests.iter.md\"` to `children.tests` in {path} unless it is already there (keep every other field as it is).\n\
              - A script that writes files writes them only under `$ITER_TEST_OUT` (emptied before every run, outside the checkout), never into the tree.\n\
@@ -594,5 +703,25 @@ mod tests {
         ];
         let ids: Vec<String> = untested(&vs, &es).iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
         assert_eq!(ids, vec!["L2".to_string(), "L4".to_string()]);
+    }
+
+    #[test]
+    fn under_covered_lists_the_short_groups_of_included_nodes() {
+        let tf = |id: &str, groups: Value| json!({"id": id, "nodetype": "tests", "path": format!("{{topdir}}/{id}.tests.iter.md"), "groups": groups});
+        let vs = vec![
+            v("m", "main", ""), v("A", "code", ""), v("B", "code", ""), v("C", "code", "omit"), v("D", "code", ""),
+            tf("ta", json!([{"label": "a1", "tests": 3, "coverage_gaps": ["longtail: 0 of 2"]}, {"label": "a2", "tests": 2, "coverage_gaps": []}])),
+            tf("tb", json!([{"label": "b1", "tests": 4, "coverage_gaps": []}])),
+            tf("tc", json!([{"label": "c1", "tests": 1, "coverage_gaps": ["golden: 0 of 1"]}])),
+            tf("td", json!([{"label": "d1", "tests": 0, "coverage_gaps": ["input space not assessed"]}])),
+        ];
+        let es = vec![
+            e("m", "root", "A"), e("m", "root", "B"), e("m", "root", "C"), e("m", "root", "D"),
+            e("A", "tests", "ta"), e("B", "tests", "tb"), e("C", "tests", "tc"), e("D", "tests", "td"),
+        ];
+        let got = under_covered(&vs, &es);
+        assert_eq!(got.len(), 1, "B is covered, C is omitted, D has no tests (untested's)");
+        assert_eq!(got[0].0["id"], "A");
+        assert_eq!(got[0].1, vec![("{topdir}/ta.tests.iter.md".to_string(), "a1".to_string(), vec!["longtail: 0 of 2".to_string()])]);
     }
 }

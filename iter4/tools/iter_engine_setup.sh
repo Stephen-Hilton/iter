@@ -117,6 +117,8 @@ if [ -z "$BIN" ]; then
   elif [ -x "$HOME_DIR/bin/iter_engine" ]; then BIN="$HOME_DIR/bin/iter_engine"; fi
 fi
 if [ -z "$BIN" ]; then
+  # rustup installs cargo here; a non-login shell often lacks it on PATH
+  command -v cargo >/dev/null || { [ -x "$HOME/.cargo/bin/cargo" ] && PATH="$HOME/.cargo/bin:$PATH"; }
   command -v cargo >/dev/null || die "iter_engine was not found and cargo is not installed to build it.
   Either pass --bin /path/to/iter_engine, or install Rust (https://rustup.rs:
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh) and run this again."

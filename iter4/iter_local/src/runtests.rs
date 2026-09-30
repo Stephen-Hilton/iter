@@ -510,6 +510,7 @@ mod tests {
                 desc: String::new(),
                 shell: (*file).into(),
                 gates: true,
+                kind: String::new(),
             })
             .collect();
         let group = TestGroup { label: "g1".into(), testlist: entries, ..Default::default() };
@@ -590,7 +591,7 @@ mod tests {
         // Register a second test whose script does not exist.
         let content = std::fs::read_to_string(&tg).unwrap();
         let mut groups = testgroups::parse(&content);
-        groups[0].testlist.push(TestEntry { id: "ghost".into(), name: "ghost".into(), desc: String::new(), shell: "ghost.sh".into(), gates: true });
+        groups[0].testlist.push(TestEntry { id: "ghost".into(), name: "ghost".into(), desc: String::new(), shell: "ghost.sh".into(), gates: true, kind: String::new() });
         std::fs::write(&tg, testgroups::update(&content, &groups)).unwrap();
                 let run = run_group(&tg, "g1", None, DEFAULT_GROUP_TIMEOUT_MIN).unwrap();
         assert_eq!(run.outcome, Outcome::Error);
@@ -628,7 +629,7 @@ mod tests {
         // either one writes — the interleaving that lost a result.
         std::fs::write(test_dir.join("a.sh"), "sleep 0.4\nexit 0\n").unwrap();
         std::fs::write(test_dir.join("b.sh"), "sleep 0.4\nexit 1\n").unwrap();
-        let entry = |f: &str| TestEntry { id: f.trim_end_matches(".sh").into(), name: f.into(), desc: String::new(), shell: f.into(), gates: true };
+        let entry = |f: &str| TestEntry { id: f.trim_end_matches(".sh").into(), name: f.into(), desc: String::new(), shell: f.into(), gates: true, kind: String::new() };
         let groups = vec![
             TestGroup { label: "ga".into(), testlist: vec![entry("a.sh")], ..Default::default() },
             TestGroup { label: "gb".into(), testlist: vec![entry("b.sh")], ..Default::default() },

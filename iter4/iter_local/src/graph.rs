@@ -325,7 +325,8 @@ pub fn snapshot_with(project: &Project, opts: &SnapOpts) -> Snapshot {
             let content = std::fs::read_to_string(path).unwrap_or_default();
             let groups: Vec<Value> = testgroups::parse(&content)
                 .iter()
-                .map(|g| json!({"label": g.label, "tests": g.testlist.len(), "result": g.result, "lastrun": g.lastrun}))
+                .map(|g| json!({"label": g.label, "tests": g.testlist.len(), "result": g.result, "lastrun": g.lastrun,
+                    "input_space": g.input_space, "coverage": g.coverage, "coverage_gaps": g.coverage_gaps()}))
                 .collect();
             v["groups"] = json!(groups);
             v["testpaths"] = json!(fi.front.child("testpaths").unwrap_or_default());

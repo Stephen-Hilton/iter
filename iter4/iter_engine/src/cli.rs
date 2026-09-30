@@ -265,6 +265,9 @@ enum Verb {
         /// file at most this many `test` items for code nodes with no tests per sweep (0 = skip)
         #[arg(long, default_value_t = 5)]
         tests_max: usize,
+        /// file at most this many coverage top-up `test` items per sweep (0 = skip)
+        #[arg(long, default_value_t = 5)]
+        coverage_max: usize,
         #[arg(long)]
         data_url: Option<String>,
     },
@@ -471,12 +474,12 @@ pub fn run(args: CliArgs) {
             let c = crate::sync::conn(&crate::sync::checkout_root(args.project.as_deref(), &std::env::current_dir().unwrap_or_else(|_| ".".into()), &topdir_of(&args)), args.project.as_deref(), data_url.as_deref());
             std::process::exit(crate::sync::sync_verb(&c, dry_run, force, !no_fix_ids, read_only, actors.as_deref()))
         }
-        Verb::Sweep { ref group, dry_run, no_file, timeout_min, install_schedule, ref every, text_max, tests_max, ref data_url } => {
+        Verb::Sweep { ref group, dry_run, no_file, timeout_min, install_schedule, ref every, text_max, tests_max, coverage_max, ref data_url } => {
             let c = crate::sync::conn(&crate::sync::checkout_root(args.project.as_deref(), &std::env::current_dir().unwrap_or_else(|_| ".".into()), &topdir_of(&args)), args.project.as_deref(), data_url.as_deref());
             if install_schedule {
                 std::process::exit(crate::sweep::install_schedule(&c, every));
             }
-            let o = crate::sweep::SweepOpts { group: group.clone(), dry_run, file_items: !no_file, timeout_min, text_max: if no_file && !dry_run { 0 } else { text_max }, tests_max: if no_file && !dry_run { 0 } else { tests_max } };
+            let o = crate::sweep::SweepOpts { group: group.clone(), dry_run, file_items: !no_file, timeout_min, text_max: if no_file && !dry_run { 0 } else { text_max }, tests_max: if no_file && !dry_run { 0 } else { tests_max }, coverage_max: if no_file && !dry_run { 0 } else { coverage_max } };
             std::process::exit(crate::sweep::sweep_verb(&c, &o))
         }
         Verb::Rag { ref action, dry_run, force, ref data_url } => {

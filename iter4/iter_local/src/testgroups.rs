@@ -22,11 +22,46 @@ pub struct TestEntry {
     /// so existing registries stay byte-identical.
     #[serde(skip_serializing_if = "is_true")]
     pub gates: bool,
+    /// Which part of the input space this test covers (2026-09-30): one of
+    /// `KINDS` — golden, malformed, longtail, failure. "" = not classified
+    /// yet; the sweep asks the test agent to classify it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+
+/// The four kinds of test a group's coverage is measured in (Stephen,
+/// 2026-09-30): the expected / golden path; allowable malformed, incomplete
+/// or missing inputs; long-tail inputs; and expected failures.
+pub const KINDS: [&str; 4] = ["golden", "malformed", "longtail", "failure"];
+
+/// How many tests of each kind a group should have, set by the test agent
+/// from the group's input space: a function taking one boolean needs about
+/// two tests in all, one taking an open JSON document needs a collection of
+/// each kind. 0 = the kind does not apply (the `input_space` says why).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Coverage {
+    pub golden: u32,
+    pub malformed: u32,
+    pub longtail: u32,
+    pub failure: u32,
+}
+
+impl Coverage {
+    pub fn target(&self, kind: &str) -> u32 {
+        match kind {
+            "golden" => self.golden,
+            "malformed" => self.malformed,
+            "longtail" => self.longtail,
+            "failure" => self.failure,
+            _ => 0,
+        }
+    }
 }
 
 impl Default for TestEntry {
     fn default() -> TestEntry {
-        TestEntry { id: String::new(), name: String::new(), desc: String::new(), shell: String::new(), gates: true }
+        TestEntry { id: String::new(), name: String::new(), desc: String::new(), shell: String::new(), gates: true, kind: String::new() }
     }
 }
 
@@ -56,6 +91,8 @@ enum TestEntryDe {
         shell: String,
         #[serde(default = "default_true")]
         gates: bool,
+        #[serde(default)]
+        kind: String,
     },
 }
 
@@ -64,11 +101,11 @@ impl From<TestEntryDe> for TestEntry {
         match de {
             TestEntryDe::Script(shell) => {
                 let id = shell.trim_end_matches(".sh").to_string();
-                TestEntry { id: id.clone(), name: id, desc: String::new(), shell, gates: true }
+                TestEntry { id: id.clone(), name: id, desc: String::new(), shell, gates: true, kind: String::new() }
             }
-            TestEntryDe::Entry { id, name, desc, shell, gates } => {
+            TestEntryDe::Entry { id, name, desc, shell, gates, kind } => {
                 let id = if id.is_empty() { shell.trim_end_matches(".sh").to_string() } else { id };
-                TestEntry { id, name, desc, shell, gates }
+                TestEntry { id, name, desc, shell, gates, kind }
             }
         }
     }
@@ -87,10 +124,41 @@ pub struct TestGroup {
     pub lastrun: String,
     pub result: String,
     pub counts: String,
+    /// What the code under test accepts and how many practical permutations
+    /// that allows, written by the test agent (2026-09-30); it justifies the
+    /// `coverage` targets, including any kind set to 0. "" = not assessed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub input_space: String,
+    /// Target number of tests per kind; absent = not assessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
     pub testlist: Vec<TestEntry>,
 }
 
 impl TestGroup {
+    /// What keeps this group short of its coverage (2026-09-30), plain
+    /// phrases for the top-up item; empty = covered. Golden paths always
+    /// need at least one test, whatever the target says.
+    pub fn coverage_gaps(&self) -> Vec<String> {
+        let mut gaps = Vec::new();
+        let unclassified = self.testlist.iter().filter(|t| !KINDS.contains(&t.kind.as_str())).count();
+        if unclassified > 0 {
+            gaps.push(format!("{unclassified} test(s) have no kind (golden, malformed, longtail or failure)"));
+        }
+        let Some(cov) = self.coverage.as_ref().filter(|_| !self.input_space.trim().is_empty()) else {
+            gaps.push("input space not assessed: no `input_space` and `coverage` targets".into());
+            return gaps;
+        };
+        for kind in KINDS {
+            let want = if kind == "golden" { cov.target(kind).max(1) } else { cov.target(kind) };
+            let have = self.testlist.iter().filter(|t| t.kind == kind).count() as u32;
+            if have < want {
+                gaps.push(format!("{kind}: {have} of {want}"));
+            }
+        }
+        gaps
+    }
+
     /// "Provably green right now": the last recorded run passed.
     pub fn is_green(&self) -> bool {
         self.result == "passed"
@@ -185,6 +253,23 @@ mod tests {
         assert_eq!(groups[1].testlist[0].shell, "t2-refusals.sh");
         assert!(groups[0].is_green());
         assert!(!groups[1].is_green(), "never run = not provably green");
+    }
+
+    #[test]
+    fn coverage_survives_a_rewrite_and_names_its_gaps() {
+        let doc = "<!-- iterapp:testgroups\n{\"label\":\"g\",\"input_space\":\"one bool\",\"coverage\":{\"golden\":2,\"failure\":1},\"testlist\":[{\"id\":\"t1\",\"shell\":\"t1.sh\",\"kind\":\"golden\"},{\"id\":\"t2\",\"shell\":\"t2.sh\"}]}\n-->";
+        let groups = parse(doc);
+        let again = parse(&update(doc, &groups));
+        assert_eq!(again[0].coverage, Some(Coverage { golden: 2, malformed: 0, longtail: 0, failure: 1 }));
+        assert_eq!(again[0].input_space, "one bool");
+        assert_eq!(again[0].testlist[0].kind, "golden");
+        assert_eq!(again[0].coverage_gaps(), vec![
+            "1 test(s) have no kind (golden, malformed, longtail or failure)".to_string(),
+            "golden: 1 of 2".to_string(),
+            "failure: 0 of 1".to_string(),
+        ]);
+        let bare = parse("<!-- iterapp:testgroups\n{\"label\":\"b\",\"testlist\":[{\"id\":\"t\",\"shell\":\"t.sh\",\"kind\":\"golden\"}]}\n-->");
+        assert_eq!(bare[0].coverage_gaps(), vec!["input space not assessed: no `input_space` and `coverage` targets".to_string()]);
     }
 
     #[test]
