@@ -67,7 +67,9 @@ pub fn is_uuid(s: &str) -> bool {
 }
 
 /// Every node file the scan would read: `{iterglob}` under the scan dirs plus
-/// the main file, canonical, sorted, nodetype files only.
+/// the main file, canonical, sorted, nodetype files only — never one git
+/// ignores (2026-09-30: build output such as AWS CDK's cdk.out/ copies node
+/// files, and those copies became orphan vertices and got ids written in).
 pub fn node_files(project: &Project) -> Vec<PathBuf> {
     let vars = project.vars();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -85,7 +87,7 @@ pub fn node_files(project: &Project) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files.dedup();
-    files
+    crate::drop_git_ignored(&project.root, files)
 }
 
 /// `{topdir}/rel/path` for a file under the topdir (absolute path otherwise).
@@ -279,5 +281,24 @@ mod tests {
         assert!(check(&project).clean());
         // idempotent
         assert!(fix(&project, &Fake, false).unwrap().is_empty());
+    }
+
+    /// cdk.out (2026-09-30): node files git ignores are not node files — no
+    /// orphan vertex, no id written into a build copy.
+    #[test]
+    fn git_ignored_copies_are_not_node_files() {
+        let top = std::env::temp_dir().join(format!("iter4_ids_ign_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(top.join("lambda")).unwrap();
+        std::fs::create_dir_all(top.join("infra/cdk.out/asset.1")).unwrap();
+        std::process::Command::new("git").args(["init", "-q"]).current_dir(&top).output().unwrap();
+        std::fs::write(top.join(".gitignore"), "cdk.out/\n").unwrap();
+        std::fs::write(top.join("main.iter.md"), "---\nprojectname: t\nglobalscandirs: [\"{topdir}/\"]\n---\n").unwrap();
+        std::fs::write(top.join("lambda/lambda.code.iter.md"), "---\nname: Lambda\n---\n").unwrap();
+        std::fs::write(top.join("infra/cdk.out/asset.1/lambda.code.iter.md"), "---\nname: Lambda\n---\n").unwrap();
+        let files = node_files(&Project::load(&top));
+        assert!(files.iter().any(|f| f.ends_with("lambda/lambda.code.iter.md")));
+        assert!(!files.iter().any(|f| f.to_string_lossy().contains("cdk.out")), "{files:?}");
+        assert!(fix(&Project::load(&top), &Fake, false).unwrap().iter().all(|c| !c.path.contains("cdk.out")));
+        assert!(!std::fs::read_to_string(top.join("infra/cdk.out/asset.1/lambda.code.iter.md")).unwrap().contains("id:"));
     }
 }
