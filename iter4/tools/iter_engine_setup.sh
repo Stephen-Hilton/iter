@@ -3,14 +3,18 @@
 # the machine that holds the project's code.
 #
 # The webui's "Start a new project" wizard (and its "Engine setup" page) prints
-# this command with every value filled in. Get the script from the iter server
-# itself, or from GitHub:
+# this command with every value filled in.
 #
-#   curl -fsSLo iter_engine_setup.sh http://127.0.0.1:8300/iter_engine_setup.sh
-#   curl -fsSLo iter_engine_setup.sh https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh
+# Run it in the project's folder (any folder: it sets up the one you are in),
+# straight from the server, so no copy of the script lands in your project:
 #
-#   bash iter_engine_setup.sh --data-url http://127.0.0.1:8300 --project shop-api \
-#        --engine Engine01 --topdir ~/dev/shop-api --token <engine token> --start
+#   cd ~/dev/shop-api
+#   curl -fsSL http://127.0.0.1:8300/iter_engine_setup.sh | bash -s -- \
+#     --data-url http://127.0.0.1:8300 --project shop-api --engine Engine01 \
+#     --token <engine token> --start
+#
+# (GitHub copy: https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh)
+# --topdir <folder> sets up another folder instead of the current one.
 #
 # What it does, in order (each step says what it found; nothing is overwritten):
 #   1. checks the tools: git, curl, and the claude CLI the agents run in
@@ -26,9 +30,9 @@
 #   7. with --start: starts the engine in the background and waits for it to
 #      check in with the server
 #
-# Other verbs, run in the checkout folder (or with --topdir):
-#   bash iter_engine_setup.sh --status     is the engine process running here?
-#   bash iter_engine_setup.sh --stop       stop the engine started here
+# Other verbs, in the project's folder (or with --topdir):
+#   ... | bash -s -- --status     is the engine process running here?
+#   ... | bash -s -- --stop       stop the engine started here
 set -euo pipefail
 
 DATA_URL="" PROJECT="" ENGINE="" TOPDIR="" TOKEN="${ITER_ENGINE_TOKEN:-}" DESC=""
@@ -36,7 +40,10 @@ ACCOUNTS="" ENV_FROM="" BIN="${ITER_ENGINE_BIN:-}" START=0 VERB="setup" ASSUME_Y
 SRC_REPO="${ITER_SRC_REPO:-https://github.com/Stephen-Hilton/iter.git}"
 HOME_DIR="${ITER_HOME:-$HOME/.iter}"
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { # piped into bash there is no file to read the header from
+  if [ -f "$0" ]; then sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+  else echo "iter_engine_setup.sh --data-url URL --project NAME --engine NAME [--token T] [--topdir DIR] [--accounts A,B] [--env-from FILE] [--bin PATH] [--desc TEXT] [--start] [--yes] | --status | --stop"; fi
+  exit "${1:-0}"; }
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 ok()   { printf '    \033[32mok\033[0m  %s\n' "$*"; }
 warn() { printf '    \033[33m!!\033[0m  %s\n' "$*" >&2; }
@@ -96,7 +103,7 @@ fi
 [ -n "$DATA_URL" ] || DATA_URL="$(ask "iter server URL (as this machine reaches it) [http://127.0.0.1:8300]:" "http://127.0.0.1:8300")"
 [ -n "$PROJECT" ]  || PROJECT="$(ask "project name:" "")"
 [ -n "$ENGINE" ]   || ENGINE="$(ask "engine name [$(hostname -s 2>/dev/null || echo Engine01)]:" "$(hostname -s 2>/dev/null || echo Engine01)")"
-[ -n "$TOPDIR" ]   || TOPDIR="$(expand "$(ask "checkout folder [$(pwd)]:" "$(pwd)")")"
+[ -n "$TOPDIR" ]   || TOPDIR="$(pwd)"   # the folder it is run in
 DATA_URL="${DATA_URL%/}"
 [ -n "$PROJECT" ] || die "a project name is required (--project)"
 [ -n "$ENGINE" ]  || die "an engine name is required (--engine)"
@@ -166,6 +173,9 @@ esac
 code="$(api "/api/projects/$PROJECT")"; PROJ_JSON="$(cat /tmp/iter_setup.$$ 2>/dev/null || true)"; rm -f /tmp/iter_setup.$$
 [ "$code" = 200 ] || die "project $PROJECT was not found on the server (HTTP $code): create it in the webui first"
 ok "project $PROJECT exists"
+if [ -z "$DESC" ] && command -v python3 >/dev/null; then # the description main.iter.md opens with
+  DESC="$(printf '%s' "$PROJ_JSON" | python3 -c 'import json,sys; print(" ".join(str(json.load(sys.stdin).get("desc") or "").split()))' 2>/dev/null || true)"
+fi
 case "$ENG_JSON" in *"\"$PROJECT\""*) ok "engine $ENGINE is assigned project $PROJECT" ;;
   *) warn "engine $ENGINE does not list project $PROJECT yet: add it from the engine's gear in the work queue (checkout path $TOPDIR)" ;; esac
 
@@ -244,7 +254,8 @@ cat <<EOF
 
 Done. In the webui: pick project $PROJECT, press Running if it is Stopped, and
 queued work starts within a few seconds.
-  stop the engine:   bash $0 --stop --topdir $(pwd)
+  engine status:     curl -fsSL $DATA_URL/iter_engine_setup.sh | bash -s -- --status --topdir $(pwd)
+  stop the engine:   curl -fsSL $DATA_URL/iter_engine_setup.sh | bash -s -- --stop --topdir $(pwd)
   its log:           tail -f $(pwd)/.iter/engine.log
 Commit the new project files (main.iter.md, .iter/, reqs/, .gitignore); .env stays uncommitted.
 EOF

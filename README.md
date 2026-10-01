@@ -106,13 +106,13 @@ open http://127.0.0.1:8300/        # admin / ITER_ADMIN_PASSWORD
 **3. Set up an engine** on the machine that holds the code. On its last page the wizard mints an engine token and prints this command with every value filled in. The work queue's **Engine setup** button shows it again whenever no engine is online for a project.
 
 ```bash
-curl -fsSLo iter_engine_setup.sh http://127.0.0.1:8300/iter_engine_setup.sh
-# or: https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh
-bash iter_engine_setup.sh --data-url http://127.0.0.1:8300 --project my-app --engine Engine01 \
-  --topdir ~/dev/my-app --token <engine token> --start
+cd ~/dev/my-app            # any folder: the script sets up the one it runs in
+curl -fsSL http://127.0.0.1:8300/iter_engine_setup.sh | bash -s -- \
+  --data-url http://127.0.0.1:8300 --project my-app --engine Engine01 \
+  --token <engine token> --start
 ```
 
-The script checks for git, curl and the `claude` CLI, and finds `iter_engine` (or builds it with cargo). It scaffolds `main.iter.md` and `.iter/config.json`, writes `.env` with the engine token and one token per Claude account (from `claude setup-token`, or copied with `--env-from`), then starts the engine and waits for it to check in. It never overwrites a file. Afterwards, `--status` and `--stop` manage the engine it started.
+The script comes straight from the server, so no copy of it lands in your project. The same script is on GitHub at `https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh`. It checks for git, curl and the `claude` CLI, and finds `iter_engine` (or builds it with cargo). It scaffolds `main.iter.md` and `.iter/config.json`, writes `.env` with the engine token and one token per Claude account (from `claude setup-token`, or copied with `--env-from`), then starts the engine and waits for it to check in. It never overwrites a file. Afterwards, the same pipe with `--status` or `--stop`, run in the project folder, manages the engine it started.
 
 **4. Press Running** on the project in the work queue, and file a first work item.
 

@@ -91,8 +91,8 @@
     const tabs = (x, w, y0, items, cls) => items.map((l, i) => `<g class="intro-c-tab ${cls}">
       <rect x="${x}" y="${y0 + i * 24}" width="${w}" height="21" rx="5"/><text x="${x + w / 2}" y="${y0 + i * 24 + 14.5}" text-anchor="middle">${l}</text></g>`).join("");
     // the repository tree: [indent, label, technical note]
-    const tree = [[0, "Your_Repo/", "+ main.iter.md"], [1, "src/"], [2, "data/"], [3, "container_db/", "+ db.code.iter.md"], [4, "src/"], [4, "test/", "*.tests.iter.md"],
-      [2, "app/"], [3, "container_applogic/"], [4, "src/"], [4, "test/"], [1, ".iter/", "config.json"]];
+    const tree = [[0, "Your_Repo/", "+ main.iter.md"], [1, "src/"], [2, "data/"], [3, "container_db/", "+ db.code.iter.md"], [4, "src/"], [4, "tests/", "*.tests.iter.md"],
+      [2, "app/"], [3, "container_applogic/"], [4, "src/"], [4, "tests/"], [1, ".iter/", "config.json"]];
     const treeSvg = tree.map(([d, l, note], i) => {
       const y = 182 + i * 20, x = 52 + d * 16;
       const label = d ? `<tspan class="intro-c-hook">&#8627; </tspan>${l}` : l;
@@ -663,13 +663,56 @@ journeys people take through the product in \`usecases/\`.
   // where the setup script lives: this server (always matches it), or GitHub
   const SETUP_GH = "https://raw.githubusercontent.com/Stephen-Hilton/iter/main/iter4/tools/iter_engine_setup.sh";
   const setupUrl = d => d.dataUrl.trim().replace(/\/+$/, "") + "/iter_engine_setup.sh";
+  // a path for the shell: a leading ~/ stays outside the quotes so the shell expands it
+  const shqPath = p => /^~\//.test(p) ? "~/" + (p.length > 2 ? shq(p.slice(2)) : "") : shq(p);
+  // the setup command's extra flags, edited on the Set up page; the machine-specific ones
+  // (env file, binary, start, yes) are remembered in this browser for the next project
+  const SOPT_KEY = "iter_setup_opts";
+  const SOPT_KEEP = ["envFrom", "bin", "start", "yes"];
+  function setupOpts() {
+    if (!S.sopt) S.sopt = Object.assign({ envFrom: "", bin: "", accounts: "", start: true, yes: false }, store.get(SOPT_KEY) || {});
+    return S.sopt;
+  }
+  // run in the project's folder, piped from the server: the script sets up the folder it
+  // runs in, and no copy of it lands in the project (it reads the description itself)
   function setupCmd(d, token) {
-    const lines = [`bash iter_engine_setup.sh --data-url ${shq(d.dataUrl.trim())} --project ${shq(d.name.trim())} --engine ${shq(d.engine.trim())}`,
-      `  --topdir ${shq(d.topdir.trim())}`,
-      `  --token ${token ? shq(token) : "<the token from step 1>"}`];
-    if (oneLine(d.desc)) lines.push(`  --desc ${shq(oneLine(d.desc))}`);
-    lines.push("  --start");
-    return `curl -fsSLo iter_engine_setup.sh ${setupUrl(d)}\n` + lines.join(" \\\n");
+    const o = setupOpts(), dir = d.topdir.trim();
+    const flags = [`--data-url ${shq(d.dataUrl.trim())} --project ${shq(d.name.trim())} --engine ${shq(d.engine.trim())}`,
+      `--token ${token ? shq(token) : "PASTE_THE_TOKEN_FROM_STEP_1"}`];
+    if (o.envFrom.trim()) flags.push(`--env-from ${shqPath(o.envFrom.trim())}`);
+    if (o.bin.trim()) flags.push(`--bin ${shqPath(o.bin.trim())}`);
+    if (o.accounts.trim()) flags.push(`--accounts ${shq(o.accounts.replace(/\s+/g, ""))}`);
+    if (o.yes) flags.push("--yes");
+    if (o.start) flags.push("--start");
+    return `mkdir -p ${shqPath(dir)} && cd ${shqPath(dir)}\n` +
+      `curl -fsSL ${setupUrl(d)} | bash -s -- \\\n  ` + flags.join(" \\\n  ");
+  }
+  function setupForm() {
+    const o = setupOpts(), d = S.w.d;
+    const accts = d.accounts.map(a => a.token_envar.trim()).filter(Boolean).join(",");
+    const txt = (k, label, val, ph, help, proj) => `<label class="intro-sopt"><span>${label}${proj ? "" : ' <em title="remembered in this browser">&#9679;</em>'}</span>` +
+      `<input data-sopt="${k}" value="${esc(val)}" placeholder="${esc(ph)}" autocomplete="off" spellcheck="false"><small>${help}</small></label>`;
+    const chk = (k, label, help) => `<label class="intro-sopt intro-sopt-c"><input type="checkbox" data-sopt="${k}" ${o[k] ? "checked" : ""}><span>${label} <em title="remembered in this browser">&#9679;</em></span><small>${help}</small></label>`;
+    return `<div class="intro-sopts">
+      ${txt("dataUrl", "Server URL (<code>--data-url</code>)", d.dataUrl, "http://127.0.0.1:8300", "this server, as the engine machine reaches it", true)}
+      ${txt("envFrom", "Account tokens from (<code>--env-from</code>)", o.envFrom, "~/dev/other-project/.env", "an env file that already has the account tokens; blank = the script asks for each")}
+      ${txt("bin", "iter_engine binary (<code>--bin</code>)", o.bin, "found automatically", "blank = PATH, then ~/.iter/bin, else built with cargo")}
+      ${txt("accounts", "Account env vars (<code>--accounts</code>)", o.accounts, accts || "none: the machine's own claude login", "blank = the project's accounts", true)}
+      ${chk("start", "Start the engine (<code>--start</code>)", "in the background, then wait for it to check in")}
+      ${chk("yes", "No questions (<code>--yes</code>)", "take every default; blank account tokens stay unset")}
+    </div><p class="intro-small intro-dim"><em>&#9679;</em> remembered in this browser for the next project</p>`;
+  }
+  // a form field changed: rewrite the command (and what Copy copies) without a re-render
+  function setupOptInput(t) {
+    const k = t.dataset.sopt, o = setupOpts(), d = S.w.d;
+    if (k === "dataUrl") d.dataUrl = t.value;
+    else o[k] = t.type === "checkbox" ? t.checked : t.value;
+    const keep = {}; SOPT_KEEP.forEach(x => { keep[x] = o[x]; }); store.set(SOPT_KEY, keep);
+    const box = S.el.querySelector("#intro-setupcmd");
+    if (!box) return;
+    const cmd = setupCmd(d, S.w.token), btn = box.querySelector("[data-copy]");
+    if (btn) copies[+btn.dataset.copy] = cmd;
+    box.querySelector("pre").textContent = cmd;
   }
   /** The engine's check-in state: online when it heartbeat within the last minute. */
   function engineState(rec) {
@@ -726,13 +769,14 @@ journeys people take through the product in \`usecases/\`.
 
     const accts = d.accounts.map(a => a.token_envar.trim()).filter(Boolean);
     h += `<h3>2 · Run the setup script on that machine</h3>
-      <p class="intro-dim intro-small">Open a terminal on the machine that holds <code>${esc(d.topdir.trim())}</code> and paste this. The script checks the tools (git, curl, the <code>claude</code> CLI), finds <code>iter_engine</code> or builds it from GitHub, creates the folder, scaffolds the project files, writes <code>.env</code> and keeps it out of git, starts the engine and waits for it to check in. It never overwrites a file, so it is safe to run again.</p>` +
-      code("in a terminal on the engine machine", setupCmd(d, w.token)) +
+      <p class="intro-dim intro-small">Open a terminal on the machine that holds <code>${esc(d.topdir.trim())}</code> and paste this (use the <b>Copy</b> button: long lines copied by hand can break). It sets up the folder it runs in, so the first line moves there; the script comes straight from this server and no copy of it is left in your project. It checks the tools (git, curl, the <code>claude</code> CLI), finds <code>iter_engine</code> or builds it from GitHub, creates the folder, scaffolds the project files, writes <code>.env</code> and keeps it out of git, starts the engine and waits for it to check in. It never overwrites a file, so it is safe to run again.</p>` +
+      setupForm() +
+      `<div id="intro-setupcmd">${code("in a terminal on the engine machine", setupCmd(d, w.token))}</div>` +
       `<ul class="intro-small intro-dim">
-        <li>Claude accounts: ${accts.length ? `it asks for ${accts.map(a => `<code>${esc(a)}</code>`).join(", ")}, one token per account (run <code>claude setup-token</code> while logged in to it). Already have them in another env file? Add <code>--env-from ~/path/to/.env</code> and they are copied.` : "none listed, so the agents use that machine's own <code>claude</code> login."}</li>
-        <li>Already built <code>iter_engine</code>? Add <code>--bin /path/to/iter_engine</code>. Otherwise the script builds it with <code>cargo</code> (install Rust from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> first).</li>
-        <li>That machine cannot reach ${esc(url)}? Then the <code>--data-url</code> above is wrong for it too: use the address it does reach this server by. The script itself is also on <a href="${esc(SETUP_GH)}" target="_blank" rel="noopener">GitHub</a>: <code>curl -fsSLo iter_engine_setup.sh ${esc(SETUP_GH)}</code></li>
-        <li>Later: <code>bash iter_engine_setup.sh --status</code> or <code>--stop</code> in the checkout; the log is <code>.iter/engine.log</code>.</li>
+        <li>Claude accounts: ${accts.length ? `without an env file above, it asks for ${accts.map(a => `<code>${esc(a)}</code>`).join(", ")}, one token per account (run <code>claude setup-token</code> while logged in to it).` : "none listed, so the agents use that machine's own <code>claude</code> login."}</li>
+        <li>No <code>iter_engine</code> on that machine yet? The script builds it with <code>cargo</code> (install Rust from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> first).</li>
+        <li>That machine reaches this server by another address? Change the Server URL above. The project folder is the one saved on engine ${esc(eng)}'s record: change it from the engine's gear in the work queue. The script itself is also on <a href="${esc(SETUP_GH)}" target="_blank" rel="noopener">GitHub</a>: use <code>curl -fsSL ${esc(SETUP_GH)} | bash -s -- …</code> the same way.</li>
+        <li>Later, in the project's folder: <code>curl -fsSL ${esc(setupUrl(d))} | bash -s -- --status</code> (or <code>--stop</code>); the log is <code>.iter/engine.log</code>.</li>
       </ul>
       <div class="intro-actions"><a class="intro-btn intro-ghost intro-sm" href="${esc(setupUrl(d))}" download="iter_engine_setup.sh">Download iter_engine_setup.sh</a></div>`;
 
@@ -969,6 +1013,7 @@ journeys people take through the product in \`usecases/\`.
       if (grid) { const tmp = document.createElement("div"); tmp.innerHTML = glossaryHtml(); grid.replaceWith(tmp.querySelector(".intro-gloss-grid")); }
       return;
     }
+    if (t.dataset.sopt) return setupOptInput(t);
     const d = S.w.d;
     if (t.dataset.f) {
       const f = t.dataset.f;

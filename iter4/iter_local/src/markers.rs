@@ -533,8 +533,10 @@ pub fn scan(project: &Project) -> Scan {
                 let (techreqs, _, _) = resolve_child_files(
                     &front, "techreqs", &["{thisfiledir}/*.techreq.iter.md"], &cvars, &dir,
                 );
+                // a node's tests live in `tests/` (2026-09-30: one name everywhere, as
+                // $ITER_TEST_DIR and the test agent's lock shape say); `test/` is still found
                 let (testgroups, testgroups_declared, missing_testgroups) = resolve_child_files(
-                    &front, "testgroups", &["{thisfiledir}/test/*.testgroup.iter.md"], &cvars, &dir,
+                    &front, "testgroups", &["{thisfiledir}/tests/*.testgroup.iter.md", "{thisfiledir}/test/*.testgroup.iter.md"], &cvars, &dir,
                 );
                 let name = {
                     let n = front.scalar("name");

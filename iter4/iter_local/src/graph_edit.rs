@@ -395,7 +395,7 @@ pub fn apply(project: &Project, op: &Value) -> Result<Vec<String>, String> {
             let parent_dir = if parent.is_empty() { top.clone() } else { parent_file.parent().unwrap_or(&top).to_path_buf() };
             let dir = parent_dir.join(&slug);
             let code = format!(
-                "---\nid: {id}\nname: {n}\ndescription: {d}\nsimple_description: {sd}\nlevel: {kind}\nowner: bespoke\nteststate: inherit\nchildren:\n  codedirs:   [\"{{thisfiledir}}/\"]\n  codenodes:  []\n  inputs:     []\n  outputs:    []\n  bizreqs:    [\"{{thisfiledir}}/{slug}.bizreq.iter.md\"]\n  techreqs:   [\"{{thisfiledir}}/{slug}.techreq.iter.md\"]\n  tests:      [\"{{thisfiledir}}/test/*.tests.iter.md\"]\n---\n\n# Long Description\n\n{long}\n",
+                "---\nid: {id}\nname: {n}\ndescription: {d}\nsimple_description: {sd}\nlevel: {kind}\nowner: bespoke\nteststate: inherit\nchildren:\n  codedirs:   [\"{{thisfiledir}}/\"]\n  codenodes:  []\n  inputs:     []\n  outputs:    []\n  bizreqs:    [\"{{thisfiledir}}/{slug}.bizreq.iter.md\"]\n  techreqs:   [\"{{thisfiledir}}/{slug}.techreq.iter.md\"]\n  tests:      [\"{{thisfiledir}}/tests/*.tests.iter.md\"]\n---\n\n# Long Description\n\n{long}\n",
                 id = new_id(), n = yq(name), d = desc, sd = yq(&simple), kind = kind, slug = slug, long = long
             );
             let d = yq(&desc);
@@ -412,7 +412,7 @@ pub fn apply(project: &Project, op: &Value) -> Result<Vec<String>, String> {
             let group = json!({"label": format!("{slug}-unit"), "desc": format!("the tests of {name}"), "auto_fix": false,
                                "lastrun": "", "result": "", "counts": "", "testlist": []});
             write_new(
-                &dir.join("test").join(format!("{slug}.tests.iter.md")),
+                &dir.join("tests").join(format!("{slug}.tests.iter.md")),
                 &format!("---\nid: {}\nname: {}\ndescription: {}\nchildren:\n  testpaths: [\"{{thisfiledir}}/*.sh\"]\n---\n\n# {name} — tests\n\n{}<!-- iterapp:testgroups\n{}\n-->\n",
                     new_id(), yq(&format!("{name} tests")), yq(&format!("The tests of {name}.")), planned_section(op.get("tests")), group),
                 &mut written,
@@ -580,7 +580,11 @@ pub fn apply(project: &Project, op: &Value) -> Result<Vec<String>, String> {
             if tests.is_empty() {
                 return Err("define_tests needs at least one test (tests: [{name, desc}])".into());
             }
-            let tf = ndir.join("test").join(format!("{slug}.tests.iter.md"));
+            // new tests files go in `tests/`; a node that already keeps its file in the
+            // older `test/` folder goes on using that one
+            let old_tf = ndir.join("test").join(format!("{slug}.tests.iter.md"));
+            let tdir = if old_tf.exists() { "test" } else { "tests" };
+            let tf = ndir.join(tdir).join(format!("{slug}.tests.iter.md"));
             if tf.exists() {
                 let section = planned_section(op.get("tests"));
                 edit(&tf, |c| Ok(replace_planned(c, &section)), &mut written)?;
@@ -590,10 +594,10 @@ pub fn apply(project: &Project, op: &Value) -> Result<Vec<String>, String> {
                                    "lastrun": "", "result": "", "counts": "", "testlist": []});
                 write_new(&tf, &format!("---\nid: {}\nname: {}\ndescription: {}\nchildren:\n  testpaths: [\"{{thisfiledir}}/*.sh\"]\n---\n\n# {name} — tests\n\n{}<!-- iterapp:testgroups\n{}\n-->\n",
                     new_id(), yq(&format!("{name} tests")), yq(&format!("The tests of {name}.")), planned_section(op.get("tests")), group), &mut written)?;
-                // make sure the node links it (its default pattern may not reach test/)
+                // make sure the node links it (a link to the other folder does not reach it)
                 let link = topdir_rel(&top, &tf);
                 edit(&node, |c| {
-                    let already = c.contains("test/*.tests.iter.md") || c.contains("test/*.testgroup.iter.md") || c.contains(&link);
+                    let already = c.contains(&format!("{tdir}/*.tests.iter.md")) || c.contains(&link);
                     if already { Ok(c.to_string()) } else { add_child(c, "tests", &link) }
                 }, &mut written)?;
             }
@@ -859,7 +863,7 @@ mod tests {
         // any level owns any level: a context inside a context, then linked and unlinked elsewhere
         apply(&project, &json!({"op": "new_node", "kind": "context", "name": "Auth", "parent": "data", "description": "Checks who is asking.",
             "tests": [{"name": "boots", "desc": "the container starts"}, {"name": "login", "desc": "a known user gets a token"}]})).unwrap();
-        let t = std::fs::read_to_string(top.join("data/auth/test/auth.tests.iter.md")).unwrap();
+        let t = std::fs::read_to_string(top.join("data/auth/tests/auth.tests.iter.md")).unwrap();
         assert!(t.contains("## Planned tests") && t.find("boots").unwrap() < t.find("login").unwrap(), "{t}");
         apply(&project, &json!({"op": "link_child", "parent": "data/ledger_api", "child": "data/store"})).unwrap();
         assert!(std::fs::read_to_string(top.join("data/ledger_api/ledger_api.code.iter.md")).unwrap().contains("data/store/store.code.iter.md"));
@@ -869,10 +873,16 @@ mod tests {
         apply(&project, &json!({"op": "disconnect", "from": "data/ledger_api", "to": "data/store", "interface": {"name": "store-read"}, "reason": "reads go through the cache now"})).unwrap();
         assert!(!std::fs::read_to_string(top.join("data/store/store.code.iter.md")).unwrap().contains("store-read"));
         apply(&project, &json!({"op": "define_tests", "node": "data/store", "tests": [{"name": "boots"}, {"name": "reads a row"}]})).unwrap();
-        let st = std::fs::read_to_string(top.join("data/store/test/store.tests.iter.md")).unwrap();
+        let st = std::fs::read_to_string(top.join("data/store/tests/store.tests.iter.md")).unwrap();
         assert!(st.contains("2. **reads a row**") && st.contains("<!-- iterapp:testgroups"), "{st}");
         apply(&project, &json!({"op": "define_tests", "node": "data/store", "tests": [{"name": "only one now"}]})).unwrap();
-        let st = std::fs::read_to_string(top.join("data/store/test/store.tests.iter.md")).unwrap();
+        let st = std::fs::read_to_string(top.join("data/store/tests/store.tests.iter.md")).unwrap();
         assert!(st.contains("only one now") && !st.contains("reads a row"), "the planned list is replaced, not appended: {st}");
+        // a node that keeps its tests file in the older `test/` folder goes on using it
+        std::fs::create_dir_all(top.join("data/ledger_api/test")).unwrap();
+        std::fs::rename(top.join("data/ledger_api/tests/ledger_api.tests.iter.md"), top.join("data/ledger_api/test/ledger_api.tests.iter.md")).unwrap();
+        apply(&project, &json!({"op": "define_tests", "node": "data/ledger_api", "tests": [{"name": "answers a read"}]})).unwrap();
+        assert!(std::fs::read_to_string(top.join("data/ledger_api/test/ledger_api.tests.iter.md")).unwrap().contains("answers a read"));
+        assert!(!top.join("data/ledger_api/tests/ledger_api.tests.iter.md").exists(), "no second tests file in tests/");
     }
 }

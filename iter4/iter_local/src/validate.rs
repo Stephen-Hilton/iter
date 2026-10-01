@@ -754,7 +754,7 @@ children:
   outputs:    []                # interfaces produced
   bizreqs:    ["{thisfiledir}/*.bizreq.iter.md"]
   techreqs:   ["{thisfiledir}/*.techreq.iter.md"]
-  testgroups: ["{thisfiledir}/test/*.testgroup.iter.md"]
+  tests: ["{thisfiledir}/tests/*.tests.iter.md"]
 ---
 
 # Long Description

@@ -432,3 +432,13 @@ a.intro-btn{display:inline-block;text-decoration:none}
 .intro-byhand{margin-top:18px;border-top:1px solid var(--line, #2a2f37);padding-top:10px}
 .intro-byhand>summary{cursor:pointer;font-weight:600;font-size:13px}
 .intro-byhand h4{margin:14px 0 4px;font-size:13px}
+
+/* the Set up page's command options: each field rewrites the command below it */
+.intro-sopts{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px 16px;margin:10px 0 4px}
+.intro-sopt{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.intro-sopt>span{font-weight:600}
+.intro-sopt em{font-style:normal;color:var(--accent,#4da3ff);font-size:9px;vertical-align:2px}
+.intro-sopt input:not([type=checkbox]){background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:12.5px ui-monospace,Menlo,Consolas,monospace}
+.intro-sopt small{color:var(--dim);font-size:11.5px}
+.intro-sopt-c{display:grid;grid-template-columns:auto 1fr;column-gap:8px;align-items:center}
+.intro-sopt-c small{grid-column:2}

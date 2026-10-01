@@ -345,7 +345,7 @@ Choose **+ Global object** → use case (or the project's right-click menu), giv
 
 ### How are tests organised?
 
-In `*.tests.iter.md` files (usually `test/<name>.tests.iter.md` beside the node) listing **test groups**; each group lists test scripts. A script passes with exit 0, fails with exit 1, and anything else (including a timeout) is an error; it may end its output with `ITER_RESULT pass=X fail=Y total=Z`.
+In `*.tests.iter.md` files (usually `tests/<name>.tests.iter.md` beside the node; files in an older `test/` folder still count) listing **test groups**; each group lists test scripts. A script passes with exit 0, fails with exit 1, and anything else (including a timeout) is an error; it may end its output with `ITER_RESULT pass=X fail=Y total=Z`.
 
 ### How do I run tests?
 
@@ -370,7 +370,7 @@ Test scripts write any output files only under `$ITER_TEST_OUT`: a folder per te
 
 ### What is teststate?
 
-A node's `teststate` decides whether its tests run in the sweep: `omit` skips them, `include` brings them back under an omitted parent, `block` parks them (only a person lifts it), `inherit` (the default) follows the parents. `iter_engine cli teststate --list` shows every node's effective state.
+A node's `teststate` decides whether its tests run in the sweep: `omit` skips them, `include` brings them back under an omitted parent, `block` parks them (only a person lifts it), `inherit` (the default) follows the parents. `iter_engine cli teststate --list` shows every node's effective state. A test group can also carry its own `teststate: omit`: the sweep then skips that one group whatever its owners say. Use it for groups that are run by hand only, such as live-site tests that need real credentials, and link them like any other group so the map shows them instead of reporting them as unlinked.
 
 ### How do I work test-first from the map?
 

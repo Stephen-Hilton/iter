@@ -74,12 +74,22 @@ fn chain_states<'a>(vertices: &'a [Value], edges: &'a [Value]) -> HashMap<&'a st
 /// main includes it (the reasons are kept for the report).
 pub fn eligible(vertices: &[Value], edges: &[Value]) -> Vec<(String, String, bool, String)> {
     let owner_states = chain_states(vertices, edges);
+    // a testgroup's own teststate (2026-09-30): `omit` keeps a linked group out of the
+    // sweep whatever its owners say, e.g. live-site groups that are run by hand
+    let own: HashMap<&str, &str> = vertices
+        .iter()
+        .filter_map(|v| Some((v["id"].as_str()?, v["teststate"].as_str().unwrap_or("").trim())))
+        .collect();
     let mut result = Vec::new();
     // `tests` since iter4; maps synced before the rename say `testgroups`
     for e in edges.iter().filter(|e| e["kind"] == "tests" || e["kind"] == "testgroups") {
         let (Some(owner), Some(tg)) = (e["from"].as_str(), e["to"].as_str()) else { continue };
         let states = owner_states.get(owner).cloned().unwrap_or_default();
-        let (ok, why) = if states.is_empty() {
+        let (ok, why) = if matches!(own.get(tg).copied(), Some("omit")) {
+            (false, "omitted on the testgroup itself".to_string())
+        } else if matches!(own.get(tg).copied(), Some("block" | "blocked")) {
+            (false, "blocked on the testgroup itself".to_string())
+        } else if states.is_empty() {
             (false, "owner not reachable from main".to_string())
         } else if states.contains(&Chain::Include) {
             (true, "included".to_string())
@@ -388,7 +398,7 @@ fn untested_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &
         let name = v["name"].as_str().unwrap_or("");
         let dir = v["dir"].as_str().map(String::from).unwrap_or_else(|| path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default());
         let stem = path.rsplit('/').next().unwrap_or("").trim_end_matches(".code.iter.md");
-        let tests_file = format!("{dir}/test/{stem}.tests.iter.md");
+        let tests_file = format!("{dir}/tests/{stem}.tests.iter.md");
         if o.dry_run {
             println!("  would file: tests for {path}");
             filed += 1;
@@ -401,7 +411,7 @@ fn untested_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &
              - Create {tests_file} (or fill the tests file the node already links) with a `## Planned tests` list, simplest first, and a testgroup block.\n\
              - Size the tests by the input space: write `input_space` (what the code accepts, roughly how many practical permutations) and `coverage` targets for the four kinds — golden (expected paths), malformed (allowable malformed, incomplete or missing inputs), longtail (rare but valid inputs), failure (what it must refuse) — on the group's line, and give every test its `kind`.\n\
              - Write one deterministic shell script per test beside it (exit 0 = passes, 1 = fails, last line `ITER_RESULT pass=… fail=… total=…`) and register each in the testgroup block, in order.\n\
-             - Link the tests from the node file: add `\"{{thisfiledir}}/test/*.tests.iter.md\"` to `children.tests` in {path} unless it is already there (keep every other field as it is).\n\
+             - Link the tests from the node file: add `\"{{thisfiledir}}/tests/*.tests.iter.md\"` to `children.tests` in {path} unless it is already there (keep every other field as it is).\n\
              - A script that writes files writes them only under `$ITER_TEST_OUT` (emptied before every run, outside the checkout), never into the tree.\n\
              - Run the group with `iter runtests --group <label>` and report what is green and what is red. Do not change the code under test: a red test is filed as a `code` item by the next sweep.",
             if codedirs.is_empty() { "the files beside the node".to_string() } else { codedirs.join(", ") },
@@ -416,7 +426,7 @@ fn untested_sweep(api: &Api, c: &Conn, vertices: &[Value], edges: &[Value], o: &
         }
         let workid = std::env::var("ITER_WORKID").unwrap_or_default();
         let body = json!({"name": format!("Tests first: write the first tests for {name}"), "agent": "test", "state": "queued",
-            "lockdirs": [path, format!("{dir}/test/")], "blockedby": [], "context": [], "model": "", "tags": tags,
+            "lockdirs": [path, format!("{dir}/tests/")], "blockedby": [], "context": [], "model": "", "tags": tags,
             "createdby": workid, "requestedby": if workid.is_empty() { "user" } else { "agent:exec" }, "prework": [], "postwork": [],
             "request": request});
         match api.post(&format!("/api/projects/{}/workitems", c.project), &body) {
@@ -663,6 +673,16 @@ mod tests {
         let es = vec![e("ctx", "codenodes", "cont"), e("cont", "codenodes", "comp"), e("u1", "codenodes", "cont"), e("u2", "codenodes", "elsewhere")];
         assert_eq!(usecases_touching(&vs, &es, "comp"), vec!["map-the-repo".to_string()], "through the owner chain");
         assert!(usecases_touching(&vs, &es, "ctx").is_empty());
+    }
+
+    #[test]
+    fn a_testgroup_can_omit_itself() {
+        // main -> U(usecase) owns tg_dev and tg_prod; tg_prod says teststate: omit
+        let vs = vec![v("m", "main", ""), v("U", "usecase", ""), v("tg_dev", "tests", ""), v("tg_prod", "tests", "omit")];
+        let es = vec![e("m", "root", "U"), e("U", "tests", "tg_dev"), e("U", "tests", "tg_prod")];
+        let r: HashMap<String, (bool, String)> = eligible(&vs, &es).into_iter().map(|(tg, _, ok, why)| (tg, (ok, why))).collect();
+        assert_eq!(r["tg_dev"], (true, "included".into()));
+        assert_eq!(r["tg_prod"], (false, "omitted on the testgroup itself".into()));
     }
 
     #[test]
