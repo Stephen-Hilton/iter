@@ -2,27 +2,33 @@
 
 `iter runtests` is the deterministic test runner: it runs a testgroup's shell
 scripts, records a `log_header` row on your work item (plus a `log_detail` row with the
-failing scripts' output when non-green), and updates the group's `lastrun`, `result`
-and `counts` in its `testgroup.iter.md`. It is the only acceptance criterion for
-"done" — never your own judgment that the code looks right.
+failing scripts' output when non-green), and on a full run updates the group's
+`lastrun`, `result` and `counts` in its tests file (`*.tests.iter.md`, or the older
+`*.testgroup.iter.md`). It is the only acceptance criterion for "done" — never your
+own judgment that the code looks right.
 
-    "$ITER_BIN" runtests --project "$ITER_PROJECT" --group "<label>" [--test <id>]
+    "$ITER_BIN" runtests --project "$ITER_PROJECT" --group "<label>" [--test <id>] [--timeout-min <n>]
 
-`--group` takes the label from the `iterapp:testgroups` JSONL block. `--test`
-narrows a NEUTRAL run to one test id or script.
+`--group` takes the label from the `iterapp:testgroups` JSONL block (the runner
+searches every tests file in the checkout, skipping git-ignored ones). `--test`
+narrows a NEUTRAL run to one test id or script; a narrowed run never updates the
+group's recorded result. `--timeout-min` is the whole group's time budget (default
+20); a script still running at the limit is killed and counts as a script error.
 
 ## Three modes: one neutral, two claims
 
 - **Plain (neutral)** — no `--broken`, no `--fixed`. Runs and reports; it never
   flags anything. Run these freely while iterating.
 - **`--broken`** — claims "the defect is still present". If the group is actually
-  green the claim is false: the engine writes the fail-flag and the item fails at
-  the turn boundary no matter what you do next. That means the item is STALE —
-  touch no code and stop.
+  green the claim is false: the command parks the item at once as stale (the
+  reason is recorded on it) and exits 3, no matter what you do next. Touch no code
+  and stop. A script error also parks it: "could not run" is not "the defect
+  reproduces".
 - **`--fixed`** — claims "the defect is resolved", and is the completion gate. Any
-  red test or script error means the claim is false: fail-flag written, the item
-  cannot close as done. The WHOLE group must be green — a fix that breaks a
-  neighboring test is not done.
+  red test or script error means the claim is false: the claim is recorded as not
+  upheld (exit 3), and the close gate will not complete the item until a later
+  `--fixed` claim on the group is upheld. The WHOLE group must be green — a fix that
+  breaks a neighboring test is not done.
 
 Claims always run the whole group; `--test` applies to neutral runs only.
 
@@ -30,8 +36,9 @@ Claims always run the whole group; `--test` applies to neutral runs only.
 
 A work item may sit queued for hours and then run against a tree that has moved
 on. In the TDD flow that risk is handled by tests, not prose: a defect-shaped
-item carries the testgroup that proves the defect (`source_testgroup` on
-sweep-born items; the group named in `mainwork` on items an agent authored). The
+item carries the testgroup that proves the defect (sweep-born and runtests-born fix
+items name it in their title, `Tests non-green: testgroup "<label>" …`, and their
+request; the group named in `mainwork` on items an agent authored). The
 receiving agent reproduces BEFORE fixing — `--broken` first, then diagnose from
 the `log_detail` row the run appended to your work item (the failing scripts' output), then fix the CODE, then
 `--fixed` to gate completion.

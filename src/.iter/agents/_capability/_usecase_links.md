@@ -8,6 +8,11 @@ part of it, so a use-case never gets a code node file of its own.
 Its `children.codenodes` is the REQUIRED link list: the `*.code.iter.md` files the
 journey needs. An empty list is valid and marks work still to come.
 
+List each part at the most specific level that is true, and never its owners: when
+the map is stored, iter walks every listed part up its ownership chain and tags each
+owner with the use case itself, which is how the Project graph draws the use case as
+a hierarchy. Write entries as `{topdir}/…` paths, the form the existing entries use.
+
 Edit that list through the engine-owned path — never by hand, and regardless of
 whether the use-case file is inside your lock scope:
 
@@ -17,7 +22,8 @@ whether the use-case file is inside your lock scope:
 
 `--add` takes a `*.code.iter.md` path or pattern and repeats; `--remove` takes an
 exact existing entry and repeats; `--list` prints the resulting codenodes one per
-line.
+line. The command writes the file as given; it does not check that the path exists,
+so check the path yourself.
 
 The one exception: the usecase agent owns the use-case files as its lock scope and
 edits them directly. Every other agent uses this command.

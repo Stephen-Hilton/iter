@@ -13,7 +13,9 @@ in the tree — the scan aggregates them globally) for a contract that already f
 extend or reference it instead of creating a near-duplicate. Create a new id only
 when no existing contract covers the need. NEW interface files are named
 `<id>.interface.iter.md` and land in `$ITER_INTERFACE_DIR` — the scanner finds them
-anywhere, but new ones belong there.
+anywhere, but new ones belong there. Follow the folder habit the directory already
+shows: the Project graph's Connect writes `<id>/<id>.interface.iter.md`, one folder
+per interface; a flat directory stays flat.
 
 ## ONE OPERATION PER FILE
 
@@ -21,13 +23,13 @@ An interface file is ONE operation, event, stream or record: `CreateMembership` 
 one file, `DescribeMembership` is another. Never bundle a service's operations into
 one contract behind an `"op"` / `"verb"` discriminator — `iter validate` flags that
 as `multi-op`. Name the file `<service>-<operation>.interface.iter.md` (for example
-`pdy-core-authority-create-membership.interface.iter.md`); the code node that serves
+`accounts-create-membership.interface.iter.md`); the code node that serves
 the operation links every one of its per-operation files in `children.outputs`.
 
 A shared object — an attestation, an evidence reference, a refusal envelope, a
 money amount — is defined ONCE as its own `kind: dataset` interface file and
 referenced by id from every contract that carries it (`"attestation": <see
-pdy-core-attestation>`). Never restate a shared object's fields in each operation.
+attestation>`). Never restate a shared object's fields in each operation.
 
 ## FIXED FORMAT — these sections and ONLY these
 
@@ -38,10 +40,17 @@ Enforced by `iter validate`. Get the current skeleton with
 — never write one from memory; an existing interface file's `kind:` steers which
 skeleton you get.
 
-- frontmatter: `name:` (the id); `kind:` — the interaction shape,
+- frontmatter: `id:` (a UUID — `"$ITER_BIN" ids --fix` writes it for a new file);
+  `name:` (the contract's id, kebab-case — the one other files reference, not the UUID); `label:` — 2–5 plain words saying
+  what crosses, written for a reader who never saw the code ("Files a work item"):
+  the Project graph captions the connection with it, and `iter validate` warns
+  `missing-interface-label` without it; `kind:` — the interaction shape,
   `request-reply | event | stream | dataset`, never a transport or a syntax;
-  `description:` (quoted prose); `children:` with the per-node defaults
-  (`{thisfiledir}/{thisfilestem}/*.bizreq|techreq|testgroup.iter.md`)
+  `description:` (quoted prose); `teststate:` and `owner:` as on code nodes;
+  `children:` with the per-node defaults
+  (`{thisfiledir}/{thisfilestem}/*.bizreq|techreq.iter.md`, and tests under `tests:`
+  — older files say `testgroups:` — matching `*.tests.iter.md` or
+  `*.testgroup.iter.md`)
 - one `# <id> — contract` H1, then a named summary under 300 characters
 - the kind's H2 sections: request-reply → `## Request`, `## Reply, success shape`,
   `## Reply, failure shape`; event → `## Event`; stream → `## Stream item`,
@@ -60,12 +69,11 @@ skeleton you get.
   nodes and are referenced by requirement id from there; the contract shows the
   data, not the law. `iter validate` flags the section as `invariants-section`
 - optionally, and ONLY as the final section after `## Worked examples`:
-  `## Exceptions` — a declared deviation from the internal transport law that
-  service-to-service calls ride the mesh with mutual TLS and speak gRPC. State what
-  deviates (e.g. a component that must speak an infrastructure wire protocol such
-  as Redis's or Kafka's), why gRPC is impractical there, and what still holds (mesh
-  transit, mTLS). Most contracts have no such section, and that is the normal case:
-  no section, no exception
+  `## Exceptions` — a declared deviation from the project's internal transport law,
+  where its context files define one. State what deviates (e.g. a component that must
+  speak an infrastructure wire protocol such as Redis's or Kafka's), why the law is
+  impractical there, and what still holds. Most contracts have
+  no such section, and that is the normal case: no section, no exception
 
 A one-operation contract with two examples is a few kilobytes. `iter validate`
 flags a body over 10 KB as `oversize-body`: look for bundled operations, restated
@@ -83,7 +91,9 @@ pseudo-examples stay untagged.
 
 Models: `e2e/.fixture/interfaces/ledger-command/ledger-command.interface.iter.md`
 (request-reply) and `e2e/.fixture/interfaces/entry-recorded/` (event — note the
-different fixed sections `kind:` demands).
+different fixed sections `kind:` demands). Those two live in the iter repository
+itself and predate `label:`; in any other checkout, model on an existing file in
+`$ITER_INTERFACE_DIR` that `iter validate` passes clean.
 
 ## The two-clause test — the file is right when
 
@@ -107,10 +117,10 @@ second consumer appears, and `iter validate` flags them.
 
 ## Copy the quotes
 
-**Copy the quotes** on the prose fields (`name`, `description`, `endpoint`). Prose
-routinely contains a colon-plus-space, and while the engine parses that fine
-unquoted, strict-YAML tools reading the same file refuse the whole block. Bare
-single-token values (`kind:`, `level:`, `owner:`, `teststate:`) stay unquoted.
+**Copy the quotes** on the prose fields (`name`, `label`, `description`,
+`endpoint`). Prose routinely contains a colon-plus-space, and while the engine parses
+that fine unquoted, strict-YAML tools reading the same file refuse the whole block.
+Bare single-token values (`id:`, `kind:`, `owner:`, `teststate:`) stay unquoted.
 
 ## Check your work
 
