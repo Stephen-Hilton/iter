@@ -224,6 +224,8 @@ pub fn usecase_item(files: &[String], op: &Value, edit_id: &str) -> Option<Value
          Do not list the owners of a part you listed: the map tags every owner up the hierarchy on its own (usecase_map), \
          and the Project graph draws the use case → its top-level parts → ownership lines down to the parts you named. \
          A part the journey needs that does not exist yet: say so in the use case's body under \"## Missing parts\" instead of inventing a path. \
+         Then add the `flowmap:` block (your instructions, \"The flowmap\"): a plain summary, the sequence of parts in first-touch order, numbered \
+         process_flow and data_flow steps between those node files (and `actor:<id>` entries from the actors file), each step citing the function or route that does it. \
          Change only {file}."
     );
     Some(json!({"name": format!("Use case: name the parts \"{name}\" needs"), "agent": "usecase", "state": "queued",
@@ -251,6 +253,7 @@ mod tests {
         assert_eq!((it["agent"].as_str(), it["usecase"].as_str()), (Some("usecase"), Some("read-a-row")));
         assert_eq!(it["lockdirs"], json!(["{topdir}/usecases/read-a-row"]));
         assert!(it["request"].as_str().unwrap().contains("children.codenodes"));
+        assert!(it["request"].as_str().unwrap().contains("flowmap"));
         assert!(usecase_item(&["{topdir}/reqs/x.bizreq.iter.md".into()], &json!({}), "d").is_none());
     }
 
