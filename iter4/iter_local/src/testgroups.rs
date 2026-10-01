@@ -213,6 +213,7 @@ pub fn update(content: &str, groups: &[TestGroup]) -> String {
 pub fn find_files(code_root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_files(code_root, &mut out);
+    let mut out = crate::drop_git_ignored(code_root, out);
     out.sort();
     out
 }

@@ -466,6 +466,8 @@ pub fn scan(project: &Project) -> Scan {
     let mut files: Vec<PathBuf> = files.iter().map(|p| canon(p)).collect();
     files.sort();
     files.dedup();
+    // build output (cdk.out/, dist/ …) can hold copies of node files: git ignores them
+    let files = crate::drop_git_ignored(&project.root, files);
 
     let mainfile = canon(&project.mainfile);
     let mut raw_codes: Vec<RawCode> = Vec::new();

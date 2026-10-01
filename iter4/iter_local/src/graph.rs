@@ -172,6 +172,8 @@ pub fn snapshot(project: &Project) -> Snapshot {
 pub fn snapshot_with(project: &Project, opts: &SnapOpts) -> Snapshot {
     let scan = markers::scan(project);
     let mut snap = Snapshot { project: project.projectname(), ..Default::default() };
+    // build output git ignores (cdk.out/, dist/ …) is never a node's code
+    let ignored = crate::GitIgnored::load(&project.topdir.canonicalize().unwrap_or_else(|_| project.topdir.clone()));
     let tp = |p: &str| topdir_path(project, Path::new(p));
 
     // every file that becomes a vertex, with the scan's extra facts keyed by path
@@ -302,7 +304,7 @@ pub fn snapshot_with(project: &Project, opts: &SnapOpts) -> Snapshot {
                 let mut files: Vec<String> = Vec::new();
                 for d in dirs.iter().filter_map(|x| x.as_str()) {
                     let abs = top.join(d.trim_start_matches("{topdir}").trim_start_matches('/'));
-                    list_code_files(&abs, &top, &mut files, 60);
+                    list_code_files(&abs, &top, &ignored, &mut files, 60);
                 }
                 files.sort();
                 files.dedup();
@@ -461,8 +463,8 @@ fn mark_uncovered(snap: &mut Snapshot) {
 }
 
 /// Files under `path` (or the file itself), topdir-relative, skipping the
-/// usual noise and node files; at most `cap` in all.
-fn list_code_files(path: &Path, top: &Path, out: &mut Vec<String>, cap: usize) {
+/// usual noise, what git ignores, and node files; at most `cap` in all.
+fn list_code_files(path: &Path, top: &Path, ignored: &crate::GitIgnored, out: &mut Vec<String>, cap: usize) {
     if out.len() >= cap {
         return;
     }
@@ -479,11 +481,11 @@ fn list_code_files(path: &Path, top: &Path, out: &mut Vec<String>, cap: usize) {
             return;
         }
         let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with('.') || crate::is_skip_dir(name) {
+        if name.starts_with('.') || crate::is_skip_dir(name) || ignored.contains(&e) {
             continue;
         }
         if e.is_dir() {
-            list_code_files(&e, top, out, cap);
+            list_code_files(&e, top, ignored, out, cap);
         } else if !name.ends_with(".iter.md") {
             out.push(rel(&e));
         }

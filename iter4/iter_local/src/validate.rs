@@ -813,7 +813,10 @@ pub fn run(roots: &[PathBuf], single: Option<&Path>, fix: bool) -> std::io::Resu
             }
             out.sort();
             out.dedup();
-            out
+            match roots.first() {
+                Some(r) => crate::drop_git_ignored(r, out),
+                None => out,
+            }
         }
     };
     for file in files {
