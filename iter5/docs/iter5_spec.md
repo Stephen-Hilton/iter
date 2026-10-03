@@ -409,7 +409,19 @@ through the same authz.
 Every setting lives on a node or an edge. Stored in Arango: node records stay in their iter4 tables
 (`project`, `engine`, `agent`, `agent_tooling`, `webui_user`) plus new tables `account`, `provider`,
 `workitem_type`; edges in a new collection `sys_edge`
-`{id, type, from, to, tag, settings, active, created, updated}`; node id = `<type>:<name>`.
+`{id, type, from, to, tag, settings, active, created, updated}`; node id = `<type>:<id>`.
+
+**Ids and names.** Every node record has a stable `id` and a display `name`. The `id` is the record's storage key,
+fixed when the record is created: every edge endpoint, sign-in token (`sub`), work item (`project`, `agent`,
+`engine`), lock and URL uses it. The `name` is what people read, and it can be renamed at any time without
+touching any of those. A record written before ids existed reads with `id` = its key and `name` = the same until
+renamed (iter_data stamps both on every read and write). A new node's id is minted once from the name it is created
+with (letters, digits, `.`, `-`, `_` kept, anything else `-`, a `-2`… suffix when taken), or given explicitly;
+a record created by `PUT /api/<collection>/{key}` uses the path key as its id. Names are 1–100 characters, no `/`,
+unique within their type, and may not equal another record's id of that type, so a name in a URL path
+(`/api/projects/<name>/…`, `/api/engines/<name>/…`, `/api/users/<name>/…`, `/api/agents/…`, `/api/tooling/…`,
+`/api/settings/nodes/<type>:<name>`), an edge endpoint, MCP's `project` and the login form all resolve to the id.
+Work-item states keep their names.
 
 Node types: `iter_data` (singleton `iter_data:self`; settings = server info, read-mostly), `iter_engine`, `project`,
 `workitem_type` (one per state: queued, in-progress, question, parked, paused, failed, complete, scheduled),
@@ -432,8 +444,8 @@ placeholder keeps the edge (and its settings) but makes it inactive.
 | `hosts` | iter_data → project / iter_engine | — | display only |
 
 API:
-- `GET /api/settings/graph` → `{nodes:[{id,type,name,deactivated,placeholder,settings,summary}], edges:[…]}`
-- `POST /api/settings/nodes {type, name, settings}`; `PATCH /api/settings/nodes/{id} {settings}`; `DELETE /api/settings/nodes/{id}` (refused for placeholders and `iter_data:self`; edges move to the placeholder)
+- `GET /api/settings/graph` → `{nodes:[{id,type,key,name,deactivated,placeholder,settings,summary}], edges:[…]}` (`id` = `<type>:<key>`; `key` the stable id; `name` the display name)
+- `POST /api/settings/nodes {type, name, id?, settings}` (the id is minted from the name unless given); `PATCH /api/settings/nodes/{id} {name?, settings?}` (a `name` renames: the id never changes); `DELETE /api/settings/nodes/{id}` (refused for placeholders and `iter_data:self`; edges move to the placeholder)
 - `POST /api/settings/edges {type?, from, to, tag?, settings?}` (type inferred from endpoint types); `PATCH /api/settings/edges/{id} {from?, to?, tag?, settings?, active?}`; `DELETE …/{id}`; `POST …/{id}/copy {from?, to?}` (copy/paste)
 - Edge type validation: endpoints must match the table (placeholder of the right type counts).
 - Admin only for writes; users read the parts touching their projects.

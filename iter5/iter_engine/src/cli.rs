@@ -1500,14 +1500,14 @@ fn capability(e: &Env, name: Option<String>) {
     match name {
         None => {
             for c in caps {
-                println!("{}: {}", c.get("name").and_then(|n| n.as_str()).unwrap_or(""), c.get("desc").and_then(|d| d.as_str()).unwrap_or(""));
+                println!("{}: {}", iter_core::settings::record_id(c), c.get("desc").and_then(|d| d.as_str()).unwrap_or(""));
             }
         }
         Some(n) => {
             let want = n.trim().trim_start_matches('_').trim_end_matches(".md");
             let hit = caps.iter().find(|c| {
-                let cn = c.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                cn == n || cn.trim_start_matches('_') == want
+                let (cid, cname) = (iter_core::settings::record_id(c), iter_core::settings::record_name(c));
+                [cid, cname].iter().any(|cn| cn == &n || cn.trim_start_matches('_') == want)
             });
             match hit {
                 Some(c) => println!("{}", c.get("body").and_then(|b| b.as_str()).unwrap_or("")),

@@ -320,6 +320,13 @@ impl EngineRuntime {
                 std::thread::sleep(Duration::from_secs(if ticks == 1 { 2 } else { 5 }));
                 continue;
             };
+            // started with the engine's display name (the server resolves it):
+            // from here on the engine goes by its stable id, which is what its
+            // claims, locks and edges carry
+            if !engine.id.is_empty() && engine.id != self.name {
+                println!("[engine] '{}' is the display name of engine id '{}' — using the id", self.name, engine.id);
+                self.name = engine.id.clone();
+            }
             self.load_assignments();
             self.tick(&engine);
 
@@ -483,7 +490,7 @@ impl EngineRuntime {
         self.explaining.retain(|(_, h)| !h.is_finished());
         let wanted: Vec<WorkItem> = self
             .items
-            .get(&project.name)
+            .get(project.key())
             .map(|v| v.iter().filter(|i| !i.explain_requested.is_empty() && (i.explain_engine.is_empty() || i.explain_engine == self.name)).cloned().collect())
             .unwrap_or_default();
         for item in wanted {
@@ -493,7 +500,7 @@ impl EngineRuntime {
             // one engine per ELI5: iter_data assigned one at random when the
             // button was pressed; an unassigned one goes to whoever claims first
             if let Err(e) = self.api.post(
-                &format!("/api/projects/{}/workitems/{}/explain/claim", project.name, item.id),
+                &format!("/api/projects/{}/workitems/{}/explain/claim", project.key(), item.id),
                 &json!({"engine": self.name}),
             ) {
                 if e.status != 409 {
@@ -722,7 +729,7 @@ impl EngineRuntime {
             .unwrap_or_default()
             .iter()
             .filter(|e| {
-                e.get("name").and_then(|n| n.as_str()) != Some(self.name.as_str())
+                iter_core::settings::record_id(e) != self.name
                     && e.get("state").and_then(|s| s.as_str()) == Some("Running")
                     && {
                         let tick = e.get("ticksec").and_then(|t| t.as_i64()).unwrap_or(5).max(1);
@@ -837,7 +844,11 @@ impl EngineRuntime {
 
             if reload(self, "project") {
                 if let Ok(v) = self.api.get(&format!("/api/projects/{project_name}")) {
-                    if let Ok(p) = serde_json::from_value::<Project>(v) {
+                    if let Ok(mut p) = serde_json::from_value::<Project>(v) {
+                        // the stable id is the key everywhere below (a server older than ids sends none)
+                        if p.id.is_empty() {
+                            p.id = project_name.clone();
+                        }
                         self.projects.insert(project_name.clone(), p);
                     }
                 }
@@ -845,7 +856,9 @@ impl EngineRuntime {
             if reload(self, "agent") {
                 if let Ok(v) = self.api.get("/api/agents") {
                     for ag in v.as_array().cloned().unwrap_or_default() {
-                        if let Some(n) = ag.get("name").and_then(|n| n.as_str()) {
+                        // keyed by the agent's stable id (what a work item's `agent` names)
+                        let n = iter_core::settings::record_id(&ag);
+                        if !n.is_empty() {
                             self.agents.insert(n.to_string(), ag.clone());
                         }
                     }
@@ -978,7 +991,7 @@ impl EngineRuntime {
     /// engines: claiming last_fired via a versioned write happens BEFORE the
     /// clone, so a 409 means another engine won this occurrence — skip.
     fn fire_schedules(&mut self, project: &Project) {
-        let items = self.items.get(&project.name).cloned().unwrap_or_default();
+        let items = self.items.get(project.key()).cloned().unwrap_or_default();
         let now = chrono::Utc::now();
         for tpl in items.iter().filter(|i| i.state == "scheduled") {
             let Some(sched) = &tpl.sched else { continue };
@@ -1005,7 +1018,7 @@ impl EngineRuntime {
                 .put(
                     &format!(
                         "/api/projects/{}/workitems/{}?expect_version={}",
-                        project.name, tpl.id, tpl.version
+                        project.key(), tpl.id, tpl.version
                     ),
                     &claimed,
                 )
@@ -1015,7 +1028,7 @@ impl EngineRuntime {
             }
             let clone = iter_core::sched::clone_from(tpl);
             match self.api.post(
-                &format!("/api/projects/{}/workitems", project.name),
+                &format!("/api/projects/{}/workitems", project.key()),
                 &serde_json::to_value(&clone).unwrap(),
             ) {
                 Ok(v) => println!(
@@ -1037,7 +1050,7 @@ impl EngineRuntime {
     /// The engine still derives every queued item's visible wait reason
     /// (`blocked by: …` tags, lock holders) from its cached view.
     fn dispatch(&mut self, project: &Project, topdir: &str, in_use: &[String]) {
-        let project_name = project.name.clone();
+        let project_name = project.key().to_string();
         let items = self.items.get(&project_name).cloned().unwrap_or_default();
         let by_id: HashMap<String, &WorkItem> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
@@ -1440,7 +1453,7 @@ impl EngineRuntime {
             }
             updated["tags"] = json!(tags);
             if let Err(e) = self.api.put(
-                &format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version),
+                &format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), item.id, item.version),
                 &updated,
             ) {
                 if e.status != 409 {
@@ -1457,14 +1470,14 @@ impl EngineRuntime {
         let cfg = &project.cluster_restart;
         let clone = cluster::newest_clone(cfg, items);
         let details: Vec<Value> = clone
-            .and_then(|c| self.api.get(&format!("/api/projects/{}/workitems/{}/details", project.name, c.id)).ok())
+            .and_then(|c| self.api.get(&format!("/api/projects/{}/workitems/{}/details", project.key(), c.id)).ok())
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default();
         let h = cluster::evaluate(cfg, clone, &details, chrono::Utc::now());
-        let announced = self.cluster_state.get(&project.name).map(|(ok, why)| (*ok, why.as_str()));
+        let announced = self.cluster_state.get(project.key()).map(|(ok, why)| (*ok, why.as_str()));
         if announced != Some((h.healthy, h.why.as_str())) {
-            println!("[engine] {}: cluster {} — {}", project.name, if h.healthy { "back up and healthy" } else { "unavailable" }, h.why);
-            self.cluster_state.insert(project.name.clone(), (h.healthy, h.why.clone()));
+            println!("[engine] {}: cluster {} — {}", project.key(), if h.healthy { "back up and healthy" } else { "unavailable" }, h.why);
+            self.cluster_state.insert(project.key().to_string(), (h.healthy, h.why.clone()));
         }
         h.healthy
     }
@@ -1474,18 +1487,18 @@ impl EngineRuntime {
     /// truthful right up to the moment the agent starts) and a "doc" row
     /// naming the release.  A 409 means someone wrote first; next tick re-derives.
     fn requeue_after_cluster_restart(&self, project: &Project, item: &WorkItem) {
-        let why = self.cluster_state.get(&project.name).map(|(_, w)| w.clone()).unwrap_or_default();
+        let why = self.cluster_state.get(project.key()).map(|(_, w)| w.clone()).unwrap_or_default();
         let mut updated = serde_json::to_value(item).unwrap();
         updated["state"] = json!("queued");
         updated["retry_after"] = json!("");
         match self.api.put(
-            &format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version),
+            &format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), item.id, item.version),
             &updated,
         ) {
             Ok(_) => {
                 println!("[engine] {} '{}': cluster back up and healthy — requeued (parked -> queued, tag kept until it starts)", &item.id[..8.min(item.id.len())], item.name);
                 let _ = self.api.post(
-                    &format!("/api/projects/{}/workitems/{}/details", project.name, item.id),
+                    &format!("/api/projects/{}/workitems/{}/details", project.key(), item.id),
                     &json!({"key": "doc", "valuetype": "text", "value": format!(
                         "requeued by engine {} at {}: the cluster is back up and healthy ({why}); `blocked-by-cluster-restart` comes off when the item starts",
                         self.name, now_utc()
@@ -1533,7 +1546,7 @@ impl EngineRuntime {
             claimed["blockedby_locks"] = json!([]);
             claimed["ts"]["start"] = json!(now_utc());
             let Ok(Ok(item)) = api
-                .put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, i.id, i.version), &claimed)
+                .put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), i.id, i.version), &claimed)
                 .map(serde_json::from_value::<WorkItem>)
             else {
                 continue;
@@ -1562,7 +1575,7 @@ impl EngineRuntime {
         let journal = crate::work::pending_close_dir(topdir);
         let ghosts: Vec<WorkItem> = self
             .items
-            .get(&project.name)
+            .get(project.key())
             .map(|v| {
                 v.iter()
                     .filter(|i| {
@@ -1584,18 +1597,18 @@ impl EngineRuntime {
     /// while the project does not enforce leases.  Each row it removes (or
     /// would remove) is one log line; dry-run lines are printed once.
     fn sweep_locks(&mut self, project: &Project) {
-        let due = self.last_sweep.get(&project.name).map(|t| t.elapsed() >= Duration::from_secs(iter_core::LOCK_RENEW_EVERY_SEC)).unwrap_or(true);
+        let due = self.last_sweep.get(project.key()).map(|t| t.elapsed() >= Duration::from_secs(iter_core::LOCK_RENEW_EVERY_SEC)).unwrap_or(true);
         if !due {
             return;
         }
-        self.last_sweep.insert(project.name.clone(), Instant::now());
-        let Ok(v) = self.api.post(&format!("/api/projects/{}/locks/sweep", project.name), &json!({"dry_run": false})) else { return };
+        self.last_sweep.insert(project.key().to_string(), Instant::now());
+        let Ok(v) = self.api.post(&format!("/api/projects/{}/locks/sweep", project.key()), &json!({"dry_run": false})) else { return };
         for r in v.get("removed").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
             let s = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
             let (path, workid) = (s("path"), s("workid"));
             println!(
                 "[engine] {}: lock sweep removed {} {path} held by {} ({})",
-                project.name, s("kind"), &workid[..8.min(workid.len())], s("why")
+                project.key(), s("kind"), &workid[..8.min(workid.len())], s("why")
             );
         }
     }
@@ -1626,11 +1639,11 @@ impl EngineRuntime {
             if !holders.is_empty() {
                 for h in &holders {
                     let released = api
-                        .post(&format!("/api/projects/{}/locks/release_all", project.name), &json!({"workid": h}))
+                        .post(&format!("/api/projects/{}/locks/release_all", project.key()), &json!({"workid": h}))
                         .ok()
                         .and_then(|v| v.get("released").and_then(|r| r.as_array()).map(|a| a.len()))
                         .unwrap_or(0);
-                    println!("[engine] {}: released {released} lock rows of {} (not running) to break {text}", project.name, &h[..8.min(h.len())]);
+                    println!("[engine] {}: released {released} lock rows of {} (not running) to break {text}", project.key(), &h[..8.min(h.len())]);
                     let note = format!(
                         "deadlock resolved by engine {} at {}: released {released} lock rows of {}, which was not running; cycle {text}",
                         engine_name, now_utc(), &h[h.len().saturating_sub(12)..]
@@ -1638,7 +1651,7 @@ impl EngineRuntime {
                     let waiters: Vec<&str> = c.iter().filter(|e| &e.to == h).map(|e| e.from.as_str()).collect();
                     for id in std::iter::once(h.as_str()).chain(waiters) {
                         let _ = api.post(
-                            &format!("/api/projects/{}/workitems/{}/details", project.name, id),
+                            &format!("/api/projects/{}/workitems/{}/details", project.key(), id),
                             &json!({"key": "doc", "valuetype": "text", "value": note}),
                         );
                     }
@@ -1653,10 +1666,10 @@ impl EngineRuntime {
                 }
             }
             if announced.insert(members.clone()) {
-                println!("[engine] {}: deadlock {text}", project.name);
+                println!("[engine] {}: deadlock {text}", project.key());
                 for m in &members {
                     let _ = api.post(
-                        &format!("/api/projects/{}/workitems/{}/details", project.name, m),
+                        &format!("/api/projects/{}/workitems/{}/details", project.key(), m),
                         &json!({"key": "doc", "valuetype": "text", "value": format!(
                             "deadlock seen by engine {} at {}: {text}. No member can start until one of these links is removed; the engine does not edit dependencies.",
                             engine_name, now_utc())}),
@@ -1683,7 +1696,7 @@ impl EngineRuntime {
         claimed["ts"]["start"] = json!(now_utc());
         let lease = uuid::Uuid::new_v4().to_string();
         claimed["lease"] = json!(lease);
-        let resp = self.api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version), &claimed);
+        let resp = self.api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), item.id, item.version), &claimed);
         let claimed_item: WorkItem = match resp.and_then(|v| serde_json::from_value(v).map_err(|e| crate::client::ApiError { status: 0, body: e.to_string() })) {
             Ok(i) => i,
             Err(e) => {
@@ -1695,15 +1708,15 @@ impl EngineRuntime {
         };
         for d in &item.lockdirs {
             let res = self.api.post(
-                &format!("/api/projects/{}/locks/acquire", project.name),
+                &format!("/api/projects/{}/locks/acquire", project.key()),
                 &json!({"path": d, "kind": "lock", "engine": self.name, "workid": item.id, "lease": lease, "ttl_sec": iter_core::LOCK_LEASE_TTL_SEC}),
             );
             if res.is_err() {
-                let _ = self.api.post(&format!("/api/projects/{}/locks/release_all", project.name), &json!({"workid": item.id, "lease": lease}));
+                let _ = self.api.post(&format!("/api/projects/{}/locks/release_all", project.key()), &json!({"workid": item.id, "lease": lease}));
                 let mut back = serde_json::to_value(&claimed_item).ok()?;
                 back["state"] = json!("queued");
                 back["lease"] = json!("");
-                let _ = self.api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, claimed_item.version), &back);
+                let _ = self.api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), item.id, claimed_item.version), &back);
                 return None;
             }
         }
@@ -1716,7 +1729,7 @@ impl EngineRuntime {
     fn start_claimed(&mut self, project: &Project, topdir: &str, item: WorkItem, account: &str) {
         println!(
             "[engine] {}: start {} '{}' (agent {}, P{}, account {})",
-            project.name,
+            project.key(),
             &item.id[..8.min(item.id.len())],
             item.name,
             item.agent,
@@ -1731,7 +1744,7 @@ impl EngineRuntime {
         counter.fetch_add(1, Ordering::SeqCst);
         let agent_type = item.agent.clone();
         let outside_cap = item.is_test_sweep_run();
-        let project_name = project.name.clone();
+        let project_name = project.key().to_string();
         let cur = Arc::new(Mutex::new((item.id.clone(), item.lease.clone())));
         let thread_cur = cur.clone();
         let account = account.to_string();

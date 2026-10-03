@@ -203,7 +203,7 @@ pub async fn get_next(user: AuthUser, State(st): State<Arc<AppState>>, Path(name
         .scan("agent")
         .await?
         .iter()
-        .map(|a| body_str(a, "name"))
+        .map(|a| body_str(a, "id"))
         .filter(|a| !a.is_empty() && !enabled.contains_key(a))
         .collect();
 

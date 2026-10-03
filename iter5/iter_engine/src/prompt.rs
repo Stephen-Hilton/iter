@@ -39,13 +39,13 @@ impl Tooling {
             match s(r, "kind").as_str() {
                 "shared" => t.shared = s(r, "body"),
                 "capability" => {
-                    t.capabilities.insert(s(r, "name"), s(r, "desc"));
+                    t.capabilities.insert(iter_core::settings::record_id(r), s(r, "desc"));
                 }
                 "source" => {
-                    t.sources.insert(s(r, "name"), s(r, "body"));
+                    t.sources.insert(iter_core::settings::record_id(r), s(r, "body"));
                 }
                 "prepost" => {
-                    t.prepost.insert(s(r, "name"), s(r, "body"));
+                    t.prepost.insert(iter_core::settings::record_id(r), s(r, "body"));
                 }
                 _ => {}
             }

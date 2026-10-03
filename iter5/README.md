@@ -30,7 +30,7 @@ iter_engine --data-url http://127.0.0.1:8400 --env-file ~/.iter5/.env [--name En
 ```
 
 - The env file holds `ITER_ENGINE_TOKEN` (the engine's iter_data credential, minted by an admin with `POST /api/users/<user>/token`), plus each account's token under that account's `token_envar`. The engine re-reads the file while it runs.
-- If you leave out `--data-url`, the engine uses `$ITER_DATA_URL`. If you leave out `--name`, it uses the short hostname.
+- If you leave out `--data-url`, the engine uses `$ITER_DATA_URL`. If you leave out `--name`, it uses the short hostname. The name it registers with becomes the engine's id; renaming the engine in the Settings graph changes only its display name, and either one works as `--name` afterwards.
 - Or let the server walk you through it (checks tools, builds the binary if missing, writes the env file with mode 600, starts the engine and waits for its check-in; files live in `~/.iter5/`):
   `curl -fsSL http://127.0.0.1:8400/iter_engine_setup.sh | bash -s -- --data-url http://127.0.0.1:8400 --engine Engine01 --token <token> --start` (`--status` / `--stop` later).
 - Nothing else is read from disk. On its first heartbeat the engine registers itself, and it appears in the Settings graph.
@@ -53,7 +53,7 @@ Tabs: **Intro | Work queue | Project graph | GraphRAG | Settings**. The header's
 
 - **Project graph**: nodes are the node files. Node-type filter chips, a "Network map" preset (code + connections), and a configure lightbox (double-click) for every node and edge. You can create nodes and edges, drag an edge's endpoint, copy and paste an edge, and remove an edge (a reason is required). An edit shows at once and waits to be written. The engine writes the file and commits it. A sync badge counts the edits still waiting.
 - **Designer → Build**: the wizard's "New project" creates a project with no engine and no repo. It is seeded with a project node and default philosophy / bizreq / techreq. Design it in the graph, then press **Build** and pick the engine and topdir. The engine creates the repo (`git init`, `.gitignore`), writes every designed file and makes the first commit. Optionally the server then queues a `plan` work item (priority 5) to build it.
-- **Settings**: the settings graph (engines, projects, accounts, providers, agents, tooling, users, work item states). A tagged edge always shows its tag; an untagged edge shows its type on hover, when selected, or zoomed in.
+- **Settings**: the settings graph (engines, projects, accounts, providers, agents, tooling, users, work item states). A tagged edge always shows its tag; an untagged edge shows its type on hover, when selected, or zoomed in. Every node has a fixed **id** (used by edges, tokens, work items and URLs) and a **name** you can change with **Rename…** (detail pane or right-click) or in Configure; a name in a URL path or at sign-in resolves to the id.
 - **Phones**: the header is two rows (tabs + a ⋯ menu for user, timezone, help, my settings and logout; then project, engine dot + running count, Running | Stopped).
 
 ## Node files (format v5)

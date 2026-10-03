@@ -422,7 +422,7 @@ fn ask_model(api: &Api, project: &Project, account: &str, model: &str, timeout: 
     let out = crate::provider::call(project, account, model, &summary_ctx(prompt), timeout, Some(2))?;
     if out.cost_usd > 0.0 || out.input_tokens > 0 {
         let _ = api.post(
-            &format!("/api/projects/{}/spend", project.name),
+            &format!("/api/projects/{}/spend", project.key()),
             &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                     "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": "", "agent": "summary"}),
         );
@@ -562,14 +562,14 @@ pub fn summarize_waiting(api: &Api, engine: &str, project: &Project, topdir: &st
     let timeout = agent_def["timeoutsec"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SEC).clamp(30, 1800);
     let body = agent_def["promptbody"].as_str().unwrap_or("");
     let persona = if body.trim().lines().count() > 3 { body.to_string() } else { SUMMARY_DEFAULT_BODY.to_string() };
-    let base = format!("/api/projects/{}/rag/work", project.name);
+    let base = format!("/api/projects/{}/rag/work", project.key());
     let mut done = 0;
     for _ in 0..JOBS_PER_RUN {
         let batch = agent_def["batch"].as_u64().unwrap_or(DEFAULT_BATCH).clamp(1, 32);
         let job = match api.post(&format!("{base}/claim"), &json!({"engine": engine, "max_chunks": batch})) {
             Ok(j) => j,
             Err(e) => {
-                eprintln!("[engine] {}: GraphRAG claim failed: {e}", project.name);
+                eprintln!("[engine] {}: GraphRAG claim failed: {e}", project.key());
                 break;
             }
         };
@@ -611,8 +611,8 @@ pub fn summarize_waiting(api: &Api, engine: &str, project: &Project, topdir: &st
             }
             let titles = docs_in.iter().filter_map(|d| d["title"].as_str()).collect::<Vec<_>>().join(", ");
             match api.post(&format!("{base}/done"), &report) {
-                Ok(r) => println!("[engine] {}: GraphRAG rollup (by chapter windows) '{titles}' in {}s ({model}) — {r}", project.name, started.elapsed().as_secs()),
-                Err(e) => eprintln!("[engine] {}: GraphRAG could not report job {}: {e}", project.name, job["job_id"]),
+                Ok(r) => println!("[engine] {}: GraphRAG rollup (by chapter windows) '{titles}' in {}s ({model}) — {r}", project.key(), started.elapsed().as_secs()),
+                Err(e) => eprintln!("[engine] {}: GraphRAG could not report job {}: {e}", project.key(), job["job_id"]),
             }
             done += 1;
             continue;
@@ -685,17 +685,17 @@ pub fn summarize_waiting(api: &Api, engine: &str, project: &Project, topdir: &st
         match api.post(&format!("{base}/done"), &report) {
             Ok(r) => println!(
                 "[engine] {}: GraphRAG {kind} '{}' summarised in {}s ({model}){}",
-                project.name,
+                project.key(),
                 title,
                 started.elapsed().as_secs(),
                 if error.is_empty() { format!(" — {}", r) } else { format!(" — FAILED: {error}") }
             ),
-            Err(e) => eprintln!("[engine] {}: GraphRAG could not report job {}: {e}", project.name, job["job_id"]),
+            Err(e) => eprintln!("[engine] {}: GraphRAG could not report job {}: {e}", project.key(), job["job_id"]),
         }
         if let Ok(out) = &run {
             if out.cost_usd > 0.0 || out.input_tokens > 0 {
                 let _ = api.post(
-                    &format!("/api/projects/{}/spend", project.name),
+                    &format!("/api/projects/{}/spend", project.key()),
                     &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                             "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
                             "workid": "", "agent": "summary"}),
@@ -726,7 +726,7 @@ fn ingest(api: &Api, engine: &str, project: &Project, account: &str, model: &str
         let mut ex = extract::extract(&filename, &bytes)?;
         let mut ocr = false;
         if ex.needs_ocr {
-            println!("[engine] {}: GraphRAG '{title}' is a scanned PDF ({} pages) — reading it with {model}", project.name, ex.pages);
+            println!("[engine] {}: GraphRAG '{title}' is a scanned PDF ({} pages) — reading it with {model}", project.key(), ex.pages);
             ex.text = extract::tidy(&ocr_pdf(project, account, model, &bytes, ex.pages)?);
             ocr = true;
             if ex.text.trim().is_empty() {
@@ -739,17 +739,17 @@ fn ingest(api: &Api, engine: &str, project: &Project, account: &str, model: &str
         p["ocr"] = json!(ocr);
         p["engine"] = json!(engine);
         p["job_id"] = job["job_id"].clone();
-        put_long(api, &format!("/api/projects/{}/rag/docs/{id}/chunks", project.name), &p)
+        put_long(api, &format!("/api/projects/{}/rag/docs/{id}/chunks", project.key()), &p)
     };
     match run() {
         Ok(d) => println!(
             "[engine] {}: GraphRAG ingested '{title}' — {} chunks in {} chapters, {}s",
-            project.name, d["chunks"], d["chapters"].as_array().map(|c| c.len()).unwrap_or(0), started.elapsed().as_secs()
+            project.key(), d["chunks"], d["chapters"].as_array().map(|c| c.len()).unwrap_or(0), started.elapsed().as_secs()
         ),
         Err(e) => {
-            println!("[engine] {}: GraphRAG could not ingest '{title}': {e}", project.name);
+            println!("[engine] {}: GraphRAG could not ingest '{title}': {e}", project.key());
             let _ = api.post(
-                &format!("/api/projects/{}/rag/work/done", project.name),
+                &format!("/api/projects/{}/rag/work/done", project.key()),
                 &json!({"engine": engine, "job": "ingest", "job_id": job["job_id"], "doc": id, "error": e}),
             );
         }

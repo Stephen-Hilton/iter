@@ -16,6 +16,7 @@ mod graph_view;
 #[cfg(test)]
 mod graph_tests;
 mod mcp;
+mod names;
 mod next;
 mod nodes;
 mod rag;
@@ -161,7 +162,7 @@ async fn main() {
     }
 
     let mut app = api::router(state.clone())
-        .merge(mcp::routes(state))
+        .merge(mcp::routes(state.clone()))
         .route("/iter_engine_setup.sh", axum::routing::get(engine_setup_sh))
         .layer(
         tower_http::cors::CorsLayer::new()
@@ -183,7 +184,9 @@ async fn main() {
     };
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     println!("[iter_data] listening on {listen} (backend: arango)");
-    axum::serve(listener, app).await.expect("serve");
+    // display names in paths resolve to ids before routing (names.rs)
+    let app = tower::Layer::layer(&axum::middleware::from_fn_with_state(state, names::rewrite), app);
+    axum::serve(listener, axum::ServiceExt::<axum::extract::Request>::into_make_service(app)).await.expect("serve");
 }
 
 async fn open_arango(args: &Args) -> arango::ArangoBackend {

@@ -149,7 +149,7 @@ esac
 ASSIGN=""
 if [ "$code" = 200 ] && [ "$(api "/api/engines/$ENGINE/assignments")" = 200 ]; then
   ASSIGN="$(cat "$TMP")"
-  n="$(printf '%s' "$ASSIGN" | grep -o '"project":"[^"]*"' | wc -l | tr -d ' ')"
+  n="$(printf '%s' "$ASSIGN" | { grep -o '"project":"[^"]*"' || true; } | wc -l | tr -d ' ')"
   if [ "$n" = 0 ]; then warn "no project is connected to $ENGINE yet: draw a serves edge in the Settings tab"
   else ok "serves $n project(s): $(printf '%s' "$ASSIGN" | grep -o '"project":"[^"]*"' | cut -d'"' -f4 | sort -u | tr '\n' ' ')"; fi
 fi
@@ -165,7 +165,7 @@ setenv() { # setenv KEY VALUE: replace or append one line, value never echoed
 [ "$(envget ITER_ENGINE_TOKEN "$ENV_FILE")" = "$TOKEN" ] || setenv ITER_ENGINE_TOKEN "$TOKEN"
 ok "ITER_ENGINE_TOKEN"
 if [ -z "$ACCOUNTS" ] && [ -n "$ASSIGN" ]; then # the accounts this engine holds
-  ACCOUNTS="$(printf '%s' "$ASSIGN" | grep -o '"token_envar":"[A-Za-z0-9_]*"' | cut -d'"' -f4 | sort -u | tr '\n' ',' | sed 's/,$//')"
+  ACCOUNTS="$(printf '%s' "$ASSIGN" | { grep -o '"token_envar":"[A-Za-z0-9_]*"' || true; } | cut -d'"' -f4 | sort -u | tr '\n' ',' | sed 's/,$//')"
 fi
 if [ -z "$ACCOUNTS" ]; then
   ok "no account tokens to set yet (add holds edges in the Settings tab, or pass --accounts VAR,VAR); claude agents use this machine's own login meanwhile"

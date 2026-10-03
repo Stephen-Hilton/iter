@@ -602,3 +602,87 @@ async fn non_admin_settings_reads_are_scoped() {
     assert!(full["edges"].as_array().unwrap().len() > g["edges"].as_array().unwrap().len());
     t.done().await;
 }
+
+// ---------- stable ids and renames ----------
+
+#[tokio::test]
+async fn renames_change_the_name_only_never_the_id() {
+    let t = T::new().await;
+    t.served("p1", "e1", "eng1").await;
+    t.item("p1", json!({"id": "w-1", "name": "fix it"})).await;
+    let serves = t.edge("serves", "iter_engine:e1", "project:p1").await.expect("serves edge");
+
+    // every record carries its id and a display name (the id until renamed)
+    let p = t.ok("adm", "GET", "/api/projects/p1", None).await;
+    assert_eq!((p["id"].as_str(), p["name"].as_str()), (Some("p1"), Some("p1")));
+    let u = t.ok("adm", "GET", "/api/users/eng1", None).await;
+    assert_eq!((u["id"].as_str(), u["user"].as_str(), u["name"].as_str()), (Some("eng1"), Some("eng1"), Some("eng1")));
+
+    // rename the project, the engine and the engine's user in the settings graph
+    let n = t.ok("adm", "PATCH", "/api/settings/nodes/project:p1", Some(json!({"name": "Shop API"}))).await;
+    assert_eq!((n["id"].as_str(), n["key"].as_str(), n["name"].as_str()), (Some("project:p1"), Some("p1"), Some("Shop API")));
+    t.ok("adm", "PATCH", "/api/settings/nodes/iter_engine:e1", Some(json!({"name": "Laptop"}))).await;
+    // a generic editor may send the name among the settings
+    t.ok("adm", "PATCH", "/api/settings/nodes/user:eng1", Some(json!({"settings": {"name": "Beast"}}))).await;
+
+    // the id, the edges, the work and the tokens are untouched
+    let p = t.ok("adm", "GET", "/api/projects/p1", None).await;
+    assert_eq!((p["id"].as_str(), p["name"].as_str()), (Some("p1"), Some("Shop API")));
+    let after = t.edge("serves", "iter_engine:e1", "project:p1").await.expect("serves edge kept");
+    assert_eq!((after.id.as_str(), after.is_active()), (serves.id.as_str(), true));
+    let a = t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await;
+    assert_eq!(a["projects"][0]["project"], "p1");
+    let items = t.ok("eng1", "GET", "/api/projects/p1/workitems", None).await;
+    assert_eq!(items.as_array().unwrap().len(), 1);
+    assert_eq!(t.ok("adm", "GET", "/api/engines/e1", None).await["name"], "Laptop");
+    let g = t.ok("adm", "GET", "/api/settings/graph", None).await;
+    let node = |id: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).cloned().unwrap();
+    assert_eq!(node("user:eng1")["name"], "Beast");
+    assert_eq!(node("iter_engine:e1")["name"], "Laptop");
+    assert!(node("user:eng1")["settings"].get("name").is_none(), "the name is beside the settings, not among them");
+
+    // a PUT without a name keeps the display name; one with a name renames
+    t.ok("adm", "PUT", "/api/projects/p1", Some(json!({"state": "Running", "desc": "d"}))).await;
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p1", None).await["name"], "Shop API");
+    t.ok("adm", "PUT", "/api/projects/p1", Some(json!({"state": "Running", "name": "Shop"}))).await;
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p1", None).await["name"], "Shop");
+
+    // names are unique per type, and may not shadow another record's id
+    t.ok("adm", "PUT", "/api/projects/p2", Some(json!({"state": "Running"}))).await;
+    assert_eq!(t.call("adm", "PATCH", "/api/settings/nodes/project:p2", Some(json!({"name": "Shop"}))).await.0, 409);
+    assert_eq!(t.call("adm", "PATCH", "/api/settings/nodes/project:p2", Some(json!({"name": "p1"}))).await.0, 409);
+    assert_eq!(t.call("adm", "PATCH", "/api/settings/nodes/project:p2", Some(json!({"name": "a/b"}))).await.0, 400);
+    // a different type may share it
+    t.ok("adm", "PATCH", "/api/settings/nodes/iter_engine:e1", Some(json!({"name": "Shop"}))).await;
+
+    // a new node gets an id minted once from its name
+    let c = t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "account", "name": "Team Max"}))).await;
+    assert_eq!((c["id"].as_str(), c["name"].as_str()), (Some("account:Team-Max"), Some("Team Max")));
+    let c2 = t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "account", "name": "Team-Max 2", "id": "max2"}))).await;
+    assert_eq!(c2["id"], "account:max2");
+    assert_eq!(t.call("adm", "POST", "/api/settings/nodes", Some(json!({"type": "account", "name": "Team Max"}))).await.0, 409);
+    // edges may name their ends by display name; they store the ids
+    let e = t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "account:Team Max", "to": "project:Shop"}))).await;
+    assert_eq!((e["from"].as_str(), e["to"].as_str(), e["type"].as_str()), (Some("account:Team-Max"), Some("project:p1"), Some("bills")));
+
+    // a display name in a URL path resolves to the id before routing
+    let s = t.store();
+    assert_eq!(crate::names::resolve_path(s, "/api/projects/Shop/workitems").await.as_deref(), Some("/api/projects/p1/workitems"));
+    assert_eq!(crate::names::resolve_path(s, "/api/projects/p1/workitems").await, None);
+    assert_eq!(crate::names::resolve_path(s, "/api/projects/nothing/workitems").await, None);
+    assert_eq!(crate::names::resolve_path(s, "/api/settings/nodes/user:Beast").await.as_deref(), Some("/api/settings/nodes/user:eng1"));
+    assert_eq!(crate::names::resolve_path(s, "/api/users/Beast/token").await.as_deref(), Some("/api/users/eng1/token"));
+
+    // sign in by id or by display name: the token carries the id
+    t.ok("adm", "PUT", "/api/users/eng1", Some(json!({"role": "engine", "password": "pw-eng1"}))).await;
+    assert_eq!(t.ok("adm", "GET", "/api/users/eng1", None).await["name"], "Beast", "a PUT without a name keeps it");
+    for who in ["eng1", "Beast"] {
+        let r = t.ok("adm", "POST", "/auth/login", Some(json!({"user": who, "password": "pw-eng1"}))).await;
+        assert_eq!((r["user"].as_str(), r["name"].as_str()), (Some("eng1"), Some("Beast")));
+    }
+    assert_eq!(t.call("adm", "POST", "/auth/login", Some(json!({"user": "Beast", "password": "wrong"}))).await.0, 401);
+
+    // work-item states keep their names
+    assert_eq!(t.call("adm", "PATCH", "/api/settings/nodes/workitem_type:queued", Some(json!({"name": "waiting"}))).await.0, 400);
+    t.done().await;
+}

@@ -183,7 +183,7 @@ fn execute_one(
     // `iter ask` / `iter reject` move the item to question/parked mid-run; the
     // close must keep that state (and skip the gate) instead of completing it
     if !item.is_shell() {
-        if let Ok(fresh) = api.get(&format!("/api/projects/{}/workitems/{}", project.name, item.id)) {
+        if let Ok(fresh) = api.get(&format!("/api/projects/{}/workitems/{}", project.key(), item.id)) {
             let st = fresh.get("state").and_then(|s| s.as_str()).unwrap_or("");
             if st == "question" || st == "parked" {
                 println!("[engine] {} '{}': agent moved it to {} during the run — keeping that", short(&item.id), item.name, st);
@@ -267,11 +267,11 @@ fn claim_chain_candidate(api: &Api, engine_name: &str, project: &Project, prev: 
     // a new run, a new lease (CR 2026-09-25) — exactly as start_item does
     let lease = uuid::Uuid::new_v4().to_string();
     claimed["lease"] = json!(lease);
-    let resp = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, best.id, best.version), &claimed).ok()?;
+    let resp = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), best.id, best.version), &claimed).ok()?;
     let claimed_item: WorkItem = serde_json::from_value(resp).ok()?;
     for d in &claimed_item.lockdirs {
         let res = api.post(
-            &format!("/api/projects/{}/locks/acquire", project.name),
+            &format!("/api/projects/{}/locks/acquire", project.key()),
             &json!({"path": d, "kind": "lock", "engine": engine_name, "workid": claimed_item.id,
                     "lease": lease, "ttl_sec": iter_core::LOCK_LEASE_TTL_SEC}),
         );
@@ -280,7 +280,7 @@ fn claim_chain_candidate(api: &Api, engine_name: &str, project: &Project, prev: 
             let mut back = serde_json::to_value(&claimed_item).ok()?;
             back["state"] = json!("queued");
             back["lease"] = json!("");
-            let _ = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, claimed_item.id, claimed_item.version), &back);
+            let _ = api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), claimed_item.id, claimed_item.version), &back);
             return None;
         }
     }
@@ -299,7 +299,7 @@ fn short(id: &str) -> &str {
 fn release_all(api: &Api, project: &Project, workid: &str, lease: &str) {
     let body = if lease.is_empty() { json!({"workid": workid}) } else { json!({"workid": workid, "lease": lease}) };
     for (n, wait) in [1u64, 2, 4, 0].iter().enumerate() {
-        match api.post(&format!("/api/projects/{}/locks/release_all", project.name), &body) {
+        match api.post(&format!("/api/projects/{}/locks/release_all", project.key()), &body) {
             Ok(_) => return,
             Err(e) if *wait == 0 || (e.status != 0 && e.status < 500) => {
                 eprintln!("[engine] {}: releasing its locks failed (try {}): {e}", short(workid), n + 1);
@@ -430,7 +430,7 @@ pub(crate) fn is_ghost(item: &WorkItem, engine_name: &str, busy: &[String], jour
 /// then the same outcome a failed run gets (failed at maxattempts, else
 /// queued behind the retry backoff), lease cleared, every lock released.
 pub(crate) fn repair_ghost(api: &Api, engine_name: &str, project: &Project, item: &WorkItem) {
-    let details = format!("/api/projects/{}/workitems/{}/details", project.name, item.id);
+    let details = format!("/api/projects/{}/workitems/{}/details", project.key(), item.id);
     let _ = api.post(&details, &json!({"key": "doc", "valuetype": "text", "value": format!(
         "engine {engine_name} found this record in-progress with no session behind it (last known: {}); treated as a failed attempt",
         if item.ts.start.is_empty() { "no start time" } else { item.ts.start.as_str() })}));
@@ -449,7 +449,7 @@ pub(crate) fn repair_ghost(api: &Api, engine_name: &str, project: &Project, item
         updated["retry_after"] = json!(until.format("%Y-%m-%dT%H:%M:%SZ").to_string());
         format!("queued (retry after {delay}s)")
     };
-    match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.name, item.id, item.version), &updated) {
+    match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={}", project.key(), item.id, item.version), &updated) {
         Ok(_) => {
             println!("[engine] {} '{}': ghost in-progress repaired -> {to}", short(&item.id), item.name);
             release_all(api, project, &item.id, "");
@@ -460,7 +460,7 @@ pub(crate) fn repair_ghost(api: &Api, engine_name: &str, project: &Project, item
 }
 
 pub(crate) fn fetch_details(api: &Api, project: &Project, item: &WorkItem) -> Vec<Value> {
-    api.get(&format!("/api/projects/{}/workitems/{}/details", project.name, item.id))
+    api.get(&format!("/api/projects/{}/workitems/{}/details", project.key(), item.id))
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
@@ -476,7 +476,7 @@ pub(crate) fn request_text(details: &[Value], item: &WorkItem) -> String {
 }
 
 fn project_items(api: &Api, project: &Project) -> Vec<Value> {
-    api.get(&format!("/api/projects/{}/workitems", project.name))
+    api.get(&format!("/api/projects/{}/workitems", project.key()))
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
@@ -514,7 +514,7 @@ fn run_all(
         .unwrap_or_default()
         .iter()
         .filter(|r| r.get("kind").and_then(|k| k.as_str()) == Some("prepost"))
-        .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
+        .map(iter_core::settings::record_id)
         .collect();
     for extra in item.prework.iter().filter(|p| !prose.contains(*p)) {
         run_named_ppw(api, project, topdir, extra, item)?;
@@ -782,7 +782,7 @@ fn run_named_ppw(
         return Ok(());
     }
     let rows = api
-        .get(&format!("/api/projects/{}/prepostwork", project.name))
+        .get(&format!("/api/projects/{}/prepostwork", project.key()))
         .map_err(|e| e.to_string())?;
     let row = rows
         .as_array()
@@ -821,7 +821,7 @@ fn run_claude(
     // account, else the project's agent override, else the agent record's
     let model = if !item.model.trim().is_empty() {
         item.model.trim().to_string()
-    } else if let Some(m) = crate::provider::model_override(&project.name, account) {
+    } else if let Some(m) = crate::provider::model_override(project.key(), account) {
         m
     } else {
         overrides.get("model").and_then(|m| m.as_str())
@@ -842,11 +842,11 @@ fn run_claude(
         .unwrap_or_else(|| topdir.to_string());
     let codepath = std::path::PathBuf::from(codepath.trim_end_matches('/'));
     // the item's node, its children and the requirements (spec §8)
-    let node_ctx = crate::prompt::load_context(api, &project.name, top, item, &codepath);
+    let node_ctx = crate::prompt::load_context(api, project.key(), top, item, &codepath);
 
     // who asked: a workitem id in createdby means an agent handoff — name its type
     let createdby_agent = if !item.createdby.is_empty() && item.createdby.len() >= 32 {
-        api.get(&format!("/api/projects/{}/workitems/{}", project.name, item.createdby))
+        api.get(&format!("/api/projects/{}/workitems/{}", project.key(), item.createdby))
             .ok().and_then(|p| p.get("agent").and_then(|a| a.as_str()).map(String::from)).unwrap_or_default()
     } else {
         String::new()
@@ -888,7 +888,7 @@ fn run_claude(
             let mut v = row.get("value").cloned().unwrap_or(Value::Null);
             v["surfaced"] = json!(true);
             let _ = api.put(
-                &format!("/api/projects/{}/workitems/{}/details/{}", project.name, item.id, order),
+                &format!("/api/projects/{}/workitems/{}/details/{}", project.key(), item.id, order),
                 &json!({"key": "question", "valuetype": "json", "value": v}),
             );
         }
@@ -930,7 +930,7 @@ fn run_claude(
     let shim = write_iter_shim(topdir)?;
     let mut envs: Vec<(String, String)> = vec![
         ("ITER_BIN".into(), shim.clone()),
-        ("ITER_PROJECT".into(), project.name.clone()),
+        ("ITER_PROJECT".into(), project.key().to_string()),
         ("ITER_WORKID".into(), item.id.clone()),
         ("ITER_AGENT".into(), item.agent.clone()),
         ("ITER_TOPDIR".into(), topdir.to_string()),
@@ -955,7 +955,7 @@ fn run_claude(
     let extra: Vec<String> = flags.split_whitespace().map(String::from).collect();
     // every agent session gets the `iter` MCP server (work items, the map,
     // GraphRAG search); the guard deletes the config when the run ends
-    let _mcp = mcp_config(api, &project.name, &item.id);
+    let _mcp = mcp_config(api, project.key(), &item.id);
     let mut session = Session {
         sid: chain.map(|c| c.sid.clone()).unwrap_or_default(),
         cwd: codepath.to_string_lossy().into_owned(),
@@ -1187,13 +1187,13 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
     let body = agent_def.get("promptbody").and_then(|b| b.as_str()).unwrap_or("");
     // a stub body (the header line alone) means "use the built-in persona"
     let body = if body.trim().lines().count() > 3 { body.to_string() } else { crate::prompt::EXPLAIN_DEFAULT_BODY.to_string() };
-    let node_ctx = crate::prompt::load_context(api, &project.name, top, item, &codepath);
+    let node_ctx = crate::prompt::load_context(api, project.key(), top, item, &codepath);
     let prompt = crate::prompt::explain_prompt(&crate::prompt::ExplainInput {
         agent_body: &body, ctx: &node_ctx, item, details: &details, codepath: &codepath, topdir: top,
     });
     let model = agent_def.get("model").and_then(|m| m.as_str()).unwrap_or("sonnet").trim().to_string();
     let timeout = agent_def.get("timeoutsec").and_then(|t| t.as_u64()).unwrap_or(900).clamp(60, 3600);
-    let _mcp = mcp_config(api, &project.name, &item.id);
+    let _mcp = mcp_config(api, project.key(), &item.id);
     let ctx = crate::provider::AgentContext {
         prompt,
         cwd: std::path::PathBuf::from(topdir),
@@ -1203,7 +1203,7 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
         role: crate::provider::Role::Explain,
         ..Default::default()
     };
-    let details_path = format!("/api/projects/{}/workitems/{}/details", project.name, item.id);
+    let details_path = format!("/api/projects/{}/workitems/{}/details", project.key(), item.id);
     let result = crate::provider::call(project, account, &model, &ctx, timeout, Some(40));
     let secs = started.elapsed().as_secs();
     let value = match &result {
@@ -1221,12 +1221,12 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
                 "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                 "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
                 "turns": out.num_turns, "agent": "explain"}}));
-            let _ = api.post(&format!("/api/projects/{}/spend", project.name),
+            let _ = api.post(&format!("/api/projects/{}/spend", project.key()),
                 &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                     "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": item.id}));
         }
     }
-    if let Err(e) = api.delete(&format!("/api/projects/{}/workitems/{}/explain", project.name, item.id)) {
+    if let Err(e) = api.delete(&format!("/api/projects/{}/workitems/{}/explain", project.key(), item.id)) {
         eprintln!("[engine] could not clear explain_requested on {}: {e}", short(&item.id));
     }
     println!("[engine] explained {} '{}' in {secs}s ({})", short(&item.id), item.name,
@@ -1300,7 +1300,7 @@ fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout
         .arg(&item.exec_shell)
         .current_dir(topdir)
         .env("ITER_WORKID", &item.id)
-        .env("ITER_PROJECT", &project.name)
+        .env("ITER_PROJECT", project.key())
         .env("ITER_AGENT", &item.agent)
         // a shell run (exec, or a deterministic `test` item): the verbs it calls
         // act as the queue's own tooling, not as an agent iterating on code
@@ -1424,7 +1424,7 @@ enum GateHold {
 /// still waits on — `gate::waiting_on` over the project's current items.
 fn declared_blockers(api: &Api, project: &Project, item: &WorkItem) -> Vec<String> {
     let fresh: WorkItem = match api
-        .get(&format!("/api/projects/{}/workitems/{}", project.name, item.id))
+        .get(&format!("/api/projects/{}/workitems/{}", project.key(), item.id))
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
     {
@@ -1435,7 +1435,7 @@ fn declared_blockers(api: &Api, project: &Project, item: &WorkItem) -> Vec<Strin
         return vec![];
     }
     let items: Vec<WorkItem> = api
-        .get(&format!("/api/projects/{}/workitems", project.name))
+        .get(&format!("/api/projects/{}/workitems", project.key()))
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
@@ -1604,7 +1604,7 @@ fn verify_with_retry(label: &str, prompt: &str, mut run: impl FnMut(&str) -> Res
 /// deletes whatever rows the run still had), the attempt given back.  A
 /// versioned write, re-read and retried once on a race.
 fn requeue_after_revoke(api: &Api, project: &Project, item: &WorkItem, note: &str) {
-    let path = format!("/api/projects/{}/workitems/{}", project.name, item.id);
+    let path = format!("/api/projects/{}/workitems/{}", project.key(), item.id);
     for _ in 0..2 {
         let Ok(mut fresh) = with_retry(&format!("re-read {}", short(&item.id)), || api.get(&path)) else { return };
         // only this run's record: a record that moved on (another lease, a
@@ -1633,7 +1633,7 @@ fn requeue_after_revoke(api: &Api, project: &Project, item: &WorkItem, note: &st
 /// Close-out when the agent itself moved the item (question via `iter ask`,
 /// parked via `iter reject`): record the response, keep the state, free locks.
 fn close_keep_state(api: &Api, project: &Project, item: WorkItem, result: Result<RunOut, String>, state: &str) {
-    let details_path = format!("/api/projects/{}/workitems/{}/details", project.name, item.id);
+    let details_path = format!("/api/projects/{}/workitems/{}/details", project.key(), item.id);
     let (key, text) = match &result {
         Ok(out) => ("response", out.text.clone()),
         Err(e) => ("error", e.clone()),
@@ -1642,13 +1642,13 @@ fn close_keep_state(api: &Api, project: &Project, item: WorkItem, result: Result
     // the run is over: clear its lease on the record the agent already moved
     // (the server then deletes the lease's rows), retrying once on a race
     for _ in 0..2 {
-        let Ok(mut fresh) = api.get(&format!("/api/projects/{}/workitems/{}", project.name, item.id)) else { break };
+        let Ok(mut fresh) = api.get(&format!("/api/projects/{}/workitems/{}", project.key(), item.id)) else { break };
         if fresh.get("lease").and_then(|l| l.as_str()).unwrap_or("") != item.lease {
             break; // a newer run (or a human) owns the record now
         }
         let version = fresh.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
         fresh["lease"] = json!("");
-        match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={version}", project.name, item.id), &fresh) {
+        match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={version}", project.key(), item.id), &fresh) {
             Err(e) if e.status == 409 => continue,
             _ => break,
         }
@@ -1663,7 +1663,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
     // detail rows are APPENDED (iter_data allocates the order atomically);
     // an outage is ridden out (2026-09-22) so the response/error row exists
     // before the state flips
-    let details_path = format!("/api/projects/{}/workitems/{}/details", project.name, item.id);
+    let details_path = format!("/api/projects/{}/workitems/{}/details", project.key(), item.id);
     let put_detail = |key: &str, valuetype: &str, value: Value| {
         let body = json!({"key": key, "valuetype": valuetype, "value": value});
         if let Err(e) = with_retry(&format!("append '{key}' detail to {}", short(&item.id)), || api.post(&details_path, &body)) {
@@ -1684,7 +1684,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
                 "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
                 "turns": out.num_turns, "agent": item.agent, "attempt": item.attempt,
                 "chained_from": chained_from.unwrap_or("")}));
-            let _ = api.post(&format!("/api/projects/{}/spend", project.name),
+            let _ = api.post(&format!("/api/projects/{}/spend", project.key()),
                 &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                     "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": item.id}));
         }
@@ -1766,7 +1766,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
     // write that still has not landed is journaled to disk for the tick to
     // replay (2026-09-22: a close lost in a network outage left two "ghost"
     // in-progress records holding cap slots for 7 h)
-    let item_path = format!("/api/projects/{}/workitems/{}", project.name, item.id);
+    let item_path = format!("/api/projects/{}/workitems/{}", project.key(), item.id);
     for attempt in 0..2 {
         let fresh = if attempt == 0 {
             serde_json::to_value(&item).unwrap()
@@ -1821,7 +1821,7 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
             Err(e) if e.status == 409 && attempt == 0 => continue,
             Err(e) if is_transient(&e) => {
                 eprintln!("[engine] close failed for {}: {e}", item.id);
-                match journal_close(topdir, &project.name, &item.id, version, &item.lease, &updated) {
+                match journal_close(topdir, project.key(), &item.id, version, &item.lease, &updated) {
                     Ok(path) => println!("[engine] close journaled for {} ({})", item.id, path.display()),
                     Err(je) => eprintln!("[engine] close LOST for {}: cannot journal it ({je})", item.id),
                 }

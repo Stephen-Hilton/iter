@@ -285,7 +285,7 @@ async fn live_engines(store: &dyn Storage, project: &str) -> Vec<Value> {
         .into_iter()
         .filter(|e| e.pointer(&format!("/projects/{}", project.replace('~', "~0").replace('/', "~1"))).is_some())
         .filter(|e| s(e, "last_seen") >= cutoff.as_str())
-        .map(|e| json!({"name": s(&e, "name"), "account": s(&e, "account"), "hold": s(&e, "hold"), "last_seen": s(&e, "last_seen")}))
+        .map(|e| json!({"name": s(&e, "id"), "display": s(&e, "name"), "account": s(&e, "account"), "hold": s(&e, "hold"), "last_seen": s(&e, "last_seen")}))
         .collect()
 }
 
@@ -483,7 +483,7 @@ pub(crate) async fn checkouts(store: &dyn Storage, project: &str) -> Vec<(String
         .into_iter()
         .filter_map(|e| {
             let top = e.pointer(&format!("/projects/{key}/dirs/topdir"))?.as_str()?.trim_end_matches('/').to_string();
-            Some((s(&e, "name").to_string(), top, s(&e, "last_seen") >= cutoff.as_str()))
+            Some((s(&e, "id").to_string(), top, s(&e, "last_seen") >= cutoff.as_str()))
         })
         .collect();
     v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));

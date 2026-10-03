@@ -220,20 +220,19 @@ struct LoginReq {
 }
 
 async fn login(State(st): Ctx, Json(req): Json<LoginReq>) -> Result<Json<Value>, ApiError> {
-    let row = st
-        .store
-        .get("webui_user", &req.user, NOSK)
-        .await?
-        .ok_or_else(|| ApiError::Status(StatusCode::UNAUTHORIZED, "bad credentials".into()))?;
+    // sign in by id or by display name; the token always carries the id
+    let unknown = || ApiError::Status(StatusCode::UNAUTHORIZED, "bad credentials".into());
+    let uid = crate::settings::resolve_key(st.store.as_ref(), "webui_user", req.user.trim()).await?.ok_or_else(unknown)?;
+    let row = st.store.get("webui_user", &uid, NOSK).await?.ok_or_else(unknown)?;
     let pwhash = body_str(&row, "pwhash");
     if pwhash.is_empty() || !auth::verify_password(&req.password, &pwhash) {
-        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "bad credentials".into()));
+        return Err(unknown());
     }
     let role = body_str(&row, "role");
     let tokenver = body_u64(&row, "tokenver").max(1);
-    let token = auth::mint_token(&st.secret, &req.user, &role, tokenver, 24 * 3600)
+    let token = auth::mint_token(&st.secret, &uid, &role, tokenver, 24 * 3600)
         .map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({"token": token, "role": role, "user": req.user, "timezone": body_str(&row, "timezone")})))
+    Ok(Json(json!({"token": token, "role": role, "user": uid, "name": body_str(&row, "name"), "timezone": body_str(&row, "timezone")})))
 }
 
 // ---------- users ----------
@@ -288,6 +287,7 @@ async fn user_put(
             }
         }
     }
+    crate::settings::settle_name(st.store.as_ref(), "webui_user", &name, &mut body).await?;
     body["user"] = json!(name);
     // password (plaintext, TLS-transported) -> pwhash; else preserve existing
     if let Some(pw) = body.get("password").and_then(|v| v.as_str()).map(String::from) {
@@ -391,7 +391,7 @@ async fn tooling_get(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> 
 }
 async fn tooling_put(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(mut body): Json<Value>) -> Result<Json<Value>, ApiError> {
     user.require_admin()?;
-    body["name"] = json!(name);
+    crate::settings::settle_name(st.store.as_ref(), "agent_tooling", &name, &mut body).await?;
     let parsed: iter_core::AgentTooling =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("tooling does not parse: {e}")))?;
     if !iter_core::TOOLING_KINDS.contains(&parsed.kind.as_str()) {
@@ -427,7 +427,7 @@ async fn agent_put(
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_admin()?;
-    body["name"] = json!(name);
+    crate::settings::settle_name(st.store.as_ref(), "agent", &name, &mut body).await?;
     let _: iter_core::AgentDef =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("agent does not parse: {e}")))?;
     let is_new = st.store.get("agent", &name, NOSK).await?.is_none();
@@ -446,7 +446,7 @@ async fn agent_put(
 async fn projects_list(u: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiError> {
     let mut rows = st.store.scan("project").await?;
     if let Some(vis) = crate::settings::visible_projects(st.store.as_ref(), &u.sub, &u.role).await? {
-        rows.retain(|r| vis.contains(&body_str(r, "name")));
+        rows.retain(|r| vis.contains(&body_str(r, "id")));
     }
     Ok(Json(Value::Array(rows)))
 }
@@ -468,7 +468,7 @@ async fn project_put(
     if user.role != "admin" && (existing.is_some() || user.role != "user") {
         return Err(forbidden());
     }
-    body["name"] = json!(name);
+    crate::settings::settle_name(st.store.as_ref(), "project", &name, &mut body).await?;
     let parsed: Project =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("project does not parse: {e}")))?;
     if !["Running", "Draining", "Stopped"].contains(&parsed.state.as_str()) {
@@ -548,11 +548,11 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
     for e in st.store.scan("engine").await? {
         // only engines that serve this project (an active serves edge, or the
         // deprecated iter4 `projects` map)
-        let served = crate::settings::serves_edge(&edges, &body_str(&e, "name"), &name).is_some();
+        let served = crate::settings::serves_edge(&edges, &body_str(&e, "id"), &name).is_some();
         if !served && e.get("projects").and_then(|p| p.get(&name)).is_none() {
             continue;
         }
-        let ename = body_str(&e, "name");
+        let ename = body_str(&e, "id");
         let ticksec = e.get("ticksec").and_then(|t| t.as_u64()).unwrap_or(5);
         let last_seen = body_str(&e, "last_seen");
         let age_sec = chrono::DateTime::parse_from_rfc3339(&last_seen)
@@ -564,7 +564,7 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
             not_honoring.push(ename.clone());
         }
         engines_out.push(json!({
-            "name": ename,
+            "name": ename, "display": body_str(&e, "name"),
             "state": body_str(&e, "state"),
             "last_seen": last_seen,
             "age_sec": if age_sec == i64::MAX { Value::Null } else { json!(age_sec) },
@@ -721,7 +721,7 @@ async fn engine_put(
     user.require_writer()?;
     let existing = st.store.get("engine", &name, NOSK).await?;
     let owner = own_engine(&user, &name, existing.as_ref())?;
-    body["name"] = json!(name);
+    crate::settings::settle_name(st.store.as_ref(), "engine", &name, &mut body).await?;
     // the owner is the server's to set (spec §4.4): from the caller's token on
     // register, kept on every later write (an admin may hand it over)
     let asked = body_str(&body, "user");
@@ -841,7 +841,7 @@ async fn engine_delete(user: AuthUser, State(st): Ctx, Path(name): Path<String>)
     for mut p in st.store.scan("project").await? {
         let list: Vec<Value> = p.get("engines").and_then(|e| e.as_array()).cloned().unwrap_or_default();
         if list.iter().any(|e| e.as_str() == Some(name.as_str())) {
-            let pname = body_str(&p, "name");
+            let pname = body_str(&p, "id");
             p["engines"] = Value::Array(list.into_iter().filter(|e| e.as_str() != Some(name.as_str())).collect());
             st.store.put("project", &pname, NOSK, &p).await?;
             st.store.bump_seq(&pname, "project").await?;
@@ -1879,7 +1879,7 @@ async fn live_engines_for(st: &Arc<AppState>, project: &str) -> Result<Vec<Strin
         .await?
         .iter()
         .filter(|e| {
-            crate::settings::serves_edge(&edges, &body_str(e, "name"), project).is_some()
+            crate::settings::serves_edge(&edges, &body_str(e, "id"), project).is_some()
                 || e.get("projects").and_then(|p| p.get(project)).is_some()
         })
         .filter(|e| body_str(e, "state") == "Running")
@@ -1889,7 +1889,7 @@ async fn live_engines_for(st: &Arc<AppState>, project: &str) -> Result<Vec<Strin
                 .map(|seen| (now - seen.with_timezone(&chrono::Utc)).num_seconds() <= 3 * tick + 5)
                 .unwrap_or(false)
         })
-        .map(|e| body_str(e, "name"))
+        .map(|e| body_str(e, "id"))
         .filter(|n| !n.is_empty())
         .collect())
 }

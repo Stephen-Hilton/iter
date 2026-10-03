@@ -1,9 +1,12 @@
 //! The settings graph (iter5 spec §7): every setting lives on a node or an
 //! edge. Nodes are the existing records (project, engine, agent, tooling,
 //! user) plus `account`, `provider`, `workitem_type`; edges are `SysEdge`
-//! rows. Node id = `<type>:<name>`; every type has a non-deletable
-//! placeholder `<type>:_deactivated` — an edge whose endpoint sits on a
-//! placeholder keeps its settings but is inactive.
+//! rows. Node id = `<type>:<id>`, where `<id>` is the record's stable id
+//! (its storage key, fixed at creation); the record's `name` is only its
+//! display name and may be renamed without touching an edge, a token or a
+//! work item. Every type has a non-deletable placeholder
+//! `<type>:_deactivated` — an edge whose endpoint sits on a placeholder keeps
+//! its settings but is inactive.
 //!
 //! Shared by iter_data (store + API) and iter_engine (reads assignments).
 
@@ -91,9 +94,65 @@ pub fn is_node_type(t: &str) -> bool {
     NODE_TYPES.contains(&t)
 }
 
-/// `<type>:<name>`
-pub fn node_id(node_type: &str, name: &str) -> String {
-    format!("{node_type}:{name}")
+/// The storage tables that hold settings-node records (every row keyed by
+/// its stable id; `table_of` maps a node type to one).
+pub const NODE_TABLES: &[&str] = &["engine", "project", "workitem_type", "agent", "agent_tooling", "webui_user", "account", "provider"];
+
+/// `<type>:<id>`
+pub fn node_id(node_type: &str, id: &str) -> String {
+    format!("{node_type}:{id}")
+}
+
+/// A settings record's stable id: `id`, else (users) `user`, else — a record
+/// written before ids — `name`, which was the key then.
+pub fn record_id(rec: &Value) -> String {
+    for k in ["id", "user", "name"] {
+        if let Some(s) = rec.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            return s.to_string();
+        }
+    }
+    String::new()
+}
+
+/// A settings record's display name: `name`, else its id.
+pub fn record_name(rec: &Value) -> String {
+    rec.get("name").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_else(|| record_id(rec))
+}
+
+/// A display name is free text, 1–100 characters, no control characters,
+/// no '/' (names also resolve in URL paths), and not the placeholder name.
+pub fn check_name(name: &str) -> Result<(), String> {
+    let n = name.trim();
+    if n.is_empty() || n.chars().count() > 100 {
+        return Err("a name is 1–100 characters".into());
+    }
+    if n == PLACEHOLDER {
+        return Err(format!("'{PLACEHOLDER}' is reserved for the placeholder"));
+    }
+    if n.chars().any(|c| c.is_control() || c == '/') {
+        return Err("a name has no '/' and no control characters".into());
+    }
+    Ok(())
+}
+
+/// A new record's id, minted once from the name it is created with: letters,
+/// digits, '.', '-' and '_' kept, anything else becomes '-'; `-2`, `-3`, …
+/// appended while `taken` says the id (or a name equal to it) is in use.
+pub fn mint_id(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut base: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '-' })
+        .collect();
+    base = base.trim_matches('-').to_string();
+    if base.is_empty() || base == PLACEHOLDER {
+        base = "node".into();
+    }
+    base.truncate(64);
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|c| !taken(c)).unwrap()
 }
 
 /// `<type>:_deactivated`
@@ -101,7 +160,7 @@ pub fn placeholder_id(node_type: &str) -> String {
     node_id(node_type, PLACEHOLDER)
 }
 
-/// Split `<type>:<name>` (the name may itself contain ':').
+/// Split `<type>:<id>` (the id may itself contain ':').
 pub fn parse_node_id(id: &str) -> Option<(&str, &str)> {
     let (t, n) = id.split_once(':')?;
     if !is_node_type(t) || n.is_empty() {
@@ -162,7 +221,7 @@ impl SysEdge {
     pub fn setting_str(&self, key: &str) -> String {
         self.settings.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
     }
-    /// Endpoint names (the part after `<type>:`).
+    /// Endpoint ids (the part after `<type>:`).
     pub fn from_name(&self) -> &str {
         parse_node_id(&self.from).map(|(_, n)| n).unwrap_or("")
     }
@@ -175,8 +234,8 @@ impl SysEdge {
 /// the (from type, to type) pair allowed for the edge type. A placeholder of
 /// the right type counts. Returns a reason on refusal.
 pub fn validate_endpoints(edge_type: &str, from: &str, to: &str) -> Result<(), String> {
-    let ft = type_of_id(from).ok_or_else(|| format!("'{from}' is not a node id (<type>:<name>)"))?;
-    let tt = type_of_id(to).ok_or_else(|| format!("'{to}' is not a node id (<type>:<name>)"))?;
+    let ft = type_of_id(from).ok_or_else(|| format!("'{from}' is not a node id (<type>:<id>)"))?;
+    let tt = type_of_id(to).ok_or_else(|| format!("'{to}' is not a node id (<type>:<id>)"))?;
     if !is_edge_type(edge_type) {
         return Err(format!("unknown edge type '{edge_type}'"));
     }
@@ -237,7 +296,9 @@ pub fn validate_settings(edge_type: &str, settings: &Value) -> Result<(), String
     Ok(())
 }
 
-/// `GET /api/engines/{name}/assignments` (spec §4.2).
+/// `GET /api/engines/{id}/assignments` (spec §4.2). Every `project` / `name`
+/// in it is a stable id (what the engine puts in URLs and work items), never
+/// a display name.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Assignments {
     pub engine: String,
@@ -346,6 +407,20 @@ mod tests {
         let e: SysEdge = serde_json::from_value(json!({"id": "x", "type": "of", "from": "account:a", "to": "provider:claude"})).unwrap();
         assert!(e.active && e.settings.is_object());
         assert_eq!(serde_json::to_value(&e).unwrap()["type"], "of");
+    }
+
+    #[test]
+    fn record_ids_names_and_minting() {
+        assert_eq!(record_id(&json!({"id": "p1", "name": "Shown"})), "p1");
+        assert_eq!(record_id(&json!({"user": "engine01", "name": "Beast"})), "engine01");
+        assert_eq!(record_id(&json!({"name": "legacy"})), "legacy");
+        assert_eq!(record_name(&json!({"id": "p1", "name": "Shown"})), "Shown");
+        assert_eq!(record_name(&json!({"id": "p1", "name": "  "})), "p1");
+        assert!(check_name("My Engine (laptop)").is_ok());
+        assert!(check_name("").is_err() && check_name("a/b").is_err() && check_name(PLACEHOLDER).is_err());
+        assert_eq!(mint_id("My Engine", |_| false), "My-Engine");
+        assert_eq!(mint_id("beast", |c| c == "beast" || c == "beast-2"), "beast-3");
+        assert_eq!(mint_id("///", |_| false), "node");
     }
 
     #[test]

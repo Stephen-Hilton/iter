@@ -143,4 +143,58 @@ test.describe('settings graph', () => {
     await expect.poll(async () => { const e = edgeOf(await sg(admin), 'holds', 'iter_engine:mini', 'account:main'); return e && [e.tag, e.settings.token_envar]; }).toEqual([holds.tag, holds.settings.token_envar]);
     await shot(page, 'settings-after-paste');
   });
+
+  test.describe('rename', () => {
+  // the refused duplicate below is a 409 the browser reports on the console
+  test.use({ allowConsole: [/status of 409/] });
+  test('rename nodes: the name changes, the id and every edge, token and page stay', async ({ page, admin, engine }) => {
+    const before = await sg(admin);
+    const serves = edgeOf(before, 'serves', 'iter_engine:mbp', 'project:shop');
+    await openTab(page, 'settings');
+    // the engine, from its detail pane
+    await focus(page, 'iter_engine:mbp');
+    await expect(page.locator('#s-detail')).toContainText('Fixed at creation');
+    await page.locator('#s-detail [data-act=rename]').click();
+    await dialog(page).locator('input[type=text]').fill('Build box');
+    await shot(page, 'settings-rename');
+    await dialog(page).locator('.kit-primary').click();
+    await expect(page.locator('#s-detail h2')).toHaveText('Build box');
+    await expect.poll(() => page.evaluate(() => IterSettings.cy.getElementById('iter_engine:mbp').data('label'))).toBe('Build box');
+    const e = await admin.get('/api/engines/mbp');
+    expect([e.id, e.name]).toEqual(['mbp', 'Build box']);
+    // the account, from its Configure dialog (the name sits above the settings)
+    await focus(page, 'account:main');
+    await page.keyboard.press('e');
+    await dialog(page).locator('.kit-kv:has(.kit-k span[title="__name"]) .kit-v input, .kit-kv:has(.kit-k span[title="name"]) .kit-v input').first().fill('Main account');
+    await dialog(page).locator('.kit-primary').click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(async () => (await admin.get('/api/settings/nodes/account:main')).name).toBe('Main account');
+    // names are unique among their kind: a duplicate is refused, through the UI and the API
+    await admin.post('/api/settings/nodes', { type: 'account', name: 'spare', settings: { provider: 'mock' } });
+    await page.evaluate(() => IterSettings.show());
+    await focus(page, 'account:spare');
+    await page.locator('#s-detail [data-act=rename]').click();
+    await dialog(page).locator('input[type=text]').fill('Main account');
+    await dialog(page).locator('.kit-primary').click();
+    await expect(page.locator('.kit-toast').last()).toContainText('Refused');
+    expect((await admin.call('PATCH', '/api/settings/nodes/account:spare', { name: 'main' }, [409])).status).toBe(409);
+    await admin.del('/api/settings/nodes/account:spare');
+    // another kind may share a name
+    await admin.patch('/api/settings/nodes/project:shop', { name: 'Main account' });
+    // the edges, the engine's token and its assignments are untouched
+    const after = await sg(admin);
+    const s2 = edgeOf(after, 'serves', 'iter_engine:mbp', 'project:shop');
+    expect(s2 && s2.id).toBe(serves.id);
+    expect((await engine.get('/api/engines/mbp/assignments')).projects.map((p) => p.project)).toContain('shop');
+    // the work queue shows the names; the picker still selects by id
+    await openTab(page, 'queue', 'shop');
+    await expect(page.locator('#engines')).toContainText('Build box');
+    await expect(page.locator('#projpick option[value="shop"]')).toHaveText('Main account');
+    await expect(page.locator('#projects .proj[data-p="shop"]')).toContainText('Main account');
+    // and back
+    await admin.patch('/api/settings/nodes/iter_engine:mbp', { name: 'mbp' });
+    await admin.patch('/api/settings/nodes/account:main', { name: 'main' });
+    await admin.patch('/api/settings/nodes/project:shop', { name: 'shop' });
+  });
+  });
 });

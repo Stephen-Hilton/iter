@@ -79,6 +79,11 @@ pub fn now_utc() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentDef {
+    /// stable settings-graph id (the storage key); fixed at creation —
+    /// `name` is only the display name and may be renamed. Empty on a
+    /// record from a server older than ids: use `key()`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub desc: String,
@@ -356,6 +361,11 @@ fn default_backoff() -> u32 { 2 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Project {
+    /// stable settings-graph id (the storage key); fixed at creation —
+    /// `name` is only the display name and may be renamed. Empty on a
+    /// record from a server older than ids: use `key()`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub desc: String,
@@ -446,6 +456,11 @@ fn default_context() -> Vec<String> { vec!["{marker}".into(), "{ancestor_markers
 ///          critic     -> the `iter critreview` persona (model/flags in the row)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentTooling {
+    /// stable settings-graph id (the storage key); fixed at creation —
+    /// `name` is only the display name and may be renamed. Empty on a
+    /// record from a server older than ids: use `key()`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub kind: String,
@@ -476,6 +491,11 @@ pub struct EngineProjectDirs {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Engine {
+    /// stable settings-graph id (the storage key); fixed at creation —
+    /// `name` is only the display name and may be renamed. Empty on a
+    /// record from a server older than ids: use `key()`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub host: String,
@@ -781,7 +801,14 @@ fn default_ppw_timeout() -> u64 { 30 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebuiUser {
+    /// the stable user id (storage key, token subject); fixed at creation
     pub user: String,
+    /// same as `user` (every settings record carries `id`)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// display name, may be renamed; "" = the id
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     #[serde(default)]
     pub email: String,
     /// user | engine | admin | viewer (read-only: no queue writes; may edit
@@ -1167,6 +1194,26 @@ pub fn pick_account<'a>(
         }
     }
     None
+}
+
+/// The stable key of a settings record: its `id`, or (a record from a server
+/// older than ids) its `name`, which then was the key.
+macro_rules! record_key {
+    ($($t:ty),*) => {$(
+        impl $t {
+            pub fn key(&self) -> &str {
+                if self.id.is_empty() { &self.name } else { &self.id }
+            }
+        }
+    )*};
+}
+record_key!(AgentDef, AgentTooling, Project, Engine);
+
+impl WebuiUser {
+    /// The user's display name (`user` is the stable id).
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() { &self.user } else { &self.name }
+    }
 }
 
 #[cfg(test)]

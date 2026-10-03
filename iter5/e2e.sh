@@ -297,6 +297,21 @@ check "response detail row written" bash -c "curl -sf -H 'authorization: Bearer 
 check "spend: a spend detail row with tokens" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/workitems/$WA1/details | jq -e '[.[]|select(.key==\"spend\" and .value.input_tokens>0)]|length>=1'"
 check "spend: project rows recorded" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/spend | jq -e 'length>=1'"
 expect "locks released in $PA" 0 "$(api GET "/api/projects/$PA/locks" | jq '[.[]|select(.kind!="reserve")]|length')"
+# renames mid-run: the engine, a project, an account and the engine's user get new display names; their ids —
+# and so the edges, the engine token, its claims and every URL — stay, and the engine keeps working
+api PATCH "/api/settings/nodes/iter_engine:$ENGINE" '{"name":"E2E box"}' >/dev/null || ko "rename the engine"
+api PATCH "/api/settings/nodes/project:$PA" '{"name":"Alpha shop"}' >/dev/null || ko "rename a project"
+api PATCH "/api/settings/nodes/account:acct_a" '{"name":"Alpha account"}' >/dev/null || ko "rename an account"
+api PATCH "/api/settings/nodes/user:engine01" '{"name":"e2e engine user"}' >/dev/null || ko "rename the engine's user"
+WR=$(wi_new $PA '{"name":"after the renames","agent":"code","priority":3,"lockdirs":["{topdir}/out/"],"request":"mock: write renamed.txt <<<still-works>>>"}')
+wait_for 30 "[ \"\$(wi_state $PA $WR)\" = complete ]"
+expect "renamed engine, project, account and user: work still runs" still-works "$(cat "$RA/out/renamed.txt" 2>/dev/null)"
+expect "the item was claimed under the engine's id" "$ENGINE" "$(wi $PA "$WR" | jq -r .engine)"
+expect "the renamed project keeps its id" "$PA Alpha shop" "$(api GET "/api/projects/$PA" | jq -r '"\(.id) \(.name)"')"
+expect "a display name in a URL path resolves to the id" "$PA" "$(api GET "/api/projects/Alpha%20shop" | jq -r .id)"
+expect "the engine's assignments still name the project by id" "$PA" "$(curl -sf -H "authorization: Bearer $ENGINE_TOKEN" "$BASE/api/engines/E2E%20box/assignments" | jq -r --arg p "$PA" '[.projects[].project|select(.==$p)]|first')"
+expect "sign-in by display name gives the id's token" engine01 "$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"e2e engine user","password":"unused-login-pw"}' | jq -r .user)"
+for n in "iter_engine:$ENGINE" "project:$PA" "account:acct_a" "user:engine01"; do api PATCH "/api/settings/nodes/$n" "{\"name\":\"${n#*:}\"}" >/dev/null; done
 EJ=$(api GET "/api/engines/$ENGINE")
 check "heartbeat: last_seen set" test -n "$(echo "$EJ" | jq -r '.last_seen // empty')"
 expect "heartbeat: engine record owned by engine01" engine01 "$(echo "$EJ" | jq -r .user)"

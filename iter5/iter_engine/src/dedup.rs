@@ -67,7 +67,7 @@ pub struct ModelJudge<'a> {
 
 impl Judge for ModelJudge<'_> {
     fn judge(&self, new: &ItemText, candidates: &[ItemText]) -> Result<Vec<Judgement>, String> {
-        let prompt = judge_prompt(&self.project.name, new, candidates);
+        let prompt = judge_prompt(self.project.key(), new, candidates);
         let model = self.agent_def.get("model").and_then(|m| m.as_str()).unwrap_or("sonnet").trim().to_string();
         let timeout = self.agent_def.get("timeoutsec").and_then(|t| t.as_u64()).unwrap_or(180).clamp(30, 900);
         let ctx = crate::provider::AgentContext {
@@ -80,12 +80,12 @@ impl Judge for ModelJudge<'_> {
         };
         let out = crate::provider::call(self.project, self.account, &model, &ctx, timeout, Some(12))?;
         if out.cost_usd > 0.0 || out.input_tokens > 0 {
-            let details = format!("/api/projects/{}/workitems/{}/details", self.project.name, self.workid);
+            let details = format!("/api/projects/{}/workitems/{}/details", self.project.key(), self.workid);
             let _ = self.api.post(&details, &json!({"key": "spend", "valuetype": "json", "value": {"usd": out.cost_usd,
                 "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                 "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens,
                 "turns": out.num_turns, "agent": JUDGE_AGENT}}));
-            let _ = self.api.post(&format!("/api/projects/{}/spend", self.project.name),
+            let _ = self.api.post(&format!("/api/projects/{}/spend", self.project.key()),
                 &json!({"usd": out.cost_usd, "input_tokens": out.input_tokens, "output_tokens": out.output_tokens,
                     "cache_read_tokens": out.cache_read_tokens, "cache_create_tokens": out.cache_create_tokens, "workid": self.workid}));
         }
@@ -176,7 +176,7 @@ pub fn triage(api: &Api, project: &Project, items: &[WorkItem], item: &WorkItem,
 
 fn doc(api: &Api, project: &Project, id: &str, text: &str) {
     if let Err(e) = api.post(
-        &format!("/api/projects/{}/workitems/{}/details", project.name, id),
+        &format!("/api/projects/{}/workitems/{}/details", project.key(), id),
         &json!({"key": "doc", "valuetype": "text", "value": text}),
     ) {
         eprintln!("[engine] could not append a dedup note to {}: {e}", short(id));
@@ -190,7 +190,7 @@ pub fn apply(api: &Api, project: &Project, item: &WorkItem, decision: &Decision)
     match decision {
         Decision::Merge { survivor, reason, others, overlaps } => {
             let r = api.post(
-                &format!("/api/projects/{}/workitems/{}/duplicate_of", project.name, item.id),
+                &format!("/api/projects/{}/workitems/{}/duplicate_of", project.key(), item.id),
                 &json!({"survivor": survivor, "reason": reason, "others": others}),
             );
             match r {
@@ -227,7 +227,7 @@ fn stamp(api: &Api, project: &Project, item: &WorkItem) {
         let row = if attempt == 0 {
             serde_json::to_value(item).unwrap()
         } else {
-            match api.get(&format!("/api/projects/{}/workitems/{}", project.name, item.id)) {
+            match api.get(&format!("/api/projects/{}/workitems/{}", project.key(), item.id)) {
                 Ok(v) => v,
                 Err(_) => return,
             }
@@ -239,7 +239,7 @@ fn stamp(api: &Api, project: &Project, item: &WorkItem) {
         let version = row.get("version").and_then(|v| v.as_u64()).unwrap_or(item.version);
         let mut updated = row.clone();
         updated["dedup_checked"] = json!(now_utc());
-        match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={version}", project.name, item.id), &updated) {
+        match api.put(&format!("/api/projects/{}/workitems/{}?expect_version={version}", project.key(), item.id), &updated) {
             Ok(_) => return,
             Err(e) if e.status == 409 => continue,
             Err(e) => {

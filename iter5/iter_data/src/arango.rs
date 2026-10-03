@@ -299,6 +299,25 @@ impl ArangoBackend {
         d
     }
 
+    /// Rows of a settings-node table (optionally one key), each stamped with
+    /// its id and display name (see `stamp_node`).
+    async fn node_rows(&self, table: &str, pk: Option<&str>) -> Result<Vec<Value>, StorageError> {
+        let rows = self
+            .aql(
+                "FOR d IN @@c FILTER @pk == null OR d.pk == @pk SORT d.pk, d.sk RETURN {pk: d.pk, sk: d.sk, body: d.body}",
+                json!({"@c": table, "pk": pk}),
+            )
+            .await
+            .map_err(berr)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let (pk, sk) = (r["pk"].as_str().unwrap_or(""), r["sk"].as_str().unwrap_or(""));
+                if is_node_row(table, sk) { stamp_node(table, pk, &r["body"]) } else { r["body"].clone() }
+            })
+            .collect())
+    }
+
     /// Liveness for /health: our own database must answer, not just the server
     /// (a server that lost or never had the database is not healthy).
     pub async fn ping(&self) -> bool {
@@ -306,18 +325,50 @@ impl ArangoBackend {
     }
 }
 
+/// A settings-node row (`iter_core::settings::NODE_TABLES`, one row per key):
+/// its body always carries the stable `id` — the row's key — and a display
+/// `name` (the id until it is renamed); a user row's `user` is the id too.
+fn is_node_row(table: &str, sk: &str) -> bool {
+    sk == "-" && iter_core::settings::NODE_TABLES.contains(&table)
+}
+
+/// Stamp `id` (and `user` on a user row) from the key, and default `name` to
+/// it. Applied on every write and every read, so a row written before ids
+/// reads as if it had them.
+pub(crate) fn stamp_node(table: &str, pk: &str, body: &Value) -> Value {
+    let mut b = body.clone();
+    if let Some(o) = b.as_object_mut() {
+        o.insert("id".into(), json!(pk));
+        if table == "webui_user" {
+            o.insert("user".into(), json!(pk));
+        }
+        let named = o.get("name").and_then(|n| n.as_str()).map(|n| !n.trim().is_empty()).unwrap_or(false);
+        if !named {
+            o.insert("name".into(), json!(pk));
+        }
+    }
+    b
+}
+
 #[async_trait]
 impl Storage for ArangoBackend {
     async fn get(&self, table: &str, pk: &str, sk: &str) -> Result<Option<Value>, StorageError> {
         let key = doc_key(pk, sk);
         match self.dbcall("GET", &format!("/_api/document/{table}/{}", urlenc(&key)), None).await {
-            Ok(d) => Ok(d.get("body").cloned()),
+            Ok(d) => Ok(d.get("body").cloned().map(|b| if is_node_row(table, sk) { stamp_node(table, pk, &b) } else { b })),
             Err(e) if e.code == 404 => Ok(None),
             Err(e) => Err(berr(e)),
         }
     }
 
     async fn put(&self, table: &str, pk: &str, sk: &str, body: &Value) -> Result<(), StorageError> {
+        let stamped;
+        let body = if is_node_row(table, sk) {
+            stamped = stamp_node(table, pk, body);
+            &stamped
+        } else {
+            body
+        };
         // keep the native version in step with the body when it carries one;
         // otherwise an update leaves the stored version alone (an insert gets 0)
         let ver = body.get("version").and_then(|v| v.as_u64());
@@ -343,12 +394,18 @@ impl Storage for ArangoBackend {
     }
 
     async fn query(&self, table: &str, pk: &str) -> Result<Vec<Value>, StorageError> {
+        if iter_core::settings::NODE_TABLES.contains(&table) {
+            return self.node_rows(table, Some(pk)).await;
+        }
         self.aql("FOR d IN @@c FILTER d.pk == @pk SORT d.sk RETURN d.body", json!({"@c": table, "pk": pk}))
             .await
             .map_err(berr)
     }
 
     async fn scan(&self, table: &str) -> Result<Vec<Value>, StorageError> {
+        if iter_core::settings::NODE_TABLES.contains(&table) {
+            return self.node_rows(table, None).await;
+        }
         self.aql("FOR d IN @@c SORT d.pk, d.sk RETURN d.body", json!({"@c": table}))
             .await
             .map_err(berr)
@@ -486,5 +543,19 @@ mod tests {
         let long = "x".repeat(400);
         let h = doc_key(&long, "y");
         assert!(h.starts_with("h:") && h.len() <= 254);
+    }
+
+    #[test]
+    fn node_rows_carry_their_id_and_a_name() {
+        // a row written before ids reads with them
+        let legacy = stamp_node("project", "shop", &json!({"name": "shop", "state": "Running"}));
+        assert_eq!((legacy["id"].as_str(), legacy["name"].as_str()), (Some("shop"), Some("shop")));
+        // a renamed row keeps its name; the id always follows the key
+        let renamed = stamp_node("engine", "e1", &json!({"id": "stale", "name": "Laptop"}));
+        assert_eq!((renamed["id"].as_str(), renamed["name"].as_str()), (Some("e1"), Some("Laptop")));
+        // a user row's `user` is its id; its name defaults to the id
+        let u = stamp_node("webui_user", "eng1", &json!({"role": "engine", "name": " "}));
+        assert_eq!((u["user"].as_str(), u["id"].as_str(), u["name"].as_str()), (Some("eng1"), Some("eng1"), Some("eng1")));
+        assert!(is_node_row("agent", "-") && !is_node_row("workitem", "-") && !is_node_row("agent", "x"));
     }
 }

@@ -534,7 +534,7 @@
     if (w.step === 0) {
       body = `<p class="intro-dim">A new project starts as a <b>design</b>: no repository, no engine. Lay it out in the Project graph — contexts, containers, components, the connections between them, requirements, use cases and actors — then press <b>Build</b> and an engine creates the repository and writes every file.</p>` +
         field("name", "Project name", inp("name", d.name, 'placeholder="e.g. shop-api" autocomplete="off"', e.name),
-          `The project's id everywhere: the queue, the graph, the settings graph. Short and stable; it cannot be renamed later.${d.name.trim() ? ` Its head file: <code>{topdir}/global/${esc(slug(d.name.trim()) || "project")}.project.iter.md</code>.` : ""}`, e.name) +
+          `Also becomes the project's stable id, used in URLs, edges and work items. You can rename the project later (its id stays).${d.name.trim() ? ` Its head file: <code>{topdir}/global/${esc(slug(d.name.trim()) || "project")}.project.iter.md</code>.` : ""}`, e.name) +
         field("desc", "Description", `<textarea id="intro-f-desc" data-f="desc" placeholder="What the project does, for whom, and the shape of the build.">${esc(d.desc)}</textarea>`,
           "About 100 words, handed to <b>every</b> agent as context. It becomes the project node's <code>desc</code>.") +
         field("gitrepo", "Git remote (optional)", inp("gitrepo", d.gitrepo, 'placeholder="https://github.com/you/shop-api"', e.gitrepo),
@@ -574,11 +574,11 @@
     const eng = S.w.d.engine.trim();
     const online = S.engines.filter(x => engineState(x).online);
     if (eng) {
-      const st = engineState(S.engines.find(x => x.name === eng));
+      const st = engineState(S.engines.find(x => (x.id || x.name) === eng || x.name === eng));
       return st.online ? `<div class="intro-note intro-okn"><b>Engine ${esc(eng)} is online</b> (${esc(st.text)}).</div>`
         : `<div class="intro-note"><span class="intro-spin"></span> Waiting for engine <b>${esc(eng)}</b> to check in: it ${esc(st.text)}. This updates on its own.</div>`;
     }
-    return online.length ? `<div class="intro-note intro-okn">Online now: ${online.map(x => `<b>${esc(x.name)}</b>`).join(", ")}.</div>`
+    return online.length ? `<div class="intro-note intro-okn">Online now: ${online.map(x => `<b>${esc(x.name || x.id)}</b>`).join(", ")}.</div>`
       : `<div class="intro-note"><span class="intro-spin"></span> No engine is online yet. This updates on its own.</div>`;
   }
   let watchTimer = null;
@@ -609,8 +609,8 @@
     h += `<h3>Set up an engine (once per machine)</h3>
       <p class="intro-dim intro-small">The engine needs only two things: this server's address and an env file holding its credentials. Everything else — which projects it serves, in which folders, with which accounts — comes from the settings graph.</p>`;
     h += field("engine", "Engine name (optional)", inp("engine", d.engine, 'list="intro-englist" placeholder="defaults to the machine\'s short hostname" autocomplete="off"'),
-      `Also its login user. ${S.engines.length ? "Registered: " + S.engines.map(x => esc(x.name)).join(", ") + "." : "No engine is registered yet."}`) +
-      `<datalist id="intro-englist">${S.engines.map(x => `<option value="${esc(x.name)}">`).join("")}</datalist>`;
+      `Also its login user. ${S.engines.length ? "Registered: " + S.engines.map(x => esc(x.id || x.name) + (x.id && x.name && x.name !== x.id ? " (" + esc(x.name) + ")" : "")).join(", ") + "." : "No engine is registered yet."}`) +
+      `<datalist id="intro-englist">${S.engines.map(x => `<option value="${esc(x.id || x.name)}">`).join("")}</datalist>`;
     h += `<h4>1 · The engine token</h4><p class="intro-dim intro-small">The engine signs in as a user with role <code>engine</code>; its token goes in the env file as <code>ITER_ENGINE_TOKEN</code>. Shown once.</p>`;
     if (w.token) h += `<div class="intro-note intro-okn">Token for <b>${esc(d.engine.trim())}</b> minted and filled in below.</div><div class="intro-actions"><button class="intro-btn intro-sm intro-ghost" data-copytoken="1">Copy the token alone</button></div>`;
     else if (admin) h += `<div class="intro-actions"><button class="intro-btn" data-wmint="1" ${w.busy || !d.engine.trim() ? "disabled" : ""} title="${d.engine.trim() ? "" : "type the engine name above first"}">Create user ${esc(d.engine.trim() || "<engine name>")} and mint its token</button></div>`;
@@ -642,7 +642,7 @@
     w.busy = true; w.error = ""; render();
     try {
       let exists = false;
-      try { const list = await api("/api/projects"); exists = (list || []).some(p => p && p.name === name); } catch (e) { /* the PUT below answers */ }
+      try { const list = await api("/api/projects"); exists = (list || []).some(p => p && ((p.id || p.name) === name || p.name === name)); } catch (e) { /* the PUT below answers */ }
       if (exists) { w.error = `A project named "${name}" already exists. Pick another name.`; return; }
       await api("/api/projects/" + encodeURIComponent(name), { method: "PUT", body: JSON.stringify(projectRecord(d)) });
       w.created = { at: Date.now() }; w.step = 2;

@@ -323,7 +323,7 @@ fn find_workitem(api: &Api, workid_prefix: &str) -> (String, String) {
     let projects = api.get("/api/projects").ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
     let mut matches: Vec<(String, String)> = Vec::new();
     for p in &projects {
-        let pname = p.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let pname = iter_core::settings::record_id(p);
         if let Ok(items) = api.get(&format!("/api/projects/{pname}/workitems")) {
             for i in items.as_array().cloned().unwrap_or_default() {
                 let id = i.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();

@@ -442,9 +442,22 @@ body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:
 "use strict";
 const $=s=>document.querySelector(s);
 let sgCache=null;
+/* every settings record (project, engine, agent, tooling, user, account) has a stable id — its key in every URL,
+   edge and work item — and a display name that can be renamed: rid() for keys, rname() for what people read */
+const rid=r=>r?String(r.id||r.user||r.name||""):"";
+const rname=r=>r?String(r.name||rid(r)):"";
+/* the display name of the <type> record with this id (settings graph, then the loaded lists); the id when unknown */
+function nameOf(type,id){
+  if(id==null||id==="")return "";
+  const n=sgCache&&Array.isArray(sgCache.nodes)?sgCache.nodes.find(x=>x.id===type+":"+id):null;
+  if(n&&n.name)return n.name;
+  const list={project:projectsCache,iter_engine:enginesCache,agent:agentsCache}[type]||[];
+  const r=list.find(x=>rid(x)===id);
+  return r?rname(r):String(id);
+}
 /* the projects an engine serves: active serves edges in the settings graph; iter4-shaped engine records as a fallback */
 function servesOf(e){
-  if(sgCache&&Array.isArray(sgCache.edges))return sgCache.edges.filter(x=>x.type==="serves"&&x.from==="iter_engine:"+e.name&&x.active!==false).map(x=>String(x.to).replace(/^project:/,""));
+  if(sgCache&&Array.isArray(sgCache.edges))return sgCache.edges.filter(x=>x.type==="serves"&&x.from==="iter_engine:"+rid(e)&&x.active!==false).map(x=>String(x.to).replace(/^project:/,""));
   return Object.keys(e.projects||{});
 }
 async function openSettingsGraph(id){await setTab("settings");if(id&&window.IterSettings)setTimeout(()=>IterSettings.focus(id),60);}
@@ -618,24 +631,28 @@ document.addEventListener("keydown",ev=>{if(ev.key==="Escape")setHdrMore(false);
 /* shared by the engine block and the Accounts section: a unix-seconds instant as local time, a percentage, one account's full tooltip */
 const at=s=>s?`${fmtTs(new Date(s*1000).toISOString())} ${tzAbbrev()}`:"";
 const pct=v=>v==null?"—":Math.round(v)+"%";
-const acctTitle=a=>`${a.name}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
+const acctTitle=a=>`${nameOf("account",a.name)}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
   +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
   +(a.token==="unset"?" · NO TOKEN in the engine's env_file":"");
-/* one row per distinct account name across every engine; the engine with the newest last_seen owns the snapshot */
+/* one row per account that bills the selected project (an active bills edge); the engine with the newest last_seen owns the snapshot */
 function renderAccounts(engines){
+  if(!project){$("#accounts").innerHTML="<div class='eng kv'>no project selected</div>";return;}
+  const billed=new Set(((sgCache&&sgCache.edges)||[])
+    .filter(e=>e.type==="bills"&&e.active!==false&&e.to==="project:"+project)
+    .map(e=>e.from.replace(/^account:/,"")));
   const now=Date.now();
   const seenOf=e=>e.last_seen?Date.parse(e.last_seen):0;
   const alive=e=>{const s=seenOf(e);return !!s&&(now-s)<3*(e.ticksec||5)*1000+5000;};
   const best={};
   (engines||[]).forEach(e=>{(Array.isArray(e.accounts)?e.accounts:[]).forEach(a=>{
-    if(!a||a.name==null)return;
+    if(!a||a.name==null||!billed.has(a.name))return;
     const cur=best[a.name];
     if(!cur||seenOf(e)>seenOf(cur.e))best[a.name]={a:a,e:e};
   });});
-  const usedBy={};   // account name -> the live engine currently running on it
+  const usedBy={};   // account id -> the live engine currently running on it (its display name)
   (engines||[]).forEach(e=>{
     const n=e.usage&&e.usage.account!=null?e.usage.account:e.account;
-    if(n!=null&&alive(e)&&usedBy[n]==null)usedBy[n]=e.name;
+    if(n!=null&&alive(e)&&usedBy[n]==null)usedBy[n]=rname(e);
   });
   const win=(label,a,v,reset)=>{
     const stop=a.stop==null?99:a.stop;
@@ -647,17 +664,18 @@ function renderAccounts(engines){
   $("#accounts").innerHTML=names.map(n=>{
     const a=best[n].a,src=best[n].e;
     const status=a.token==="unset"?"⚠ no token":(usedBy[n]?"· in use by "+esc(usedBy[n]):"· idle");
-    return `<div class="eng acct" title="${esc(acctTitle(a)+" · reported by "+src.name)}"><b>${esc(n)}</b> <span class="kv">${status}</span>`
+    return `<div class="eng acct" title="${esc(acctTitle(a)+" · reported by "+rname(src))}"><b>${esc(nameOf("account",n))}</b> <a class="sgl" data-sgraph="account:${esc(n)}" title="this account in the settings graph">↗</a> <span class="kv">${status}</span>`
       +win("5h",a,a.five_hour_pct,a.five_hour_resets_at)+win("7d",a,a.seven_day_pct,a.seven_day_resets_at)
       +(a.is_using_overage?`<br>• <b title="a window is exhausted and requests are billing as extra usage">OVERAGE</b>`:"")
       +`</div>`;
   }).join("")
     // accounts in the settings graph that no engine has reported usage for yet
-    +((sgCache&&sgCache.nodes)||[]).filter(n=>n.type==="account"&&!n.placeholder&&!best[n.name]).map(n=>{
+    +((sgCache&&sgCache.nodes)||[]).filter(n=>n.type==="account"&&!n.placeholder&&billed.has(n.key||n.name)&&!best[n.key||n.name]).map(n=>{
       const prov=(sgCache.edges||[]).find(e=>e.type==="of"&&e.from===n.id&&e.active!==false);
       return `<div class="eng acct"><b>${esc(n.name)}</b> <a class="sgl" data-sgraph="${esc(n.id)}" title="this account in the settings graph">↗</a><br><span class="kv">${esc(prov?prov.to.replace(/^provider:/,""):"no provider")} · no usage reported yet</span></div>`;
     }).join("")
-    ||"<div class='eng kv'>no accounts yet — add one in the settings graph</div>";
+    ||`<div class='eng kv'>no accounts bill ${esc(nameOf("project",project))} yet — add a bills edge (account → project) in the settings graph</div>`;
+  $("#accounts").querySelectorAll("[data-sgraph]").forEach(a=>a.onclick=ev=>{ev.preventDefault();ev.stopPropagation();openSettingsGraph(a.dataset.sgraph);});
 }
 
 async function load(){
@@ -677,13 +695,13 @@ async function load(){
       await api("/api/users/"+encodeURIComponent(me),{method:"PUT",body:JSON.stringify(fresh)});}catch(e){}}
     load();
   };
-  $("#who").textContent=(me||"")+(myRole?" · "+myRole:"");
+  $("#who").textContent=((meRow&&rname(meRow))||me||"")+(myRole?" · "+myRole:"");
   document.body.classList.toggle("viewer",myRole==="viewer");
-  projects.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:"base"}));
-  try{const lp=localStorage.getItem("iter5.project");if(lp&&!project&&projects.some(p=>p.name===lp))project=lp;}catch(e){}
+  projects.sort((a,b)=>rname(a).localeCompare(rname(b),undefined,{sensitivity:"base"}));
+  try{const lp=localStorage.getItem("iter5.project");if(lp&&!project&&projects.some(p=>rid(p)===lp))project=lp;}catch(e){}
   $("#projects").innerHTML=projects.map(p=>
-    `<div class="projrow"><button class="proj ${p.name===project?"sel":""}" data-p="${esc(p.name)}">${esc(p.name)}
-     <span class="kv">${esc(p.state)}</span></button><button class="gear" data-gear="project" data-name="${esc(p.name)}" title="project settings">⚙</button></div>`).join("")||"<span class='kv'>none yet</span>";
+    `<div class="projrow"><button class="proj ${rid(p)===project?"sel":""}" data-p="${esc(rid(p))}">${esc(rname(p))}
+     <span class="kv">${esc(p.state)}</span></button><button class="gear" data-gear="project" data-name="${esc(rid(p))}" title="project settings">⚙</button></div>`).join("")||"<span class='kv'>none yet</span>";
   document.querySelectorAll("#projects .proj").forEach(b=>b.onclick=()=>loadItems(b.dataset.p));
   $("#dataserver").innerHTML=`<span class="dot on"></span><b>iter_data</b> ${esc(location.host)} <button class="gear" data-gear="data" title="iter_data settings">⚙</button>`;
   const now=Date.now();
@@ -696,7 +714,7 @@ async function load(){
     // every account's windows + when it is next under its stop% (engine-owned, soonest first)
     const accts=Array.isArray(e.accounts)?e.accounts:[];
     // an account whose token is not set in the engine's env_file (a.token==="unset", engines since 2026-09-11) is marked, not timed
-    const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${a.token==="unset"?"⚠ "+esc(a.name)+" no token":esc(a.name)+" "+esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
+    const acctList=accts.length?`<br><span class="kv">${accts.map(a=>`<span title="${esc(acctTitle(a))}">${a.token==="unset"?"⚠ "+esc(nameOf("account",a.name))+" no token":esc(nameOf("account",a.name))+" "+esc(a.available_at&&a.available_at>Date.now()/1000?fmtDur(a.available_at):(a.available_at?"now":"?"))}</span>`).join(" · ")}</span>`:"";
     const nx=e.next&&e.next.account?e.next:null;
     const usage=holding?`<br>• 5h <b>--</b><br>• 7d <b>--</b>`
       +(nx?`<br>• next: <b>${esc(nx.account)}</b> <span title="at ${esc(at(nx.available_at))}">${esc(nx.available_at>Date.now()/1000?"in "+fmtDur(nx.available_at):"resetting…")}</span>`:`<br>• next: <span class="kv">no reset time on record</span>`)
@@ -704,16 +722,15 @@ async function load(){
       :u?win("5h",u.five_hour_pct,u.five_hour_resets_at)+win("7d",u.seven_day_pct,u.seven_day_resets_at)
       +(u.is_using_overage?`<br>• <b title="a window is exhausted and requests are billing as extra usage">OVERAGE</b>`:"")
       +(u.age_sec!=null&&u.age_sec>900?`<br><span class="kv" title="snapshot age">usage snapshot ${esc(Math.round(u.age_sec/60))}m old</span>`:""):"<br>• usage: —";
-    const acctLabel=holding?"":` on <b title="${esc(accts.map(acctTitle).join("\n"))}">${esc((u&&u.account!=null?u.account:e.account)||"default")}</b>`;
+    const acctLabel=holding?"":` on <b title="${esc(accts.map(acctTitle).join("\n"))}">${esc(nameOf("account",(u&&u.account!=null?u.account:e.account))||"default")}</b>`;
     const t=e.test_result;
-    const test=e.test_requested?`<span class="kv" data-testing="${esc(e.name)}">testing…</span>`
+    const test=e.test_requested?`<span class="kv" data-testing="${esc(rid(e))}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
-    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(e.name)}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b>${esc(e.name)}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${usage}
+    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(rid(e))}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b title="id: ${esc(rid(e))}">${esc(rname(e))}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${usage}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")}${e.host?" · "+esc(e.host):""}
-      <br>serves: ${servesOf(e).map(p=>`<a class="sgl" data-sgraph="project:${esc(p)}">${esc(p)}</a>`).join(", ")||"—"} <a class="sgl" data-sgraph="iter_engine:${esc(e.name)}" title="this engine in the settings graph">↗</a>
-      <br><button class="ghost sm" data-test="${esc(e.name)}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
+      <br>serves: ${servesOf(e).map(p=>`<a class="sgl" data-sgraph="project:${esc(p)}">${esc(nameOf("project",p))}</a>`).join(", ")||"—"} <a class="sgl" data-sgraph="iter_engine:${esc(rid(e))}" title="this engine in the settings graph">↗</a>
+      <br><button class="ghost sm" data-test="${esc(rid(e))}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
   }).join("")||"<div class='eng kv'>no engines registered</div>";
-  renderAccounts(engines);
   document.querySelectorAll("[data-test]").forEach(b=>b.onclick=async ev=>{
     ev.stopPropagation();
     const name=b.dataset.test;b.disabled=true;b.textContent="testing…";
@@ -728,29 +745,31 @@ async function load(){
       alert(`No answer from ${name} within 2 minutes — is the engine running?`);await load();
     }catch(e){alert("test failed: "+e.message);await load();}
   });
-  $("#agents").innerHTML=agents.map(a=>`<div class="eng compact"><button class="gear" data-gear="agent" data-name="${esc(a.name)}" title="${isAdmin()?"edit agent":"view agent (admins edit)"}">${isAdmin()?"⚙":"👁"}</button><b>${esc(a.name)}</b> <span class="kv">${esc(a.model||"—")} · max ${esc(a.max??"—")}</span></div>`).join("")||"<div class='eng kv'>no agents defined</div>";
+  $("#agents").innerHTML=agents.map(a=>`<div class="eng compact"><button class="gear" data-gear="agent" data-name="${esc(rid(a))}" title="${isAdmin()?"edit agent":"view agent (admins edit)"}">${isAdmin()?"⚙":"👁"}</button><b>${esc(rname(a))}</b> <span class="kv">${esc(a.model||"—")} · max ${esc(a.max??"—")}</span></div>`).join("")||"<div class='eng kv'>no agents defined</div>";
   const tooling=await api("/api/tooling").catch(()=>[]);
   const kinds=[["shared","shared rules"],["capability","capabilities"],["source","source instructions"],["prepost","prose pre/post steps"],["critic","critic persona"]];
   $("#tooling").innerHTML=kinds.map(([k,label])=>{const rows=tooling.filter(t=>t.kind===k);if(!rows.length)return "";
-    return `<div class="eng compact"><span class="kv">${esc(label)}</span><br>${rows.map(t=>`<button class="gear" data-gear="tooling" data-name="${esc(t.name)}" title="${esc(t.desc||"")}">${isAdmin()?"⚙":"👁"} ${esc(t.name)}</button>`).join(" ")}</div>`;}).join("")||"<div class='eng kv'>none — import with iter_data --migrate-v2 --migrate-scope tooling, or add one</div>";
+    return `<div class="eng compact"><span class="kv">${esc(label)}</span><br>${rows.map(t=>`<button class="gear" data-gear="tooling" data-name="${esc(rid(t))}" title="${esc(t.desc||"")}">${isAdmin()?"⚙":"👁"} ${esc(rname(t))}</button>`).join(" ")}</div>`;}).join("")||"<div class='eng kv'>none — import with iter_data --migrate-v2 --migrate-scope tooling, or add one</div>";
   const canAdmin=isAdmin();
   document.querySelectorAll("[data-sgraph]").forEach(a=>a.onclick=ev=>{ev.preventDefault();ev.stopPropagation();openSettingsGraph(a.dataset.sgraph);});
   $("#map-open").onclick=()=>openMap().catch(e=>alert("map: "+e.message));
   $("#agent-add").hidden=!canAdmin;$("#tooling-add").hidden=!canAdmin;$("#engine-add").hidden=!canAdmin;
   document.querySelectorAll("[data-gear]").forEach(g=>g.onclick=ev=>{ev.stopPropagation();openSettings(g.dataset.gear,g.dataset.name);});
-  {const hp=hashParams().get("p");if(hp&&projects.some(p=>p.name===hp))project=hp;}
+  {const hp=hashParams().get("p");if(hp&&projects.some(p=>rid(p)===hp))project=hp;}
   // the tab the URL (or the last visit) asked for, read before loadItems rewrites the hash
   let t=hashParams().get("tab");if(!t){try{t=localStorage.getItem("iter5.tab");}catch(e){}}
   if(["intro","queue","graph","rag","settings"].includes(t))tab=t;
-  if(projects.length&&!project)project=projects[0].name;
+  if(projects.length&&!project)project=rid(projects[0]);
   fillProjPick();
+  renderAccounts(engines);
   if(project)await loadItems(project);else renderCounts();
   await setTab(tab);
 }
 
 async function loadItems(p){
   const changed=project!==p;
-  project=p;$("#wi-proj").textContent="— "+p;
+  project=p;$("#wi-proj").textContent="— "+nameOf("project",p);
+  if(changed)renderAccounts(enginesCache);
   if($("#projpick").value!==p)$("#projpick").value=p;
   if(changed||true)writeTabHash();
   if(tab==="graph"&&graphDrawnFor!==p)loadGraph(p);
@@ -1295,7 +1314,7 @@ function knownTags(exclude){
   return [...seen.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
 }
 function pinnedTags(exclude){
-  const p=projectsCache.find(x=>x.name===project);
+  const p=projectsCache.find(x=>rid(x)===project);
   const inUse=new Map(knownTags(new Set()));
   const seen=new Set();
   return ((p&&p.pinned_tags)||[]).map(t=>String(t||"").trim()).filter(t=>t&&!t.startsWith(BLOCKED_PREFIX)&&!exclude.has(t)&&!seen.has(t)&&seen.add(t))
@@ -1349,7 +1368,7 @@ form.addEventListener("click",e=>{if(e.target===form)form.close();});
 function openForm(mode,src){
   const i=src||{};
   const title={create:"New workitem",edit:"Edit workitem — "+(i.id||"").slice(-8),followup:"Create follow-up request"}[mode];
-  const agentNames=[...new Set([...(agentsCache.map(a=>a.name)),"exec",i.agent].filter(Boolean))];
+  const agentNames=[...new Set([...(agentsCache.map(rid)),"exec",i.agent].filter(Boolean))];
   const lines=a=>(a||[]).join("\n");
   const tagsText=(i.tags||[]).map(t=>t.color?`${t.text}:${t.color}`:t.text).join(", ");
   /* the test sweep template stays a schedule: scheduled (on) or paused (off) */
@@ -1462,7 +1481,7 @@ function settingsBox(title,fields,rec,onSave,{extra="",canSave=true,note=""}={})
 }
 
 const PROJECT_FIELDS=[
-  {key:"name",type:"readonly"},
+  {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},
   {key:"desc",label:"description",type:"textarea",rows:5,help:"sent to every agent as project context, on every run"},
   {key:"state",type:"select",options:["Running","Draining","Stopped"],help:"the COMMANDED state; every engine serving this project follows it"},
   {key:"gitrepo",label:"git repo",type:"text"},
@@ -1483,7 +1502,7 @@ const PROJECT_FIELDS=[
   {key:"commit_extra_paths",label:"commit extra paths",type:"json",rows:2,emptyValue:[],help:'the engine\'s end-of-run commit (and the close-gate evidence) is limited to an item\'s lock scope so it never sweeps another agent\'s unfinished files; list here the paths agents write OUTSIDE their scope by design — git pathspecs relative to the checkout, globs allowed: ["Agent_Recommendations.md","*.agentmemory.iter.md"]'},
 ];
 const ENGINE_FIELDS=[
-  {key:"name",type:"readonly"},{key:"state",type:"readonly",help:"engine-reported (actual)"},{key:"last_seen",type:"readonly"},{key:"account",type:"readonly"},
+  {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},{key:"state",type:"readonly",help:"engine-reported (actual)"},{key:"last_seen",type:"readonly"},{key:"account",type:"readonly"},
   {key:"usage",type:"readonly",help:"active account's 5h / 7d usage, refreshed by every claude session and the test button"},{key:"test_result",type:"readonly"},
   {key:"host",type:"text"},{key:"ticksec",label:"tick (sec)",type:"number"},{key:"full_refresh_minutes",label:"full refresh (min)",type:"number",help:"unconditional reload cadence — the seq fallback"},
   {key:"probe_stale_min",label:"usage probe (min)",type:"number",default:20,help:"when idle, every account whose usage snapshot is older than this gets one direct 1-token probe (~9 tokens) so the ladder sees real 5h/7d numbers; 0 = off"},
@@ -1491,7 +1510,7 @@ const ENGINE_FIELDS=[
   {key:"projects",label:"projects served",type:"readonly",help:'iter5: the projects an engine serves are <b>serves</b> edges in the settings graph (topdir and read_only live on the edge)'},
 ];
 const AGENT_FIELDS=[
-  {key:"name",type:"readonly"},{key:"desc",label:"description",type:"text"},
+  {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},{key:"desc",label:"description",type:"text"},
   {key:"max",type:"number",help:"default concurrent cap (project override wins)"},{key:"timeoutsec",label:"timeout (sec)",type:"number"},
   {key:"model",type:"text",help:"claude model alias: opus · sonnet · haiku · fable"},{key:"flags",type:"text",help:"extra claude CLI flags"},
   {key:"childstate",label:"child state",type:"text",help:"state for workitems this agent creates (default queued)"},
@@ -1500,7 +1519,7 @@ const AGENT_FIELDS=[
   {key:"promptbody",label:"prompt body",type:"textarea",rows:18,help:"the agent's full role prompt; project description + workitem request are appended at run time"},
 ];
 const userFields=(self)=>[
-  {key:"user",type:"readonly"},
+  {key:"user",label:"id",type:"readonly",help:"the stable id — sign-in tokens carry it; it never changes"},{key:"name",type:"text",help:"the display name — you can also sign in with it"},
   self?{key:"role",type:"readonly"}:{key:"role",type:"select",options:["user","engine","admin"]},
   {key:"email",type:"text"},
   {key:"password",type:"password",help:"set a new password; blank keeps the current one"},
@@ -1523,10 +1542,10 @@ async function openSettings(kind,name){
 async function projectSettings(name){
   const [rec,agents]=await Promise.all([api("/api/projects/"+encodeURIComponent(name)),api("/api/agents").catch(()=>[])]);
   const extra=`<h3>Agents (global definitions; override per project above)</h3>
-    <div class="list">${agents.map(a=>`<button class="ghost sm" data-agent="${esc(a.name)}">⚙ ${esc(a.name)}</button>`).join("")||"<span class='kv'>none</span>"}</div>
+    <div class="list">${agents.map(a=>`<button class="ghost sm" data-agent="${esc(rid(a))}">⚙ ${esc(rname(a))}</button>`).join("")||"<span class='kv'>none</span>"}</div>
     <div class="kv" style="margin-top:6px">promptbody, model, caps and the close gate live on the agent; the project's "agent overrides" field wins where set.</div>`;
-  const extra0=`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="project:${esc(name)}">Engines, accounts and agents of ${esc(name)} in the settings graph ↗</button></div>`;
-  settingsBox(`Project settings — ${name}`,PROJECT_FIELDS,rec,async(vals)=>{
+  const extra0=`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="project:${esc(name)}">Engines, accounts and agents of ${esc(rname(rec))} in the settings graph ↗</button></div>`;
+  settingsBox(`Project settings — ${rname(rec)}`,PROJECT_FIELDS,rec,async(vals)=>{
     const fresh=await api("/api/projects/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
     await api("/api/projects/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
@@ -1538,7 +1557,7 @@ async function projectSettings(name){
 async function agentSettings(name){
   const rec=await api("/api/agents/"+encodeURIComponent(name));
   const extra=isAdmin()?`<div style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px;text-align:right"><button class="danger sm" id="agent-del">Delete agent</button></div>`:"";
-  settingsBox(`Agent — ${name}`,AGENT_FIELDS,rec,async(vals)=>{
+  settingsBox(`Agent — ${rname(rec)}`,AGENT_FIELDS,rec,async(vals)=>{
     const fresh=await api("/api/agents/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
     await api("/api/agents/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
@@ -1551,7 +1570,7 @@ async function agentSettings(name){
   };
 }
 const TOOLING_FIELDS=[
-  {key:"name",type:"readonly"},
+  {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},
   {key:"kind",type:"select",options:["shared","capability","source","prepost","critic"],help:"shared: appended to every prompt · capability: indexed in every prompt, full text via `iter capability <name>` · source: by requester (user | agent | error) · prepost: a prose step run as its own turn when a work item lists it · critic: the `iter critreview` persona"},
   {key:"desc",label:"one-line description",type:"text",help:"what the capability index shows"},
   {key:"model",type:"text",help:"critic only"},{key:"flags",type:"text",help:"critic only"},{key:"timeoutsec",label:"timeout (sec)",type:"number",nullable:true,help:"critic only"},
@@ -1560,7 +1579,7 @@ const TOOLING_FIELDS=[
 async function toolingSettings(name){
   const rec=await api("/api/tooling/"+encodeURIComponent(name));
   const extra=isAdmin()?`<div style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px;text-align:right"><button class="danger sm" id="tool-del">Delete tooling row</button></div>`:"";
-  settingsBox(`Agent tooling — ${name}`,TOOLING_FIELDS,rec,async(vals)=>{
+  settingsBox(`Agent tooling — ${rname(rec)}`,TOOLING_FIELDS,rec,async(vals)=>{
     const fresh=await api("/api/tooling/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
     await api("/api/tooling/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
@@ -1575,7 +1594,7 @@ async function toolingSettings(name){
 async function engineSettings(name){
   const rec=await api("/api/engines/"+encodeURIComponent(name));
   const extra=`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="iter_engine:${esc(name)}">This engine in the settings graph ↗</button></div>`+(isAdmin()?`<div style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px;text-align:right"><button class="ghost sm" id="eng-del" style="color:var(--bad);border-color:var(--bad)">delete engine record…</button></div>`:"");
-  settingsBox(`Engine — ${name}`,ENGINE_FIELDS,rec,async(vals)=>{
+  settingsBox(`Engine — ${rname(rec)}`,ENGINE_FIELDS,rec,async(vals)=>{
     const fresh=await api("/api/engines/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
     await api("/api/engines/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
@@ -1595,11 +1614,11 @@ async function userSettings(name){
   let extra="";
   if(isAdmin()){
     const users=await api("/api/users").catch(()=>[]);
-    extra=`<h3>All users (admin)</h3><div class="list">${users.map(u=>`<button class="ghost sm" data-user="${esc(u.user)}">⚙ ${esc(u.user)} <span class="kv">${esc(u.role)}</span></button>`).join("")}</div>
+    extra=`<h3>All users (admin)</h3><div class="list">${users.map(u=>`<button class="ghost sm" data-user="${esc(rid(u))}">⚙ ${esc(rname(u))} <span class="kv">${esc(u.role)}</span></button>`).join("")}</div>
       <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="nu-name" placeholder="new user name" style="width:150px"><input id="nu-pass" type="password" placeholder="password" style="width:150px">
       <select id="nu-role"><option>user</option><option>viewer</option><option>engine</option><option>admin</option></select><button class="sm" id="nu-add">add user</button></div>`;
   }
-  settingsBox(self?`My settings — ${name}`:`User — ${name}`,userFields(self&&!isAdmin()),rec,async(vals)=>{
+  settingsBox(self?`My settings — ${rname(rec)}`:`User — ${rname(rec)}`,userFields(self&&!isAdmin()),rec,async(vals)=>{
     const fresh=await api("/api/users/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
     await api("/api/users/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
@@ -1813,7 +1832,7 @@ function hashParams(){return new URLSearchParams(location.hash.slice(1));}
 window.addEventListener("hashchange",async()=>{
   if(!token)return;
   const h=hashParams(),hp=h.get("p"),ht=h.get("tab");
-  if(hp&&hp!==project&&(projectsCache||[]).some(x=>x.name===hp)){
+  if(hp&&hp!==project&&(projectsCache||[]).some(x=>rid(x)===hp)){
     if(ht)tab=ht;
     await loadItems(hp);
     graphDrawnFor=null;
@@ -1830,8 +1849,12 @@ function writeTabHash(){
 }
 function fillProjPick(){
   const sel=$("#projpick");
-  sel.innerHTML=(projectsCache||[]).map(p=>`<option value="${esc(p.name)}">${esc(p.name)}</option>`).join("");
-  if(project)sel.value=project;
+  const ps=projectsCache||[];
+  // an empty picker looks broken: say why it is empty
+  sel.innerHTML=ps.length?ps.map(p=>`<option value="${esc(rid(p))}">${esc(rname(p))}</option>`).join("")
+    :`<option value="" disabled selected>no projects yet</option>`;
+  sel.disabled=!ps.length;
+  if(project&&ps.length)sel.value=project;
   sel.onchange=()=>{loadItems(sel.value);};
 }
 function sizeGraph(){const h=Math.max(300,window.innerHeight-$("#top").offsetHeight)+"px";["#tab-graph","#tab-settings"].forEach(s=>{const el=$(s);if(el)el.style.height=h;});}
@@ -1852,7 +1875,7 @@ async function setTab(t){
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 async function showSettings(){
   if(!window.IterSettings){$("#tab-settings").innerHTML="<div id='g-loading'>settings.js did not load</div>";return;}
-  const ctx={api,isAdmin:isAdmin(),myRole,openProject:async name=>{if((projectsCache||[]).some(p=>p.name===name)){await loadItems(name);graphDrawnFor=null;await setTab("graph");}},
+  const ctx={api,isAdmin:isAdmin(),myRole,openProject:async name=>{if((projectsCache||[]).some(p=>rid(p)===name)){await loadItems(name);graphDrawnFor=null;await setTab("graph");}},
     onChange:()=>{load().catch(()=>{});}};
   if(!settingsMounted){settingsMounted=true;await IterSettings.mount($("#tab-settings"),ctx);}else await IterSettings.show(ctx);
 }
@@ -1900,11 +1923,11 @@ document.addEventListener("keydown",e=>{
 let introMounted=false;
 function introCtx(){return {api,project,isAdmin:isAdmin(),
   // the slides point at iter's own map: show that project (when this server has it), then the node
-  openGraph:async(q,p)=>{const own=p||["iter5","iter"].find(n=>projectsCache.some(x=>x.name===n));if(own&&projectsCache.some(x=>x.name===own)&&project!==own)await loadItems(own);
+  openGraph:async(q,p)=>{const own=p||["iter5","iter"].find(n=>projectsCache.some(x=>rid(x)===n));if(own&&projectsCache.some(x=>rid(x)===own)&&project!==own)await loadItems(own);
     await setTab("graph");setTimeout(()=>{if(q&&window.IterGraph&&IterGraph.focus)IterGraph.focus(q);},700);},
   openSettings:id=>openSettingsGraph(id||""),
   openQueue:()=>setTab("queue"),reloadProjects:()=>load(),
-  selectProject:async name=>{await load();if(projectsCache.some(x=>x.name===name)){await loadItems(name);graphDrawnFor=null;}}};}
+  selectProject:async name=>{await load();if(projectsCache.some(x=>rid(x)===name)){await loadItems(name);graphDrawnFor=null;}}};}
 function showIntro(){
   if(!window.IterIntro){$("#tab-intro").innerHTML="<div id='g-loading'>intro.js did not load</div>";return;}
   if(!introMounted){IterIntro.mount($("#tab-intro"),introCtx());introMounted=true;}else IterIntro.show(introCtx());

@@ -314,17 +314,18 @@
     slot.innerHTML = `<h4>History <span class="muted">(last ${logs.length})</span></h4><ul class="g-testlogs">${logs.map(row).join('')}</ul>`;
     slot.querySelectorAll('[data-open]').forEach((a) => { a.onclick = () => S.ctx.openItem && S.ctx.openItem(a.dataset.open); });
   }
+  /** Engines to build on: `name` is the engine's stable id (what the server takes), `label` its display name. */
   async function engineChoices() {
-    let names = []; const live = new Map();
+    const label = new Map(); const live = new Map();
     try {
       const sg = await S.ctx.api('/api/settings/graph');
-      names = (sg.nodes || []).filter((n) => n.type === 'iter_engine' && !n.placeholder && !n.deactivated).map((n) => n.name || String(n.id).replace(/^iter_engine:/, ''));
+      (sg.nodes || []).filter((n) => n.type === 'iter_engine' && !n.placeholder && !n.deactivated).forEach((n) => { label.set(n.key || String(n.id).replace(/^iter_engine:/, ''), n.name); });
     } catch (e) { /* settings graph not there yet */ }
     try {
       const es = await S.ctx.api('/api/engines');
-      (es || []).forEach((e) => { if (!names.includes(e.name)) names.push(e.name); const t = Date.parse(e.last_seen || ''); live.set(e.name, t && Date.now() - t < 3 * (e.ticksec || 5) * 1000 + 5000); });
+      (es || []).forEach((e) => { const id = e.id || e.name; if (!label.has(id)) label.set(id, e.name || id); const t = Date.parse(e.last_seen || ''); live.set(id, t && Date.now() - t < 3 * (e.ticksec || 5) * 1000 + 5000); });
     } catch (e) { /* none */ }
-    return names.filter(Boolean).sort().map((n) => ({ name: n, online: !!live.get(n) }));
+    return [...label.keys()].filter(Boolean).sort().map((n) => ({ name: n, label: label.get(n) || n, online: !!live.get(n) }));
   }
   async function openBuild() {
     const proj = S.ctx.project;
@@ -332,7 +333,7 @@
     const engines = await engineChoices();
     const pnode = S.data.nodes.find((n) => n.nodetype === 'project');
     const gitrepo = pnode && pnode.front && pnode.front.gitrepo;
-    const opts = engines.map((e) => `<option value="${esc(e.name)}">${esc(e.name)}${e.online ? ' — online' : ' — offline'}</option>`).join('');
+    const opts = engines.map((e) => `<option value="${esc(e.name)}">${esc(e.label)}${e.online ? ' — online' : ' — offline'}</option>`).join('');
     const firstOnline = (engines.find((e) => e.online) || engines[0] || {}).name || '';
     const body = `<p class="kit-text">The engine creates the folder, runs <code>git init</code>${gitrepo ? ` (with remote <code>${esc(gitrepo)}</code>)` : ''}, writes every designed node as a <code>*.iter.md</code> file and makes the first commit, <code>iter: build from design</code>. Later edits here reach the repository the same way, as pending writes.</p>
       <label class="kit-field"><span>Engine</span>${engines.length ? `<select id="b-eng">${opts}</select>` : `<input id="b-eng" type="text" placeholder="engine name" autocomplete="off">`}
@@ -347,13 +348,14 @@
         const pl = d.querySelector('#b-plan'); pl.onchange = () => { d.querySelector('#b-notewrap').classList.toggle('hidden', !pl.checked); };
       },
       onButton: async (v, d) => {
-        const engine = d.querySelector('#b-eng').value.trim(); const topdir = d.querySelector('#b-top').value.trim();
+        let engine = d.querySelector('#b-eng').value.trim(); const topdir = d.querySelector('#b-top').value.trim();
         if (!engine) throw new Error('Pick the engine that will hold the repository.');
         // the server refuses an engine it has no record of (404): say so here instead of sending it
         const known = engines.length ? engines : await engineChoices();
-        if (!known.some((e) => e.name === engine)) {
+        const hit = known.find((e) => e.name === engine || e.label === engine); if (hit) engine = hit.name;
+        if (!hit) {
           d.querySelector('#b-eng').classList.add('kit-bad');
-          throw new Error(known.length ? `There is no engine called "${engine}". Registered: ${known.map((e) => e.name).join(', ')}.`
+          throw new Error(known.length ? `There is no engine called "${engine}". Registered: ${known.map((e) => e.label).join(', ')}.`
             : `There is no engine called "${engine}" yet: start it once on that machine (the command above), then Build again.`);
         }
         if (!topdir) throw new Error('Say where the repository goes on that machine.');

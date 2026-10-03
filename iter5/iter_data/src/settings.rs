@@ -2,7 +2,8 @@
 //! edge. Node records stay in their tables (`project`, `engine`, `agent`,
 //! `agent_tooling`, `webui_user`) plus `account`, `provider` and
 //! `workitem_type`; edges are rows of `sys_edge` (pk "edge", sk = edge id).
-//! Node id = `<type>:<name>` (iter_core::settings).
+//! Node id = `<type>:<id>` (iter_core::settings): the record's stable id;
+//! its `name` is a display name that can be renamed (`settle_name`).
 //!
 //! Placeholders (`<type>:_deactivated`) and `iter_data:self` are virtual:
 //! never stored, always present, never deletable. An edge with an endpoint on
@@ -160,7 +161,7 @@ pub async fn on_project_created(store: &dyn Storage, name: &str, creator: Option
     }
     let overrides = rec.as_ref().and_then(|r| r.get("agents")).cloned().unwrap_or(json!({}));
     for a in store.scan("agent").await? {
-        let an = body_str(&a, "name");
+        let an = cs::record_id(&a);
         if an.is_empty() {
             continue;
         }
@@ -175,7 +176,7 @@ pub async fn on_project_created(store: &dyn Storage, name: &str, creator: Option
 }
 
 fn is_shared_tooling(row: &Value) -> bool {
-    body_str(row, "kind") == "shared" || body_str(row, "name") == "_shared"
+    body_str(row, "kind") == "shared" || cs::record_id(row) == "_shared"
 }
 
 /// A new agent: enabled on every project (`runs`), `handles queued`, and
@@ -183,7 +184,7 @@ fn is_shared_tooling(row: &Value) -> bool {
 pub async fn on_agent_created(store: &dyn Storage, name: &str) -> Result<(), StorageError> {
     let aid = node_id("agent", name);
     for p in store.scan("project").await? {
-        let pn = body_str(&p, "name");
+        let pn = cs::record_id(&p);
         if pn.is_empty() {
             continue;
         }
@@ -193,7 +194,7 @@ pub async fn on_agent_created(store: &dyn Storage, name: &str) -> Result<(), Sto
     ensure_edge(store, "handles", &aid, &node_id("workitem_type", "queued"), json!({})).await?;
     for t in store.scan("agent_tooling").await? {
         if is_shared_tooling(&t) {
-            ensure_edge(store, "uses", &node_id("agent_tools", &body_str(&t, "name")), &aid, json!({})).await?;
+            ensure_edge(store, "uses", &node_id("agent_tools", &cs::record_id(&t)), &aid, json!({})).await?;
         }
     }
     Ok(())
@@ -204,9 +205,9 @@ pub async fn on_tooling_created(store: &dyn Storage, row: &Value) -> Result<(), 
     if !is_shared_tooling(row) {
         return Ok(());
     }
-    let tid = node_id("agent_tools", &body_str(row, "name"));
+    let tid = node_id("agent_tools", &cs::record_id(row));
     for a in store.scan("agent").await? {
-        let an = body_str(&a, "name");
+        let an = cs::record_id(&a);
         if !an.is_empty() {
             ensure_edge(store, "uses", &tid, &node_id("agent", &an), json!({})).await?;
         }
@@ -291,12 +292,12 @@ pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
     let engines = store.scan("engine").await?;
     let agents = store.scan("agent").await?;
     let tooling = store.scan("agent_tooling").await?;
-    let project_names: HashSet<String> = projects.iter().map(|p| body_str(p, "name")).filter(|s| !s.is_empty()).collect();
+    let project_names: HashSet<String> = projects.iter().map(|p| cs::record_id(p)).filter(|s| !s.is_empty()).collect();
 
     // Engine.projects -> serves (topdir, read_only); hosts
     let mut serving: BTreeMap<String, Vec<String>> = BTreeMap::new(); // project -> engines
     for e in &engines {
-        let en = body_str(e, "name");
+        let en = cs::record_id(e);
         if en.is_empty() {
             continue;
         }
@@ -321,7 +322,7 @@ pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
     }
 
     for p in &projects {
-        let pn = body_str(p, "name");
+        let pn = cs::record_id(p);
         if pn.is_empty() {
             continue;
         }
@@ -358,7 +359,7 @@ pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
         // runs: every agent on every project; Project.agents overrides ride on the edge
         let overrides = p.get("agents").cloned().unwrap_or(json!({}));
         for a in &agents {
-            let an = body_str(a, "name");
+            let an = cs::record_id(a);
             if an.is_empty() {
                 continue;
             }
@@ -368,14 +369,14 @@ pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
         count("hosts", ensure_edge(store, "hosts", ITER_DATA_SELF, &pid, json!({})).await?);
     }
     for a in &agents {
-        let an = body_str(a, "name");
+        let an = cs::record_id(a);
         if an.is_empty() {
             continue;
         }
         let aid = node_id("agent", &an);
         count("handles", ensure_edge(store, "handles", &aid, &node_id("workitem_type", "queued"), json!({})).await?);
         for t in tooling.iter().filter(|t| is_shared_tooling(t)) {
-            count("uses", ensure_edge(store, "uses", &node_id("agent_tools", &body_str(t, "name")), &aid, json!({})).await?);
+            count("uses", ensure_edge(store, "uses", &node_id("agent_tools", &cs::record_id(t)), &aid, json!({})).await?);
         }
     }
     Ok(json!(n))
@@ -391,7 +392,7 @@ pub async fn engines_of_user(store: &dyn Storage, edges: &[SysEdge], sub: &str) 
         .await?
         .iter()
         .filter(|e| body_str(e, "user") == sub)
-        .map(|e| body_str(e, "name"))
+        .map(|e| cs::record_id(e))
         .collect();
     let uid = node_id("user", sub);
     for e in edges.iter().filter(|e| e.edge_type == "owns" && e.from == uid && e.is_active()) {
@@ -534,11 +535,13 @@ fn conflict(msg: impl Into<String>) -> ApiError {
     ApiError::Status(StatusCode::CONFLICT, msg.into())
 }
 
-/// A node's settings as shown (secrets removed; the name lives in the id).
+/// A node's settings as shown (secrets removed; the id and the name are
+/// shown beside them, not among them).
 fn shown_settings(t: &str, rec: &Value) -> Value {
     let mut s = rec.clone();
     if let Some(o) = s.as_object_mut() {
         o.remove("name");
+        o.remove("id");
         if t == "user" {
             o.remove("user");
             o.remove("pwhash");
@@ -561,16 +564,86 @@ fn summary_of(t: &str, rec: &Value) -> String {
     }
 }
 
-fn node_json(id: &str, settings: Value, summary: String) -> Value {
-    let (t, name) = parse_node_id(id).unwrap_or(("", ""));
+/// `{id: "<type>:<key>", type, key, name, …}`: `key` is the record's stable
+/// id, `name` its display name (the key until renamed).
+fn node_json(id: &str, name: &str, settings: Value, summary: String) -> Value {
+    let (t, key) = parse_node_id(id).unwrap_or(("", ""));
     let ph = is_placeholder(id);
-    json!({"id": id, "type": t, "name": name, "deactivated": ph, "placeholder": ph, "settings": settings, "summary": summary})
+    let name = if name.trim().is_empty() { key } else { name };
+    json!({"id": id, "type": t, "key": key, "name": name, "deactivated": ph, "placeholder": ph, "settings": settings, "summary": summary})
+}
+
+/// A stored record as its node.
+fn record_node(t: &str, rec: &Value) -> Value {
+    node_json(&node_id(t, &cs::record_id(rec)), &cs::record_name(rec), shown_settings(t, rec), summary_of(t, rec))
+}
+
+/// Is `name` free to be the display name of the `table` record `id`? Taken
+/// when another record of the type has it as its name or as its id (either
+/// would make a name in a URL or at login ambiguous).
+pub async fn name_free(store: &dyn Storage, table: &str, name: &str, id: &str) -> Result<bool, StorageError> {
+    let n = name.trim();
+    Ok(!store
+        .scan(table)
+        .await?
+        .iter()
+        .any(|r| cs::record_id(r) != id && (cs::record_id(r) == n || cs::record_name(r).trim() == n)))
+}
+
+/// The display name a write of the `table` record `id` keeps: the body's
+/// `name` when it brings one, else the stored name, else the id. A new name
+/// is checked (`check_name`) and must be free (`name_free`). Sets
+/// `body["name"]` and `body["id"]`.
+pub async fn settle_name(store: &dyn Storage, table: &str, id: &str, body: &mut Value) -> Result<(), ApiError> {
+    if !body.is_object() {
+        return Err(bad("the record must be an object"));
+    }
+    let stored = store.get(table, id, NOSK).await?.map(|r| cs::record_name(&r));
+    let asked = body.get("name").and_then(|n| n.as_str()).map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let name = asked.clone().or_else(|| stored.clone()).unwrap_or_else(|| id.to_string());
+    if Some(&name) != stored.as_ref() && name != id {
+        cs::check_name(&name).map_err(bad)?;
+        if !name_free(store, table, &name, id).await? {
+            return Err(conflict(format!("the name '{name}' is taken by another {}", table.trim_start_matches("webui_"))));
+        }
+    }
+    body["name"] = json!(name);
+    body["id"] = json!(id);
+    Ok(())
+}
+
+/// The stable id behind `key` in `table`: `key` itself when a record has it
+/// as its id, else the id of the one record whose display name it is.
+pub async fn resolve_key(store: &dyn Storage, table: &str, key: &str) -> Result<Option<String>, StorageError> {
+    if key.is_empty() || key == cs::PLACEHOLDER {
+        return Ok(None);
+    }
+    if store.get(table, key, NOSK).await?.is_some() {
+        return Ok(Some(key.to_string()));
+    }
+    let hits: Vec<String> = store.scan(table).await?.iter().filter(|r| cs::record_name(r).trim() == key.trim()).map(cs::record_id).collect();
+    Ok(if hits.len() == 1 { hits.into_iter().next() } else { None })
+}
+
+/// A node reference as an id: `<type>:<id>` as is, `<type>:<display name>`
+/// resolved to its id (so an edge may be drawn by name).
+pub async fn resolve_node_ref(store: &dyn Storage, r: &str) -> Result<String, StorageError> {
+    let Some((t, key)) = parse_node_id(r) else { return Ok(r.to_string()) };
+    let Some(table) = table_of(t) else { return Ok(r.to_string()) };
+    if is_placeholder(r) {
+        return Ok(r.to_string());
+    }
+    Ok(match resolve_key(store, table, key).await? {
+        Some(id) => node_id(t, &id),
+        None => r.to_string(),
+    })
 }
 
 fn iter_data_self(st: &AppState) -> Value {
     let db = st.store.arango().map(|a| a.db_name().to_string()).unwrap_or_default();
     node_json(
         ITER_DATA_SELF,
+        "self",
         json!({"version": env!("CARGO_PKG_VERSION"), "backend": st.store.backend_name(), "db": db}),
         format!("iter_data {}", env!("CARGO_PKG_VERSION")),
     )
@@ -589,15 +662,14 @@ async fn all_nodes(st: &AppState) -> Result<Vec<Value>, StorageError> {
     let mut out = vec![iter_data_self(st)];
     for t in NODE_TYPES {
         if *t != "iter_data" {
-            out.push(node_json(&placeholder_id(t), json!({}), "placeholder: edges here are inactive".into()));
+            out.push(node_json(&placeholder_id(t), cs::PLACEHOLDER, json!({}), "placeholder: edges here are inactive".into()));
         }
         let Some(table) = table_of(t) else { continue };
         for rec in st.store.scan(table).await? {
-            let name = if *t == "user" { body_str(&rec, "user") } else { body_str(&rec, "name") };
-            if name.is_empty() {
+            if cs::record_id(&rec).is_empty() {
                 continue;
             }
-            out.push(node_json(&node_id(t, &name), shown_settings(t, &rec), summary_of(t, &rec)));
+            out.push(record_node(t, &rec));
         }
     }
     Ok(out)
@@ -631,22 +703,26 @@ async fn node_get(user: AuthUser, State(st): Ctx, Path(id): Path<String>) -> Res
     if id == ITER_DATA_SELF {
         return Ok(Json(iter_data_self(&st)));
     }
-    let (t, _) = parse_node_id(&id).ok_or_else(|| bad(format!("'{id}' is not a node id (<type>:<name>)")))?;
+    let (t, _) = parse_node_id(&id).ok_or_else(|| bad(format!("'{id}' is not a node id (<type>:<id>)")))?;
     if user.role != "admin" && t != "user" && t != "iter_engine" && t != "project" {
         return Err(forbidden());
     }
     if is_placeholder(&id) {
-        return Ok(Json(node_json(&id, json!({}), "placeholder".into())));
+        return Ok(Json(node_json(&id, cs::PLACEHOLDER, json!({}), "placeholder".into())));
     }
     let rec = node_record(st.store.as_ref(), &id).await?.ok_or_else(notfound)?;
-    Ok(Json(node_json(&id, shown_settings(t, &rec), summary_of(t, &rec))))
+    Ok(Json(record_node(t, &rec)))
 }
 
 #[derive(serde::Deserialize)]
 struct NodeCreateReq {
     #[serde(rename = "type")]
     node_type: String,
+    /// the display name; the stable id is minted from it (`mint_id`)
     name: String,
+    /// optional: the stable id to use instead of a minted one
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     settings: Value,
 }
@@ -667,24 +743,26 @@ fn merge(base: &mut Value, patch: &Value) {
     }
 }
 
-/// Validate a node record for its type and fill what the type needs.
-fn check_record(t: &str, name: &str, rec: &mut Value) -> Result<(), ApiError> {
+/// Validate a node record for its type and fill what the type needs. `id`
+/// is the record's stable id; its display `name` is already settled.
+fn check_record(t: &str, id: &str, rec: &mut Value) -> Result<(), ApiError> {
     if !rec.is_object() {
         return Err(bad("settings must be an object"));
     }
+    rec["id"] = json!(id);
     if t == "user" {
-        rec["user"] = json!(name);
+        rec["user"] = json!(id);
         if let Some(pw) = rec.get("password").and_then(|p| p.as_str()).map(String::from) {
             let h = crate::auth::hash_password(&pw).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             rec["pwhash"] = json!(h);
         }
         if let Some(o) = rec.as_object_mut() {
             o.remove("password");
-            o.remove("name");
         }
-    } else {
-        rec["name"] = json!(name);
+    } else if body_str(rec, "name").trim().is_empty() {
+        rec["name"] = json!(id);
     }
+    let name = id;
     let parse = |r: Result<(), serde_json::Error>, what: &str| r.map_err(|e| bad(format!("{what} does not parse: {e}")));
     match t {
         "project" => {
@@ -740,39 +818,57 @@ async fn node_create(user: AuthUser, State(st): Ctx, Json(req): Json<NodeCreateR
         return Err(bad("there is one iter_data node (iter_data:self)"));
     }
     let name = req.name.trim().to_string();
-    if name.is_empty() || name == cs::PLACEHOLDER || name.contains('/') {
-        return Err(bad("name must be non-empty, contain no '/', and not be the placeholder name"));
-    }
-    let id = node_id(t, &name);
+    cs::check_name(&name).map_err(bad)?;
     let store = st.store.as_ref();
-    if node_record(store, &id).await?.is_some() {
-        return Err(conflict(format!("{id} exists already")));
+    let table = table_of(t).unwrap();
+    let rows = store.scan(table).await?;
+    let taken = |c: &str| rows.iter().any(|r| cs::record_id(r) == c || cs::record_name(r).trim() == c);
+    if taken(&name) {
+        return Err(conflict(format!("a {t} named '{name}' exists already")));
     }
+    // the stable id: given, or (work-item states, whose ids are the states)
+    // the name itself, else minted from the name once and never changed
+    let key = if !req.id.trim().is_empty() {
+        let k = req.id.trim().to_string();
+        if k == cs::PLACEHOLDER || k.contains('/') || taken(&k) {
+            return Err(conflict(format!("the id '{k}' is taken or not allowed")));
+        }
+        k
+    } else if t == "workitem_type" {
+        name.clone()
+    } else {
+        cs::mint_id(&name, taken)
+    };
+    let id = node_id(t, &key);
     let mut rec = if req.settings.is_null() { json!({}) } else { req.settings.clone() };
     if t == "project" && rec.get("state").is_none() {
         rec["state"] = json!("Running");
     }
-    check_record(t, &name, &mut rec)?;
-    let table = table_of(t).unwrap();
-    store.put(table, &name, NOSK, &rec).await?;
-    let (bucket, tname) = seq_bucket(t, &name);
+    rec["name"] = json!(name);
+    check_record(t, &key, &mut rec)?;
+    store.put(table, &key, NOSK, &rec).await?;
+    let (bucket, tname) = seq_bucket(t, &key);
     store.bump_seq(&bucket, tname).await?;
     match t {
         "project" => {
-            on_project_created(store, &name, None).await?;
-            crate::sync_hooks::project_created(store, &name).await;
+            on_project_created(store, &key, None).await?;
+            crate::sync_hooks::project_created(store, &key).await;
         }
-        "agent" => on_agent_created(store, &name).await?,
+        "agent" => on_agent_created(store, &key).await?,
         "agent_tools" => on_tooling_created(store, &rec).await?,
-        "iter_engine" => on_engine_registered(store, &name, &body_str(&rec, "user")).await?,
-        "account" => on_account_created(store, &name, &rec).await?,
+        "iter_engine" => on_engine_registered(store, &key, &body_str(&rec, "user")).await?,
+        "account" => on_account_created(store, &key, &rec).await?,
         _ => {}
     }
-    Ok(Json(node_json(&id, shown_settings(t, &rec), summary_of(t, &rec))))
+    let rec = node_record(store, &id).await?.unwrap_or(rec);
+    Ok(Json(record_node(t, &rec)))
 }
 
 #[derive(serde::Deserialize)]
 struct NodePatchReq {
+    /// a new display name (the id never changes)
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     settings: Value,
 }
@@ -782,22 +878,33 @@ async fn node_patch(user: AuthUser, State(st): Ctx, Path(id): Path<String>, Json
     if is_protected(&id) {
         return Err(bad(format!("{id} is not editable (placeholders and iter_data:self)")));
     }
-    let (t, name) = parse_node_id(&id).ok_or_else(|| bad(format!("'{id}' is not a node id")))?;
+    let (t, key) = parse_node_id(&id).ok_or_else(|| bad(format!("'{id}' is not a node id")))?;
     let store = st.store.as_ref();
+    let table = table_of(t).unwrap();
     let mut rec = node_record(store, &id).await?.ok_or_else(notfound)?;
     let mut patch = req.settings.clone();
+    // a rename: `name` beside the settings (or, from a generic editor, among them)
+    let rename = req.name.clone().or_else(|| patch.get("name").and_then(|n| n.as_str()).map(String::from));
     if let Some(o) = patch.as_object_mut() {
-        // the name is the id; secrets go through their own keys
+        // the id never changes; secrets go through their own keys
         o.remove("name");
+        o.remove("id");
         o.remove("user");
         o.remove("pwhash");
     }
     merge(&mut rec, &patch);
-    check_record(t, name, &mut rec)?;
-    store.put(table_of(t).unwrap(), name, NOSK, &rec).await?;
-    let (bucket, tname) = seq_bucket(t, name);
+    if let Some(n) = rename {
+        if t == "workitem_type" && n.trim() != key {
+            return Err(bad("work-item states keep their names"));
+        }
+        rec["name"] = json!(n.trim());
+    }
+    settle_name(store, table, key, &mut rec).await?;
+    check_record(t, key, &mut rec)?;
+    store.put(table, key, NOSK, &rec).await?;
+    let (bucket, tname) = seq_bucket(t, key);
     store.bump_seq(&bucket, tname).await?;
-    Ok(Json(node_json(&id, shown_settings(t, &rec), summary_of(t, &rec))))
+    Ok(Json(record_node(t, &rec)))
 }
 
 /// Delete a node record; its edges move to the placeholder (inactive).
@@ -843,8 +950,8 @@ struct EdgeCreateReq {
 /// when absent), settings check; no duplicate (type, from, to) between real
 /// nodes. Returns the edge type.
 async fn check_edge(store: &dyn Storage, edge_type: Option<&str>, from: &str, to: &str, settings: &Value, except: Option<&str>) -> Result<String, ApiError> {
-    let ft = cs::type_of_id(from).ok_or_else(|| bad(format!("'{from}' is not a node id (<type>:<name>)")))?;
-    let tt = cs::type_of_id(to).ok_or_else(|| bad(format!("'{to}' is not a node id (<type>:<name>)")))?;
+    let ft = cs::type_of_id(from).ok_or_else(|| bad(format!("'{from}' is not a node id (<type>:<id>)")))?;
+    let tt = cs::type_of_id(to).ok_or_else(|| bad(format!("'{to}' is not a node id (<type>:<id>)")))?;
     let et = match edge_type.filter(|t| !t.is_empty()) {
         Some(t) => t.to_string(),
         None => edge_type_for(ft, tt).ok_or_else(|| bad(format!("no edge type joins {ft} → {tt}")))?.to_string(),
@@ -871,8 +978,9 @@ async fn check_edge(store: &dyn Storage, edge_type: Option<&str>, from: &str, to
 async fn edge_create(user: AuthUser, State(st): Ctx, Json(req): Json<EdgeCreateReq>) -> Result<Json<Value>, ApiError> {
     user.require_admin()?;
     let settings = if req.settings.is_null() { json!({}) } else { req.settings.clone() };
-    let et = check_edge(st.store.as_ref(), req.edge_type.as_deref(), &req.from, &req.to, &settings, None).await?;
-    let e = new_edge(&et, &req.from, &req.to, &req.tag, settings);
+    let (from, to) = (resolve_node_ref(st.store.as_ref(), &req.from).await?, resolve_node_ref(st.store.as_ref(), &req.to).await?);
+    let et = check_edge(st.store.as_ref(), req.edge_type.as_deref(), &from, &to, &settings, None).await?;
+    let e = new_edge(&et, &from, &to, &req.tag, settings);
     put_edge(st.store.as_ref(), &e).await?;
     Ok(Json(edge_json(&e)))
 }
@@ -912,8 +1020,8 @@ async fn edge_patch(user: AuthUser, State(st): Ctx, Path(id): Path<String>, Json
     user.require_admin()?;
     let store = st.store.as_ref();
     let mut e = get_edge(store, &id).await?.ok_or_else(notfound)?;
-    let from = req.from.clone().unwrap_or_else(|| e.from.clone());
-    let to = req.to.clone().unwrap_or_else(|| e.to.clone());
+    let from = match &req.from { Some(f) => resolve_node_ref(store, f).await?, None => e.from.clone() };
+    let to = match &req.to { Some(t) => resolve_node_ref(store, t).await?, None => e.to.clone() };
     let mut settings = e.settings.clone();
     if let Some(s) = &req.settings {
         if !s.is_object() {
@@ -967,8 +1075,8 @@ async fn edge_copy(user: AuthUser, State(st): Ctx, Path(id): Path<String>, body:
     let req = body.map(|b| b.0).unwrap_or_default();
     let store = st.store.as_ref();
     let src = get_edge(store, &id).await?.ok_or_else(notfound)?;
-    let from = req.from.unwrap_or_else(|| src.from.clone());
-    let to = req.to.unwrap_or_else(|| src.to.clone());
+    let from = match &req.from { Some(f) => resolve_node_ref(store, f).await?, None => src.from.clone() };
+    let to = match &req.to { Some(t) => resolve_node_ref(store, t).await?, None => src.to.clone() };
     check_edge(store, Some(&src.edge_type), &from, &to, &src.settings, None).await?;
     let mut e = new_edge(&src.edge_type, &from, &to, &src.tag, src.settings.clone());
     e.active = src.active || is_placeholder(&src.from) || is_placeholder(&src.to);

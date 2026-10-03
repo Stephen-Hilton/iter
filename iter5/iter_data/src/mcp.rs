@@ -315,6 +315,17 @@ fn enc(s: &str) -> String {
 impl Mcp {
     /// One API call through the real router, as the caller.
     async fn call(&self, c: &Caller, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        // a project (or other record) named by its display name: the router
+        // below sees ids only (names.rs; the HTTP server does this before routing)
+        let resolved = crate::names::resolve_path(self.state.store.as_ref(), path.split('?').next().unwrap_or(path)).await;
+        let owned;
+        let path = match resolved {
+            Some(p) => {
+                owned = match path.split_once('?') { Some((_, q)) => format!("{p}?{q}"), None => p };
+                owned.as_str()
+            }
+            None => path,
+        };
         let mut b = Request::builder().method(method).uri(path).header("authorization", &c.auth);
         let req = match body {
             Some(v) => {
@@ -395,12 +406,12 @@ async fn call_tool(m: &Mcp, c: &Caller, name: &str, args: &Value) -> Result<Valu
             let caps: Vec<&Value> = rows.iter().filter(|r| r["kind"] == "capability").collect();
             let want = a(args, "name");
             if want.is_empty() {
-                return Ok(json!({"capabilities": caps.iter().map(|c| json!({"name": c["name"], "desc": c["desc"]})).collect::<Vec<_>>()}));
+                return Ok(json!({"capabilities": caps.iter().map(|c| json!({"name": c["id"], "title": c["name"], "desc": c["desc"]})).collect::<Vec<_>>()}));
             }
             let w = want.trim_start_matches('_').trim_end_matches(".md");
             caps.iter()
-                .find(|x| x["name"].as_str().map(|n| n == want || n.trim_start_matches('_') == w).unwrap_or(false))
-                .map(|x| json!({"name": x["name"], "body": x["body"]}))
+                .find(|x| ["id", "name"].iter().any(|k| x[*k].as_str().map(|n| n == want || n.trim_start_matches('_') == w).unwrap_or(false)))
+                .map(|x| json!({"name": x["id"], "title": x["name"], "body": x["body"]}))
                 .ok_or_else(|| format!("no capability named '{want}'"))
         }
         "settings_graph" => m.call(c, "GET", "/api/settings/graph", None).await,

@@ -701,7 +701,9 @@ pub async fn ensure_project_node(store: &dyn Storage, project: &str) -> Result<b
     let rec = store.get("project", project, crate::api::NOSK).await?;
     let by = "iter_data";
     let now = nf::now_ts();
-    let mut pdoc = NodeDoc::new(NodeType::Project, project, by, &now);
+    // the project node is named for the project as people see it (its display name)
+    let shown = rec.as_ref().map(iter_core::settings::record_name).filter(|n| !n.is_empty()).unwrap_or_else(|| project.to_string());
+    let mut pdoc = NodeDoc::new(NodeType::Project, &shown, by, &now);
     pdoc.desc = rec.as_ref().and_then(|r| r.get("desc")).and_then(|d| d.as_str()).unwrap_or("").to_string();
     pdoc.path = nf::plan_path(&pdoc, None, nf::Attach::Root, &g.taken_paths(), nf::Naming::Sequence);
     let pdoc = canonical(&pdoc, &now, by);

@@ -154,7 +154,7 @@
     const eng = st.engines || [];
     const live = eng.filter(e => !e.hold);
     const engLine = live.length
-      ? `<span class="rag-ok">●</span> Summary agent: engine <b>${esc(live.map(e => e.name).join(", "))}</b>${live[0].account ? " on " + esc(live[0].account) : ""}`
+      ? `<span class="rag-ok">●</span> Summary agent: engine <b>${esc(live.map(e => e.display || e.name).join(", "))}</b>${live[0].account ? " on " + esc(live[0].account) : ""}`
       : eng.length
         ? `<span class="rag-warn">●</span> engine ${esc(eng[0].name)} is <b>suspended</b> (${esc(eng[0].hold)}) — summaries wait`
         : `<span class="rag-bad">●</span> <b>no live engine serves ${esc(ctx.project)}</b> — documents are searchable by raw text; summaries wait for an engine`;

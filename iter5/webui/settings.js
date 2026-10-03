@@ -59,6 +59,8 @@
   const errMsg = (e) => (e && e.body && e.body.error) || (e && e.message) || String(e);
   const $ = (id) => S.el.querySelector('#s-' + id);
   const nodeName = (id) => { const n = S.byId.get(id); if (!n) return id; return n.placeholder ? `deactivated ${(TYPES[n.type] || {}).label || n.type}` : (n.name || id); };
+  /** a node people may rename: its display name changes, its id (in every edge, token and work item) never does */
+  const canRename = (n) => admin() && n && !n.placeholder && n.type !== 'iter_data' && n.type !== 'workitem_type';
 
   const TEMPLATE = `
 <div class="g-bar">
@@ -102,7 +104,7 @@
     const ids = new Set(nodes.map((n) => n.id));
     // placeholders the server leaves virtual: make sure every type has one to drop on
     Object.keys(TYPES).forEach((t) => { const id = `${t}:${PH}`; if (t !== 'iter_data' && !ids.has(id)) { nodes.push({ id, type: t, name: PH, placeholder: true, deactivated: true, settings: {}, summary: 'placeholder', virtual: true }); ids.add(id); } });
-    nodes.forEach((n) => { n.type = n.type || typeOfId(n.id); n.name = n.name || String(n.id).slice(n.type.length + 1); if (n.name === PH) { n.placeholder = true; } });
+    nodes.forEach((n) => { n.type = n.type || typeOfId(n.id); n.key = n.key || String(n.id).slice(n.type.length + 1); n.name = n.name || n.key; if (n.key === PH) { n.placeholder = true; } });
     const edges = (g.edges || []).filter((e) => e && e.id && ids.has(e.from) && ids.has(e.to));
     S.data = { nodes, edges };
     S.byId = new Map(nodes.map((n) => [n.id, n]));
@@ -306,8 +308,8 @@
       h += `<h2>${esc(nodeName(n.id))}</h2><div class="g-badges"><span class="badge" style="background:${n.placeholder ? '#3a3f48' : t.color}">${esc(t.label || n.type)}</span>${n.placeholder ? '<span class="g-pill">placeholder</span>' : n.deactivated ? '<span class="g-pill">off</span>' : ''}</div>`;
       if (n.summary && !n.placeholder) h += `<div class="simple">${esc(n.summary)}</div>`;
       if (n.placeholder) h += `<div class="simple missing">Drop an edge's end here to switch that edge off; its settings are kept. It cannot be deleted.</div>`;
-      h += `<div class="actions">${btn('configure', admin() && !n.placeholder ? 'Configure…' : 'View settings…', 'g-primary')}${admin() && !n.placeholder ? btn('connect', 'Connect', '', 'draw an edge from here (C)') : ''}${admin() && K().clip.settings ? btn('paste', 'Paste edge', '', '⌘V') : ''}${n.type === 'project' && !n.placeholder && S.ctx.openProject ? btn('open', 'Open project', '', 'its work queue and project graph') : ''}${admin() && !n.placeholder && n.type !== 'iter_data' ? btn('delete', 'Delete…', 'g-danger') : ''}</div>`;
-      h += `<h4>Id</h4><span class="path">${esc(n.id)}</span>`;
+      h += `<div class="actions">${btn('configure', admin() && !n.placeholder ? 'Configure…' : 'View settings…', 'g-primary')}${admin() && !n.placeholder ? btn('connect', 'Connect', '', 'draw an edge from here (C)') : ''}${admin() && K().clip.settings ? btn('paste', 'Paste edge', '', '⌘V') : ''}${canRename(n) ? btn('rename', 'Rename…', '', 'change the display name; the id stays') : ''}${n.type === 'project' && !n.placeholder && S.ctx.openProject ? btn('open', 'Open project', '', 'its work queue and project graph') : ''}${admin() && !n.placeholder && n.type !== 'iter_data' ? btn('delete', 'Delete…', 'g-danger') : ''}</div>`;
+      h += `<h4>Id</h4><span class="path g-id" title="click to copy">${esc(n.id)}</span>${!n.placeholder && n.type !== 'iter_data' ? '<p class="muted">Fixed at creation: edges, sign-in tokens and work items use the id. Renaming changes only the name.</p>' : ''}`;
       if (!n.placeholder) h += `<h4>Settings</h4>${settingsTable(n.settings)}`;
       const out = S.data.edges.filter((e) => e.from === n.id); const inn = S.data.edges.filter((e) => e.to === n.id);
       const list = (arr, other, title) => arr.length ? `<h4>${title} (${arr.length})</h4><ul>${arr.map((e) => `<li><span class="g-eswatch" style="background:${e.active === false ? '#5b6270' : EDGE_COLOR[e.type]}"></span><a class="edge g-elink" data-edge="${esc(e.id)}">${esc(e.type)}${e.tag ? ' · ' + esc(e.tag) : ''}</a> ${nodeLink(other(e))}${e.active === false ? ' <span class="muted">(inactive)</span>' : ''}</li>`).join('')}</ul>` : '';
@@ -334,7 +336,7 @@
     const sel = S.sel; if (!sel) return;
     if (sel.kind === 'node') {
       const n = S.byId.get(sel.id);
-      ({ configure: () => configureNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), delete: () => deleteNode(n), open: () => S.ctx.openProject(n.name) })[k]();
+      ({ configure: () => configureNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), delete: () => deleteNode(n), open: () => S.ctx.openProject(n.key || n.name), rename: () => renameNode(n) })[k]();
     } else {
       const e = S.data.edges.find((x) => x.id === sel.id);
       ({ configure: () => configureEdge(e), copy: () => copyEdge(e), tag: () => tagEdge(e), toggle: () => toggleEdge(e), delete: () => deleteEdge(e) })[k]();
@@ -363,7 +365,7 @@
     cy.on('dbltap', 'node', (e) => { if (!isHelper(e.target)) configureNode(S.byId.get(e.target.id())); });
     cy.on('dbltap', 'edge', (e) => { const r = edgeOf(e.target); if (r) configureEdge(r); });
     const nodeMenu = (e) => { if (isHelper(e.target)) return; const n = S.byId.get(e.target.id()); if (!n) return; select({ kind: 'node', id: n.id });
-      const items = admin() && !n.placeholder ? [{ key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'connect', label: 'Connect from here', kbd: 'C' }, { key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V', disabled: !K().clip.settings }, ...(n.type === 'project' && S.ctx.openProject ? [{ key: 'open', label: 'Open project' }] : []), { sep: true }, { key: 'delete', label: 'Delete…', danger: true, disabled: n.type === 'iter_data' }]
+      const items = admin() && !n.placeholder ? [{ key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'connect', label: 'Connect from here', kbd: 'C' }, { key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V', disabled: !K().clip.settings }, ...(canRename(n) ? [{ key: 'rename', label: 'Rename…' }] : []), ...(n.type === 'project' && S.ctx.openProject ? [{ key: 'open', label: 'Open project' }] : []), { sep: true }, { key: 'delete', label: 'Delete…', danger: true, disabled: n.type === 'iter_data' }]
         : [{ key: 'configure', label: 'View settings…' }, ...(admin() && K().clip.settings ? [{ key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V' }] : [])];
       K().menu(host(), at(e), `${(TYPES[n.type] || {}).label || n.type} · ${nodeName(n.id)}`, items, (k) => act(k)); };
     const edgeMenu = (e) => { const r = edgeOf(e.target); if (!r) return; select({ kind: 'edge', id: r.id });
@@ -408,16 +410,31 @@
     let rec = n;
     try { if (!n.virtual) rec = Object.assign({}, n, await api('/api/settings/nodes/' + enc(n.id))); } catch (e) { /* the graph's copy will do */ }
     const ro = !admin() || n.placeholder;
+    // the display name sits above the settings; the id beside it never changes
+    const nameField = canRename(n) ? [{ key: '__name', label: 'name', value: rec.name || n.name, type: 'text', group: 'Node', help: 'the display name — the id stays the same, so edges, tokens and work items are untouched' }] : [];
     return K().configure({ title: `${(TYPES[n.type] || {}).label || n.type} — ${nodeName(n.id)}`, sub: rec.summary || '', readOnly: ro, allowAdd: !ro,
       meta: [['id', `<span class="g-mono">${esc(n.id)}</span>`], ['type', esc(n.type)], ['edges', String(S.data.edges.filter((e) => e.from === n.id || e.to === n.id).length)]],
       note: ro ? (n.placeholder ? 'A placeholder has no settings: edges that end here are switched off.' : 'Read only — an admin edits.') : 'Each key is one setting. × removes a key; + Add setting adds one.',
-      fields: settingsFields(rec.settings || {}, {}),
+      fields: nameField.concat(settingsFields(rec.settings || {}, {}).map((f) => (nameField.length ? Object.assign(f, { group: 'Settings' }) : f))),
       onSave: async ({ changed, removed }) => {
-        const patch = Object.assign({}, changed); removed.forEach((k) => { patch[k] = null; });
-        if (!Object.keys(patch).length) return true;
-        try { await api('/api/settings/nodes/' + enc(n.id), { method: 'PATCH', body: JSON.stringify({ settings: patch }) }); } catch (e) { throw new Error(errMsg(e)); }
-        toast('Saved', { kind: 'ok' }); reload({ kind: 'node', id: n.id }); if (S.ctx.onChange) S.ctx.onChange(); return true;
+        const body = {}; const patch = {};
+        Object.keys(changed).forEach((k) => { if (k === '__name') body.name = String(changed[k]).trim(); else patch[k] = changed[k]; });
+        removed.forEach((k) => { if (k !== '__name') patch[k] = null; });
+        if (Object.keys(patch).length) body.settings = patch;
+        if (!Object.keys(body).length) return true;
+        if (body.name === '') throw new Error('A name cannot be empty.');
+        try { await api('/api/settings/nodes/' + enc(n.id), { method: 'PATCH', body: JSON.stringify(body) }); } catch (e) { throw new Error(errMsg(e)); }
+        toast(body.name ? `Renamed to ${body.name}` : 'Saved', { kind: 'ok' }); reload({ kind: 'node', id: n.id }); if (S.ctx.onChange) S.ctx.onChange(); return true;
       } });
+  }
+  async function renameNode(n) {
+    if (!canRename(n)) return;
+    const name = await K().ask({ title: `Rename ${nodeName(n.id)}`, label: 'Name', value: n.name || '', required: true, okLabel: 'Rename',
+      help: `The id <code>${esc(n.id)}</code> stays: edges, sign-in tokens and work items keep working. Names are unique among ${esc(((TYPES[n.type] || {}).label || n.type).toLowerCase())}s.` });
+    if (name == null || !String(name).trim() || String(name).trim() === n.name) return;
+    try { await api('/api/settings/nodes/' + enc(n.id), { method: 'PATCH', body: JSON.stringify({ name: String(name).trim() }) }); }
+    catch (er) { toast('Refused: ' + errMsg(er), { kind: 'err', ms: 6000 }); return; }
+    toast(`Renamed to ${String(name).trim()}`, { kind: 'ok' }); await reload({ kind: 'node', id: n.id }); if (S.ctx.onChange) S.ctx.onChange();
   }
   async function configureEdge(e) {
     if (!e) return;
@@ -477,13 +494,13 @@
     let created = null;
     await K().modal({ title: 'New settings node', wide: false,
       body: `<label class="kit-field"><span>Type</span><select id="sn-type">${types.map((t) => `<option value="${t}" ${t === (type || 'iter_engine') ? 'selected' : ''}>${esc(TYPES[t].long)}</option>`).join('')}</select></label>
-        <label class="kit-field"><span>Name</span><input id="sn-name" type="text" autocomplete="off" spellcheck="false" placeholder="letters, digits, - _ ." autofocus><small id="sn-help"></small></label>
-        <p class="kit-text kit-dim">Settings are added afterwards with Configure. Engines also register themselves the first time they start (<code>iter_engine --data-url URL --env-file PATH</code>).</p>`,
+        <label class="kit-field"><span>Name</span><input id="sn-name" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Shop API" autofocus><small id="sn-help"></small></label>
+        <p class="kit-text kit-dim">The node's id is made from this name once and never changes; the name itself can be renamed later. Settings are added afterwards with Configure. Engines also register themselves the first time they start (<code>iter_engine --data-url URL --env-file PATH</code>; its <code>--name</code> is then the engine's id).</p>`,
       buttons: [{ label: 'Cancel', value: null }, { label: 'Create', value: 'ok', primary: true }],
       onOpen: (d) => { const t = d.querySelector('#sn-type'); const h = d.querySelector('#sn-help'); const sync = () => { h.textContent = { project: 'A designed project: build it later from its Project graph. (The wizard on the Intro tab does the same.)', account: 'Connect it to a provider (of), to projects (bills) and to the engines holding its token (holds).', user: 'Set a password from the user gear in the work queue.' }[t.value] || ''; }; t.onchange = sync; sync(); },
       onButton: async (v, d) => {
         const t = d.querySelector('#sn-type').value; const name = d.querySelector('#sn-name').value.trim();
-        if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) throw new Error('A name of letters, digits, dot, dash or underscore.');
+        if (!name || name.length > 100 || name.includes('/')) throw new Error('A name of 1–100 characters, without "/".');
         const r = await api('/api/settings/nodes', { method: 'POST', body: JSON.stringify({ type: t, name, settings: {} }) }).catch((e) => { throw new Error(errMsg(e)); });
         created = (r && r.id) || `${t}:${name}`; S.hide.delete(t);
         return true;
