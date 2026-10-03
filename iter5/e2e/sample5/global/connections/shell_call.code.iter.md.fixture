@@ -1,0 +1,18 @@
+---
+id: 5a000000-0000-4000-8000-000000000007
+name: "Shell call"
+desc: "One script runs another and reads its stdout."
+creator: "e2e"
+teststate: inherit
+connects:
+  from: ["{topdir}/src/greeter/cli/cli.code.iter.md"]
+  to: ["{topdir}/src/greeter/lib/lib.code.iter.md"]
+level: connection
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+A plain process call: `sh script.sh args`, result on stdout.

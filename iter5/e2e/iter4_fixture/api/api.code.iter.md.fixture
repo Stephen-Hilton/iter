@@ -1,0 +1,17 @@
+---
+id: 44444444-4444-4444-8444-444444444444
+name: "API"
+level: container
+description: "Serves orders."
+simple_description: "The shop's front door."
+owner: bespoke
+children:
+  codedirs:   ["{thisfiledir}/"]
+  codenodes:  []
+  inputs:     []
+  outputs:    ["{topdir}/interfaces/api-orders.interface.iter.md", "{topdir}/interfaces/stock-events.interface.iter.md"]
+  bizreqs:    []
+  techreqs:   []
+  testgroups: ["{thisfiledir}/tests/*.testgroup.iter.md"]
+---
+# API

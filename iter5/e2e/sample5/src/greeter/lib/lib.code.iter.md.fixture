@@ -1,0 +1,15 @@
+---
+id: 5a000000-0000-4000-8000-00000000000a
+name: "Greeting library"
+desc: "greet.sh: builds the greeting text."
+creator: "e2e"
+teststate: inherit
+level: component
+children:
+  codedirs:  ["{thisfiledir}/**"]
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+`greet.sh [name]` prints `Hello, <name>` (default World).

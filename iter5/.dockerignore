@@ -1,0 +1,7 @@
+target
+bin
+run
+docs/*
+**/*.db
+**/*.db-*
+!docs/iter4_guide.md

@@ -1,0 +1,11 @@
+{
+  "name": "iter5-webui-playwright",
+  "private": true,
+  "description": "Playwright suite for the iter5 webui against a real iter_data on a throwaway ArangoDB database (run ./run.sh). @playwright/test resolves through node_modules -> ../../../e2e/node_modules (run.sh links it).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

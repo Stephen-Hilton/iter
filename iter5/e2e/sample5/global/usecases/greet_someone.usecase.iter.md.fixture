@@ -1,0 +1,15 @@
+---
+id: 5a000000-0000-4000-8000-000000000005
+name: "Greet someone"
+desc: "A user runs the CLI and gets a greeting."
+creator: "e2e"
+teststate: inherit
+actors: ["{topdir}/global/usecases/user.actor.iter.md"]
+children:
+  codedirs:  []
+  codenodes: ["{topdir}/src/greeter/cli/cli.code.iter.md", "{topdir}/src/greeter/lib/lib.code.iter.md"]
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+The user runs `hello.sh`; the CLI asks the library for the greeting and prints it.

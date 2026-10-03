@@ -1,0 +1,16 @@
+---
+id: 5a000000-0000-4000-8000-000000000009
+name: "Greeter CLI"
+desc: "hello.sh: the command people run."
+creator: "e2e"
+teststate: inherit
+level: container
+owner: bespoke
+children:
+  codedirs:  ["{thisfiledir}/**"]
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+`hello.sh [name]` prints the greeting.

@@ -1,0 +1,11 @@
+---
+id: 66666666-6666-4666-8666-666666666666
+name: "Web"
+level: container
+description: "Shows the shop."
+children:
+  codedirs: ["{thisfiledir}/"]
+  inputs: ["{topdir}/interfaces/api-orders.interface.iter.md", "{topdir}/interfaces/stock-events.interface.iter.md"]
+  testgroups: []
+---
+# Web

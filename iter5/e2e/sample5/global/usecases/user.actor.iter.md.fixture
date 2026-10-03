@@ -1,0 +1,16 @@
+---
+id: 5a000000-0000-4000-8000-000000000006
+name: "User"
+desc: "Whoever runs the CLI in a terminal."
+creator: "e2e"
+teststate: inherit
+drives: ["{topdir}/global/usecases/greet_someone.usecase.iter.md"]
+touches: ["{topdir}/src/greeter/cli/cli.code.iter.md"]
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+A person at a terminal.

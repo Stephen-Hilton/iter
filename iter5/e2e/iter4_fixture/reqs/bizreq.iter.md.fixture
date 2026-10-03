@@ -1,0 +1,11 @@
+---
+id: 22222222-2222-4222-8222-222222222222
+name: "Shop bizreq"
+description: "business rules"
+children:
+  reqpaths: []
+---
+# Shop business rules
+
+- **SHOP-B001** — Every order gets a receipt.
+- **SHOP-B002**: Refunds are allowed for 30 days.

@@ -1,0 +1,14 @@
+---
+id: 5a000000-0000-4000-8000-00000000000b
+name: "Greeter tests"
+desc: "Runs the CLI and checks the greeting."
+creator: "e2e"
+teststate: include
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     ["{thisfiledir}/tests/{thisfilestem}*.sh"]
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+Deterministic checks of the greeting text.

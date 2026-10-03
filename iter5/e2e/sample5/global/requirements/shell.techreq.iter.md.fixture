@@ -1,0 +1,15 @@
+---
+id: 5a000000-0000-4000-8000-000000000004
+name: "Plain POSIX shell"
+desc: "Everything is POSIX shell; no other runtime."
+creator: "e2e"
+teststate: inherit
+status: agreed
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+Use POSIX `sh` only.

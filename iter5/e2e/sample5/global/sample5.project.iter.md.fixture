@@ -1,0 +1,19 @@
+---
+id: 5a000000-0000-4000-8000-000000000001
+name: "sample5"
+desc: "A tiny greeter used by the iter5 end-to-end test."
+creator: "e2e"
+teststate: inherit
+file_naming: sequence
+gitrepo: ""
+scandirs: ["{topdir}/"]
+children:
+  codedirs:  []
+  codenodes: ["{topdir}/src/greeter/greeter.code.iter.md"]
+  tests:     []
+  reqs:      ["{topdir}/global/requirements/*.iter.md"]
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+# sample5
+
+A greeter: `src/greeter/cli/hello.sh` prints a greeting built by `src/greeter/lib/greet.sh`.

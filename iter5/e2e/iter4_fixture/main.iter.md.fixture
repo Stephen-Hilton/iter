@@ -1,0 +1,13 @@
+---
+id: 11111111-1111-4111-8111-111111111111
+projectname: "Demo Shop"
+projectdescription: "Sells things."
+globalscandirs: ["{topdir}/"]
+globalinterfacedir: "{topdir}/interfaces/"
+globalusecasedir: "{topdir}/usecases/"
+actorsfile: "{topdir}/actors.yaml"
+globalcontextfiles: ["{topdir}/reqs/bizreq.iter.md", "{topdir}/reqs/philosophy.iter.md"]
+children:
+  codenodes: ["{thisfiledir}/api/api.code.iter.md", "web/web.code.iter.md"]
+---
+# Demo Shop

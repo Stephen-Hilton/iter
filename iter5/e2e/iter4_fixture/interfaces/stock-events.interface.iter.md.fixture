@@ -1,0 +1,5 @@
+---
+name: stock-events
+kind: event
+description: "stock moved"
+---

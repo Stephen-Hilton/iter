@@ -1,0 +1,9 @@
+---
+id: 88888888-8888-4888-8888-888888888888
+name: "Buy a thing"
+description: "A buyer orders."
+children:
+  codenodes: ["{topdir}/api/api.code.iter.md", "{topdir}/web/web.code.iter.md"]
+  testgroups: []
+---
+# Buy

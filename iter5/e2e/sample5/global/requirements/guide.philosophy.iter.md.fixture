@@ -1,0 +1,14 @@
+---
+id: 5a000000-0000-4000-8000-000000000002
+name: "Guide"
+desc: "Keep it tiny and deterministic."
+creator: "e2e"
+teststate: inherit
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+Keep everything tiny, deterministic and readable by a newcomer.

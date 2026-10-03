@@ -1,0 +1,17 @@
+---
+id: 5a000000-0000-4000-8000-000000000008
+name: "Greeter"
+desc: "The greeter context: a CLI and its library."
+creator: "e2e"
+teststate: inherit
+level: context
+children:
+  codedirs:  ["{thisfiledir}/**"]
+  codenodes: ["{thisfiledir}/cli/cli.code.iter.md", "{thisfiledir}/lib/lib.code.iter.md"]
+  tests:     ["{thisfiledir}/greeter.test.iter.md"]
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+# Greeter
+
+Everything that greets.

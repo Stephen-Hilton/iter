@@ -1,0 +1,29 @@
+# iter5 all-in-one (ArangoDB CE + iter_data). Works the same in Docker Desktop
+# and on a small VM / EC2 instance.
+#   docker compose -f docker/compose.yml up -d --build
+# Secrets come from run/docker.env (written by ./deploy.sh docker from the
+# repo .env: ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_ROOT_PASSWORD).
+name: iter5
+services:
+  iter5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: iter5:latest
+    container_name: iter5
+    restart: unless-stopped
+    ports:
+      - "${ITER_PORT:-8400}:8400"
+      # the Arango web console; bound to localhost only
+      - "127.0.0.1:${ARANGO_HOST_PORT:-8630}:8529"
+    env_file:
+      - path: ../run/docker.env
+        required: false
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:-iter4dev}
+    volumes:
+      - arango:/var/lib/arangodb3
+      - iterdata:/var/lib/iter
+volumes:
+  arango:
+  iterdata:

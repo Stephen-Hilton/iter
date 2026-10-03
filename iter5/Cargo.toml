@@ -1,0 +1,3 @@
+[workspace]
+members = ["iter_core", "iter_data", "iter_engine", "iter_local", "iter_rag"]
+resolver = "2"

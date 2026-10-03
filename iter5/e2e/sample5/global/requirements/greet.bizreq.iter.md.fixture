@@ -1,0 +1,15 @@
+---
+id: 5a000000-0000-4000-8000-000000000003
+name: "Greet the user"
+desc: "The CLI greets whoever runs it."
+creator: "e2e"
+teststate: inherit
+status: agreed
+children:
+  codedirs:  []
+  codenodes: []
+  tests:     []
+  reqs:      []
+timestamps: {create: "2026-10-02 12:00:00Z", last_modified: "2026-10-02 12:00:00Z", last_tested: ""}
+---
+Running the CLI prints `Hello, World` (or the given name).
