@@ -60,7 +60,7 @@ Tabs: **Intro | Work queue | Project graph | GraphRAG | Settings**. The header's
 
 The full format is in spec §2. In short:
 
-- The filename is `<name>.<type>.iter.md`. Types: `project`, `code` (with `level: context|container|component|connection`), `test`, `bizreq`, `techreq` (one requirement per file), `philosophy`, `usecase`, `actor`, and `agentmem` (agent memory, never synced). Any other `*.iter.md` is a plain doc. One `global/<slug>.project.iter.md` replaces `main.iter.md`.
+- The filename is `<name>.<type>.iter.md`. Types: `project`, `code` (with `level: context|container|component|connection`), `test`, `bizreq`, `techreq` (one file per code node holding many `## KEY — title` requirement sections, §2.8), `philosophy`, `usecase`, `actor`, and `agentmem` (agent memory, never synced). Any other `*.iter.md` is a plain doc. One `global/<slug>.project.iter.md` replaces `main.iter.md`.
 - Common frontmatter: `id`, `name`, `desc`, `creator`, `teststate`, `children` (`codedirs`, `codenodes`, `tests`, `reqs`; paths or globs with `{topdir}` / `{thisfiledir}` / …), `timestamps`. Then the markdown body.
 - Graph edges are derived from the files: `codenodes`, `tests`, `reqs`, `supplies` / `connects` (connection nodes replace iter4's interfaces), `drives`, `touches`, `uses`.
 - `iter_core::nodefile::conform` repairs and canonicalises a file (missing keys, legacy keys, key order). It is idempotent, and the server renders every node through the same code.
