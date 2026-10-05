@@ -4,7 +4,7 @@ fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("iter_local_migrate5_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d.canonicalize().unwrap()
+    iter_core::platform::canonicalize(&d).unwrap()
 }
 
 fn put(top: &Path, rel: &str, text: &str) {

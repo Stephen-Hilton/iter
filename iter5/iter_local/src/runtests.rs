@@ -19,7 +19,7 @@
 use iter_core::nodefile::{self, NodeDoc, NodeType};
 use iter_core::testresult::{self, Bucket, Detail, Outcome, TestResult};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -192,7 +192,7 @@ pub fn test_out_dir(id: &str) -> PathBuf {
 /// relative path equals / contains `filter`).
 pub fn run_node(topdir: &Path, doc: &NodeDoc, filter: Option<&str>, timeout_min: u64) -> Result<NodeRun, String> {
     let all = scripts_of(topdir, doc);
-    let rel = |p: &Path| p.strip_prefix(topdir).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string_lossy().into_owned());
+    let rel = |p: &Path| p.strip_prefix(topdir).map(iter_core::platform::slash).unwrap_or_else(|_| iter_core::platform::slash(p));
     let picked: Vec<PathBuf> = all
         .into_iter()
         .filter(|p| filter.map(|f| { let r = rel(p); r == f || r.ends_with(&format!("/{f}")) || p.file_name().is_some_and(|n| n.to_string_lossy() == f) }).unwrap_or(true))
@@ -243,7 +243,7 @@ fn not_run(script: &str, name: &str, id: &str, detail: String) -> ScriptRun {
 /// takes the whole tree. (exit code, stdout, stderr, timed_out); a spawn
 /// failure is exit -1 with the error on stderr.
 pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<&Path>, env: &[(String, String)]) -> (i32, String, String, bool) {
-    let mut cmd = Command::new("bash");
+    let mut cmd = iter_core::platform::bash();
     cmd.arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(out) = out_dir {
         cmd.env("ITER_TEST_OUT", out);
@@ -274,7 +274,10 @@ pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<
         ),
         Ok(Err(e)) => (-1, String::new(), format!("wait failed: {e}"), false),
         Err(_) => {
-            let _ = Command::new("sh").arg("-c").arg(format!("kill -9 -{pid} 2>/dev/null || kill -9 {pid}")).status();
+            #[cfg(unix)]
+            let _ = std::process::Command::new("sh").arg("-c").arg(format!("kill -9 -{pid} 2>/dev/null || kill -9 {pid}")).status();
+            #[cfg(not(unix))]
+            iter_core::platform::kill_tree(pid);
             // the reader thread ends once the group is gone
             let out = rx.recv_timeout(Duration::from_secs(5)).ok().and_then(|r| r.ok());
             let (so, se) = out.map(|o| (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())).unwrap_or_default();
@@ -374,7 +377,7 @@ mod tests {
         let mut doc = NodeDoc::new(NodeType::Test, "comp tests", "t", "2026-10-02 00:00:00Z");
         doc.path = "{topdir}/comp/comp.test.iter.md".into();
         std::fs::write(top.join("comp/comp.test.iter.md"), nodefile::render(&doc)).unwrap();
-        (top.canonicalize().unwrap(), doc)
+        (iter_core::platform::canonicalize(&top).unwrap(), doc)
     }
 
     const STD_OK: &str = r#"echo '{"overall_success":true,"normal":{"total":3,"pass":3,"err":0},"longtail":{"total":1,"pass":1,"err":0},"failure":{"total":0,"pass":0,"err":0},"details":[{"name":"t1","bucket":"normal","pass":true,"msg":""}]}'"#;

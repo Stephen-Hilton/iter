@@ -21,7 +21,24 @@ iter5 is its own cargo workspace (`iter5/Cargo.toml`). Build and test from `iter
 ./deploy.sh local    # native release iter_data on :8400 against the dev Arango container on :8529 (fast dev loop)
 ```
 
-Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from `../.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). Release binaries land in `bin/`.
+Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from `../.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). Release binaries land in `bin/<os>-<arch>/` (`bin/linux-x86_64/`, `bin/windows-x86_64/`, …).
+
+### Windows (native)
+
+The engine runs natively on Windows; `deploy.ps1` is the PowerShell twin of `deploy.sh`:
+
+```powershell
+.\deploy.ps1 docker   # the container, same as ./deploy.sh docker (Docker Desktop)
+.\deploy.ps1 engine   # cargo build --release -> bin\windows-x86_64\iter_engine.exe, then (re)start it
+.\deploy.ps1 start | stop | status
+```
+
+- Needs Rust (`winget install Rustlang.Rustup`, MSVC toolchain), Git for Windows and the `claude` CLI on PATH.
+- The engine uses `~\.iter5\.env`, registers under the hostname, and logs to `~\.iter5\engine.log` (`-EnvFile`, `-Name`, `-DataUrl` override).
+- Shell steps (exec items, git postwork, test scripts, the `iter` shim) run under Git for Windows' bash, never WSL's `bash.exe`; `ITER_BASH` overrides. The checkout also gets `.iter\bin\iter.cmd` for cmd and PowerShell.
+- Give a `serves` edge a Windows topdir with forward slashes: `C:/Users/me/dev/project`.
+- Windows Smart App Control can block cargo's unsigned debug build scripts (`os error 4551`); `cargo test --release` builds past it.
+- The repo's `.gitattributes` keeps LF in a Windows checkout so the container and Git Bash scripts run.
 
 ## Start an engine (once per machine)
 

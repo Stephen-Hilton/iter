@@ -33,7 +33,7 @@ use super::{AgentContext, DispatchOut, DispatchSettings, Role};
 use crate::usage::Usage;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_TEXT: &str = "mock: done";
@@ -95,7 +95,7 @@ fn env_of<'a>(ctx: &'a AgentContext, key: &str) -> Option<&'a str> {
 }
 
 fn shell(ctx: &AgentContext, cwd: &Path, script: &str, s: &DispatchSettings, deadline: Instant) -> Result<String, String> {
-    let mut cmd = Command::new("bash");
+    let mut cmd = iter_core::platform::bash();
     cmd.arg("-c").arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in &ctx.env {
         cmd.env(k, v);

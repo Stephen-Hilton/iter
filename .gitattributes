@@ -1,0 +1,7 @@
+# LF everywhere, also in a Windows checkout (core.autocrlf=true would hand the
+# container and Git Bash CRLF shell scripts: "set: pipefail\r: invalid option").
+* text=auto eol=lf
+# Windows-only scripts keep CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

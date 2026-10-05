@@ -152,7 +152,7 @@ fn rel_of(stored: &str) -> &str {
 }
 
 fn canon(topdir: &Path) -> PathBuf {
-    topdir.canonicalize().unwrap_or_else(|_| topdir.to_path_buf())
+    iter_core::platform::canonicalize(&topdir).unwrap_or_else(|_| topdir.to_path_buf())
 }
 
 // ---------------------------------------------------------------- git
@@ -208,7 +208,7 @@ pub fn commit_paths(top: &Path, rels: &[String], msg: &str) -> Result<Option<Str
     let present: Vec<PathBuf> = rels.iter().map(|r| top.join(r)).filter(|p| p.exists()).collect();
     let present: BTreeSet<String> = iter_local::drop_git_ignored(top, present)
         .into_iter()
-        .filter_map(|p| p.strip_prefix(top).ok().map(|r| r.to_string_lossy().into_owned()))
+        .filter_map(|p| p.strip_prefix(top).ok().map(iter_core::platform::slash))
         .collect();
     let mut paths: Vec<String> = Vec::new();
     for r in rels {
@@ -330,7 +330,7 @@ fn roots(st: &FileSyncState, top: &Path) -> Vec<PathBuf> {
 
 /// (candidates to read, deleted) — both relative paths.
 fn scan(st: &mut FileSyncState, top: &Path, full: bool) -> (Vec<String>, Vec<String>) {
-    let rel = |p: &Path| p.strip_prefix(top).ok().map(|r| r.to_string_lossy().replace('\\', "/"));
+    let rel = |p: &Path| p.strip_prefix(top).ok().map(iter_core::platform::slash);
     let mut new_files: Vec<PathBuf> = Vec::new();
     let mut candidates: BTreeSet<String> = std::mem::take(&mut st.retry);
     let mut deleted = Vec::new();

@@ -1100,12 +1100,12 @@ pub fn convert(from: &Path, rep: &mut Report) -> Result<(BTreeMap<String, String
 
 /// The whole verb: refuse in-place / non-empty targets, copy, convert, write.
 pub fn run(from: &Path, to: &Path, dry_run: bool) -> Result<Report, String> {
-    let from = from.canonicalize().map_err(|e| format!("--from {}: {e}", from.display()))?;
+    let from = iter_core::platform::canonicalize(&from).map_err(|e| format!("--from {}: {e}", from.display()))?;
     if !from.is_dir() {
         return Err(format!("--from {} is not a directory", from.display()));
     }
     let to_abs = if to.is_absolute() { to.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(to) };
-    let to_canon = to_abs.canonicalize().unwrap_or_else(|_| to_abs.clone());
+    let to_canon = iter_core::platform::canonicalize(&to_abs).unwrap_or_else(|_| to_abs.clone());
     if to_canon == from || to_canon.starts_with(&from) || from.starts_with(&to_canon) {
         return Err(format!("--to {} must be outside --from {} (migrate5 never works in place)", to_abs.display(), from.display()));
     }
@@ -1118,10 +1118,11 @@ pub fn run(from: &Path, to: &Path, dry_run: bool) -> Result<Report, String> {
         return Ok(rep);
     }
     std::fs::create_dir_all(&to_abs).map_err(|e| format!("cannot create {}: {e}", to_abs.display()))?;
-    let st = std::process::Command::new("cp")
-        .arg("-a")
-        .arg(format!("{}/.", from.display()))
-        .arg(&to_abs)
+    // through bash so Windows uses Git Bash's cp (no cp.exe on its PATH)
+    let st = iter_core::platform::bash()
+        .args(["-c", "cp -a \"$1/.\" \"$2\"", "cp"])
+        .arg(iter_core::platform::shell_path(&from))
+        .arg(iter_core::platform::shell_path(&to_abs))
         .status()
         .map_err(|e| format!("cp: {e}"))?;
     if !st.success() {

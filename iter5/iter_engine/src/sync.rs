@@ -60,7 +60,7 @@ pub fn checkout_root(project_flag: Option<&str>, cwd: &Path, fallback: &Path) ->
 pub fn project_name(topdir: &Path) -> String {
     project_file_in(topdir)
         .and_then(|f| {
-            let sp = format!("{{topdir}}/{}", f.strip_prefix(topdir).ok()?.to_string_lossy());
+            let sp = format!("{{topdir}}/{}", iter_core::platform::slash(f.strip_prefix(topdir).ok()?));
             let text = std::fs::read_to_string(&f).ok()?;
             nodefile::parse_tolerant(&sp, &text).ok().map(|(d, _)| d.name)
         })

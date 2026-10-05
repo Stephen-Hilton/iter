@@ -56,7 +56,7 @@ fn server(world: Arc<Mutex<World>>) -> FakeServer {
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("iter5_filesync_{name}_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
-    d.canonicalize().unwrap()
+    iter_core::platform::canonicalize(&d).unwrap()
 }
 
 fn sh(top: &Path, args: &[&str]) -> String {
@@ -350,7 +350,7 @@ fn build_creates_the_repo_from_the_design() {
     let world = Arc::new(Mutex::new(World { pending, ..Default::default() }));
     let srv = server(world.clone());
     build(&srv.api(), "e1", "newproj", &top).unwrap();
-    let top = top.canonicalize().unwrap();
+    let top = iter_core::platform::canonicalize(&top).unwrap();
     assert!(top.join(".git").exists());
     assert_eq!(sh(&top, &["remote", "get-url", "origin"]), "git@example.com:me/newproj.git");
     assert_eq!(std::fs::read_to_string(top.join(".gitignore")).unwrap(), ".iter/\n");
@@ -393,10 +393,12 @@ fn a_hand_edit_is_stamped_with_the_file_mtime_not_the_scan_time() {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("x.code.iter.md");
     std::fs::write(&f, "x").unwrap();
-    let ok = std::process::Command::new("touch").args(["-t", "202601021530.45"]).arg(&f).status().unwrap();
-    assert!(ok.success());
-    let ts = file_mtime_ts(&f).unwrap();
+    // what `touch -t 202601021530.45` did, without needing touch (Windows)
     let local = chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap().and_hms_opt(15, 30, 45).unwrap();
+    let at = local.and_local_timezone(chrono::Local).unwrap();
+    let secs = std::time::Duration::from_secs(at.timestamp() as u64);
+    std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(std::time::UNIX_EPOCH + secs).unwrap();
+    let ts = file_mtime_ts(&f).unwrap();
     let want = local.and_local_timezone(chrono::Local).unwrap().with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%SZ").to_string();
     assert_eq!(ts, want);
     std::fs::remove_dir_all(&dir).ok();

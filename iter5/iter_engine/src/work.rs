@@ -31,7 +31,7 @@ pub static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// engine serves many projects; their commits run in parallel).
 pub fn git_lock(topdir: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
-    let key = std::path::Path::new(topdir).canonicalize().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| topdir.trim_end_matches('/').to_string());
+    let key = iter_core::platform::canonicalize(std::path::Path::new(topdir)).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| topdir.trim_end_matches('/').to_string());
     let map = LOCKS.get_or_init(Default::default);
     let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
     m.entry(key).or_default().clone()
@@ -949,8 +949,7 @@ fn run_claude(
         ("BASH_MAX_TIMEOUT_MS".into(), timeout.saturating_mul(1000).to_string()),
     ];
     if let Some(dir) = std::path::Path::new(&shim).parent() {
-        let path = std::env::var("PATH").unwrap_or_default();
-        envs.push(("PATH".into(), format!("{}:{}", dir.display(), path)));
+        envs.push(("PATH".into(), iter_core::platform::path_with(dir)));
     }
     let extra: Vec<String> = flags.split_whitespace().map(String::from).collect();
     // every agent session gets the `iter` MCP server (work items, the map,
@@ -1132,9 +1131,19 @@ fn write_iter_shim(topdir: &str) -> Result<String, String> {
     let dir = std::path::Path::new(topdir).join(".iter").join("bin");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let shim = dir.join("iter");
-    let body = format!("#!/bin/sh\nexec \"{}\" cli \"$@\"\n", exe.display());
+    let body = format!("#!/bin/sh\nexec \"{}\" cli \"$@\"\n", iter_core::platform::shell_path(&exe));
     if std::fs::read_to_string(&shim).ok().as_deref() != Some(body.as_str()) {
         std::fs::write(&shim, body).map_err(|e| format!("write {}: {e}", shim.display()))?;
+    }
+    // Windows: the sh shim serves Git Bash (Claude Code's Bash tool); cmd and
+    // PowerShell find `iter` through PATHEXT, so they get an iter.cmd beside it
+    #[cfg(windows)]
+    {
+        let cmd = dir.join("iter.cmd");
+        let body = format!("@\"{}\" cli %*\r\n", exe.display());
+        if std::fs::read_to_string(&cmd).ok().as_deref() != Some(body.as_str()) {
+            std::fs::write(&cmd, body).map_err(|e| format!("write {}: {e}", cmd.display()))?;
+        }
     }
     #[cfg(unix)]
     {
@@ -1280,7 +1289,7 @@ fn git_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String
 }
 
 fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
-    let mut cmd = Command::new("bash");
+    let mut cmd = iter_core::platform::bash();
     cmd.arg("-c")
         .arg(script)
         .current_dir(cwd)
@@ -1295,7 +1304,7 @@ fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String
 /// `ITER_TOPDIR`, `ITER_DATA_URL`, `ITER_ENGINE_TOKEN` and the `iter` shim on
 /// PATH — so a window script can POST a detail row on its own clone.
 fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout_sec: u64) -> Result<String, String> {
-    let mut cmd = Command::new("bash");
+    let mut cmd = iter_core::platform::bash();
     cmd.arg("-c")
         .arg(&item.exec_shell)
         .current_dir(topdir)
@@ -1314,7 +1323,7 @@ fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout
     if let Ok(shim) = write_iter_shim(topdir) {
         cmd.env("ITER_BIN", &shim);
         if let Some(dir) = std::path::Path::new(&shim).parent() {
-            cmd.env("PATH", format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default()));
+            cmd.env("PATH", iter_core::platform::path_with(dir));
         }
     }
     wait_with_timeout(cmd, timeout_sec)
@@ -1355,13 +1364,28 @@ fn wait_with_timeout(cmd: Command, timeout_sec: u64) -> Result<String, String> {
 /// Run `cmd` to completion (stdout on success, `exit …: out+err` on
 /// failure), killing its whole process group on the timeout or the moment
 /// `stop` names a stop request or revocation for its run.
-pub(crate) fn wait_with_stop(mut cmd: Command, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
+pub(crate) fn wait_with_stop(cmd: Command, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
+    wait_with_stop_input(cmd, None, timeout_sec, stop)
+}
+
+/// `wait_with_stop`, with `input` written to the child's stdin (then closed).
+pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0); // so a stop can take the whole tree down
     }
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        // its own thread: a child that stops reading must not wedge the engine
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(text.as_bytes());
+        });
+    }
     // drain both pipes on their own threads: stream-json echoes every message,
     // and a full 64K pipe would block the child forever if read only at exit
     let slurp = |pipe: Option<Box<dyn std::io::Read + Send>>| -> Option<std::thread::JoinHandle<String>> {
@@ -1372,11 +1396,7 @@ pub(crate) fn wait_with_stop(mut cmd: Command, timeout_sec: u64, stop: &crate::p
     let deadline = Instant::now() + Duration::from_secs(timeout_sec.max(1));
     loop {
         if let Some(why) = stop.check() {
-            let pid = child.id();
-            #[cfg(unix)]
-            {
-                let _ = Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
-            }
+            iter_core::platform::kill_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return Err(why);
@@ -1396,10 +1416,7 @@ pub(crate) fn wait_with_stop(mut cmd: Command, timeout_sec: u64, stop: &crate::p
                     // timed-out session's background builders and loops must
                     // not keep writing to the shared checkout (CR 2026-09-25
                     // 2.3 — before, only the direct child was killed)
-                    #[cfg(unix)]
-                    {
-                        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", child.id())]).status();
-                    }
+                    iter_core::platform::kill_tree(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("timed out after {timeout_sec}s"));

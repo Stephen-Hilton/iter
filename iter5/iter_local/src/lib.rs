@@ -103,7 +103,7 @@ impl GitIgnored {
         if self.paths.is_empty() {
             return false;
         }
-        let rel = path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy();
+        let rel = iter_core::platform::slash(path.strip_prefix(&self.root).unwrap_or(path));
         self.paths.iter().any(|p| match p.strip_suffix('/') {
             Some(dir) => rel == dir || rel.starts_with(p.as_str()),
             None => rel == p.as_str(),
@@ -124,7 +124,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("iter_local_lib_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
+        iter_core::platform::canonicalize(&d).unwrap()
     }
 
     #[test]

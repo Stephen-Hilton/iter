@@ -41,9 +41,26 @@ pub fn claude_args(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> Vec
     a
 }
 
+/// Windows caps a whole command line at 32,767 UTF-16 units; a prompt longer
+/// than this goes to `claude -p` on stdin instead of argv there.
+const WINDOWS_ARGV_PROMPT_MAX: usize = 16_000;
+
+/// Split the prompt off argv when it would not fit: (args, stdin text).
+pub fn args_and_stdin(model: &str, ctx: &AgentContext, s: &DispatchSettings, argv_prompt_max: Option<usize>) -> (Vec<String>, Option<String>) {
+    let mut args = claude_args(model, ctx, s);
+    match argv_prompt_max {
+        Some(max) if ctx.prompt.len() > max => {
+            args.remove(1); // the prompt, right after "-p"
+            (args, Some(ctx.prompt.clone()))
+        }
+        _ => (args, None),
+    }
+}
+
 pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> Result<DispatchOut, String> {
     let mut cmd = Command::new(claude_bin());
-    cmd.args(claude_args(model, ctx, s));
+    let (args, input) = args_and_stdin(model, ctx, s, cfg!(windows).then_some(WINDOWS_ARGV_PROMPT_MAX));
+    cmd.args(args);
     // route billing to the account's token; a named account without one never
     // reaches here (provider::call / work::resolve_account_token refuse it)
     if let Some(tok) = &s.token {
@@ -55,7 +72,7 @@ pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettin
     }
     let cwd = if ctx.cwd.as_os_str().is_empty() { std::env::temp_dir() } else { ctx.cwd.clone() };
     cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let raw = crate::work::wait_with_stop(cmd, s.timeout.as_secs(), &s.stop)?;
+    let raw = crate::work::wait_with_stop_input(cmd, input, s.timeout.as_secs(), &s.stop)?;
     let (sid, mut out) = parse_stream(&raw);
     if out.session_id.is_empty() {
         out.session_id = sid;
@@ -214,6 +231,18 @@ mod tests {
                 .map(String::from)
                 .to_vec()
         );
+    }
+
+    #[test]
+    fn a_long_prompt_moves_to_stdin_only_past_the_cap() {
+        let s = DispatchSettings::default();
+        let short = AgentContext { prompt: "P".into(), ..Default::default() };
+        assert_eq!(args_and_stdin("", &short, &s, Some(10)), (claude_args("", &short, &s), None));
+        let long = AgentContext { prompt: "x".repeat(11), ..Default::default() };
+        let (args, input) = args_and_stdin("haiku", &long, &s, Some(10));
+        assert_eq!(args, ["-p", "--output-format", "stream-json", "--verbose", "--model", "haiku"].map(String::from).to_vec());
+        assert_eq!(input.as_deref(), Some("xxxxxxxxxxx"));
+        assert_eq!(args_and_stdin("", &long, &s, None).1, None);
     }
 
     /// A stand-in `claude` binary: the dispatch runs it with the token in

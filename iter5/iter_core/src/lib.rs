@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 pub mod cluster;
 pub mod dedup;
 pub mod nodefile;
+pub mod platform;
 pub mod sched;
 pub mod settings;
 pub mod testresult;

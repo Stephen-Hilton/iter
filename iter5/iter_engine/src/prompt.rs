@@ -55,11 +55,11 @@ impl Tooling {
 }
 
 pub fn expand_topdir_token(pattern: &str, topdir: &Path) -> String {
-    let top = topdir.to_string_lossy().trim_end_matches('/').to_string();
+    let top = iter_core::platform::slash(topdir).trim_end_matches('/').to_string();
     let mut p = pattern.replace("{topdir}/", &format!("{top}/")).replace("{topdir}", &top);
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            p = format!("{home}/{rest}");
+        if let Some(home) = iter_core::platform::home_dir() {
+            p = format!("{}/{rest}", iter_core::platform::slash(&home));
         }
     }
     while p.contains("//") {
@@ -71,7 +71,7 @@ pub fn expand_topdir_token(pattern: &str, topdir: &Path) -> String {
 /// Resolve one pattern (absolute, {topdir}-relative, relative, glob) to files.
 fn resolve_files(pattern: &str, topdir: &Path) -> Vec<PathBuf> {
     let p = expand_topdir_token(pattern, topdir);
-    let abs = if Path::new(&p).is_absolute() { p } else { topdir.join(&p).to_string_lossy().into_owned() };
+    let abs = if Path::new(&p).is_absolute() { p } else { iter_core::platform::slash(&topdir.join(&p)) };
     let mut out = Vec::new();
     if abs.contains('*') || abs.contains('?') || abs.contains('[') {
         if let Ok(paths) = glob::glob(&abs) {
@@ -211,7 +211,7 @@ fn topdir_form(path: &str, topdir: &Path) -> String {
     if path.starts_with("{topdir}") {
         return path.trim_end_matches('/').to_string();
     }
-    let top = topdir.to_string_lossy().trim_end_matches('/').to_string();
+    let top = iter_core::platform::slash(topdir).trim_end_matches('/').to_string();
     match path.strip_prefix(&top) {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{{topdir}}{}", rest.trim_end_matches('/')),
         _ => path.trim_end_matches('/').to_string(),
@@ -528,11 +528,11 @@ pub fn nodes_from_files(topdir: &Path) -> Vec<NodeDoc> {
         }
     }
     let files = iter_local::drop_git_ignored(topdir, files);
-    let top = topdir.to_string_lossy().trim_end_matches('/').to_string();
+    let top = iter_core::platform::slash(topdir).trim_end_matches('/').to_string();
     let mut out: Vec<NodeDoc> = Vec::new();
     for f in files {
         let Ok(text) = std::fs::read_to_string(&f) else { continue };
-        let fs = f.to_string_lossy();
+        let fs = iter_core::platform::slash(&f);
         let rel = fs.strip_prefix(&top).unwrap_or(&fs).trim_start_matches('/');
         if let Ok((doc, _)) = nodefile::parse_tolerant(&format!("{{topdir}}/{rel}"), &text) {
             out.push(doc);
@@ -978,7 +978,7 @@ mod tests {
         let ctx = build_context(&nodes, &item, &top, &codepath);
         let node = ctx.node.clone().unwrap();
         assert_eq!((node.id.as_str(), node.nodetype.as_str()), (docs["api"].id.as_str(), "code"));
-        assert_eq!(node.path, top.join("src/app/api/api.code.iter.md").to_string_lossy());
+        assert_eq!(node.path, iter_core::platform::slash(&top.join("src/app/api/api.code.iter.md")));
         assert_eq!(names(&ctx.children), vec!["tests:API tests".to_string(), "reqs:Auth".into()]);
         assert_eq!(ctx.children[0].id, docs["test"].id);
         assert_eq!(names(&ctx.global_reqs), vec!["global:Core philosophy".to_string(), "global:Money".into(), "global:notes.md".into()]);

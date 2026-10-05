@@ -40,8 +40,7 @@ pub fn usage_dir() -> PathBuf {
     if cfg!(test) {
         return std::env::temp_dir().join(format!("iter5-engine-test-usage-{}", std::process::id()));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude")
+    iter_core::platform::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claude")
 }
 
 fn account_key(account: &str) -> String {

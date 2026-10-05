@@ -100,7 +100,7 @@ fn blocking_locks(api: &Api, project: &str, paths: &[String]) -> Vec<(String, St
 /// Apply every claimable row of one project; returns how many were applied.
 pub fn apply_waiting(api: &Api, engine: &str, project: &str, topdir: &Path) -> usize {
     let rows = api.get(&format!("/api/projects/{project}/datasync?state=claimable")).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    let top = topdir.canonicalize().unwrap_or_else(|_| topdir.to_path_buf());
+    let top = iter_core::platform::canonicalize(&topdir).unwrap_or_else(|_| topdir.to_path_buf());
     let mut applied = 0;
     for row in rows {
         let id = row["id"].as_str().unwrap_or("").to_string();
@@ -166,7 +166,7 @@ mod tests {
     fn stores_removes_ignores_commits_and_reports() {
         let top = std::env::temp_dir().join(format!("iter5_dsync_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&top).unwrap();
-        let top = top.canonicalize().unwrap();
+        let top = iter_core::platform::canonicalize(&top).unwrap();
         let git = |a: &[&str]| crate::filesync::git(&top, a).unwrap();
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t"]);

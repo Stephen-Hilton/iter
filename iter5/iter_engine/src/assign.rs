@@ -106,8 +106,8 @@ pub fn core_accounts(list: &[AssignedAccount]) -> Vec<iter_core::Account> {
 /// `~/x` -> `$HOME/x`.
 pub fn expand_topdir(topdir: &str) -> String {
     if let Some(rest) = topdir.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
+        if let Some(home) = iter_core::platform::home_dir() {
+            return format!("{}/{rest}", home.display());
         }
     }
     topdir.to_string()

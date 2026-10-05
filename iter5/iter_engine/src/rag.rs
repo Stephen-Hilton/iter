@@ -222,7 +222,7 @@ pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool)
 /// are extracted, chunked, embedded and sent; files that no longer match drop
 /// out. Node files (`*.iter.md`) are left to the node sweep.
 fn sync_repo_files(api: &Api, project: &str, topdir: &Path, globs: &[String], force: bool, r: &mut SyncReport) -> Result<(), String> {
-    let top = topdir.canonicalize().unwrap_or_else(|_| topdir.to_path_buf());
+    let top = iter_core::platform::canonicalize(&topdir).unwrap_or_else(|_| topdir.to_path_buf());
     let mut paths: std::collections::BTreeSet<std::path::PathBuf> = Default::default();
     for g in globs {
         let rel = g.trim_start_matches("{topdir}").trim_start_matches('/');
@@ -254,7 +254,7 @@ fn sync_repo_files(api: &Api, project: &str, topdir: &Path, globs: &[String], fo
     };
     r.total += paths.len();
     for p in &paths {
-        let rel = format!("{{topdir}}/{}", p.strip_prefix(&top).unwrap_or(p).to_string_lossy());
+        let rel = format!("{{topdir}}/{}", iter_core::platform::slash(p.strip_prefix(&top).unwrap_or(p)));
         keep.push(rel.clone());
         let bytes = match std::fs::read(p) {
             Ok(b) => b,

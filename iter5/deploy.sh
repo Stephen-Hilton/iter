@@ -6,13 +6,18 @@
 #
 # Secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) come from ITER_ENV_FILE,
 # default ../.env (the repo .env iter3 already uses, so tokens work on both).
-# Engine binaries always land in bin/ (rm+cp, never cp-over: macOS kills a
-# binary copied over a live one).
+# Release binaries land in bin/<os>-<arch>/ (rm+cp, never cp-over: macOS kills
+# a binary copied over a live one). On Windows use deploy.ps1 instead.
 set -euo pipefail
 
 MODE="${1:-docker}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-BIN="$ROOT/bin"
+case "$(uname -s)" in
+  Linux*) OS=linux ;; Darwin*) OS=macos ;; MINGW*|MSYS*|CYGWIN*) OS=windows ;; *) OS="$(uname -s | tr A-Z a-z)" ;;
+esac
+ARCH="$(uname -m)"; [ "$ARCH" = arm64 ] && ARCH=aarch64
+EXE=""; [ "$OS" = windows ] && EXE=".exe"
+BIN="$ROOT/bin/$OS-$ARCH"
 RUN="$ROOT/run"
 PORT="${ITER_PORT:-8400}"
 ENV_FILE="${ITER_ENV_FILE:-$ROOT/../.env}"
@@ -27,8 +32,8 @@ build_native() {
   echo "[deploy] building release binaries"
   (cd "$ROOT" && "$CARGO" build --release -p iter_data -p iter_engine)
   for b in iter_data iter_engine; do
-    rm -f "$BIN/$b"
-    cp "$ROOT/target/release/$b" "$BIN/$b"
+    rm -f "$BIN/$b$EXE"
+    cp "$ROOT/target/release/$b$EXE" "$BIN/$b$EXE"
   done
   echo "[deploy] binaries -> $BIN"
 }
