@@ -200,6 +200,7 @@ pre{white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);borde
 .wfield{margin:10px 0}
 .wfield label{display:block;color:var(--dim);margin-bottom:4px}
 .frow{display:grid;grid-template-columns:140px 1fr;gap:8px 12px;align-items:start;margin:8px 0}
+.frow[hidden]{display:none}   /* the grid must not beat [hidden] (exec shell, schedule rows) */
 .frow label{color:var(--dim);padding-top:7px}
 .frow input,.frow select,.frow textarea{width:100%}
 .dlghead{display:flex;align-items:center;gap:10px}
@@ -1422,6 +1423,53 @@ function openTagPicker(i,reopen){
   tagpick.showModal();
 }
 
+/* ================= schedule fields (edit form, scheduled items only) =================
+   sched = {kind: every|stale|daily|weekly, every_min, at "HH:MM", day mon..sun, tz, last_fired}
+   (iter_core/src/sched.rs); every_min is whole minutes, shown in the largest unit that divides it */
+const SCHED_KINDS=["every","stale","daily","weekly"];
+const SCHED_DAYS=["mon","tue","wed","thu","fri","sat","sun"];
+const SCHED_UNITS=[["days",1440],["hours",60],["minutes",1]];
+function schedRows(sc){
+  const kind=SCHED_KINDS.includes(sc.kind)?sc.kind:"every";
+  const m=sc.every_min||0;
+  const [unit,per]=SCHED_UNITS.find(([,p])=>m>0&&m%p===0)||["hours",60];
+  const line="display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+  return `
+      <div class="frow"><label>schedule</label><div><select id="f-sk" style="width:120px">${SCHED_KINDS.map(k=>`<option ${k===kind?"selected":""}>${k}</option>`).join("")}</select>
+        <div class="kv">every = N after the last firing · stale = N after the last completion (or firing) · daily / weekly = at a clock time; a time missed while the engine was down is skipped</div></div></div>
+      <div class="frow" id="f-sk-int"><label>interval</label><div style="${line}"><input id="f-sn" type="number" min="1" step="1" value="${m?m/per:""}" style="width:90px">
+        <select id="f-su" style="width:120px">${SCHED_UNITS.map(([u])=>`<option ${u===unit?"selected":""}>${u}</option>`).join("")}</select></div></div>
+      <div class="frow" id="f-sk-at"><label>at</label><div style="${line}"><input id="f-sat" value="${esc(sc.at||"")}" placeholder="HH:MM" style="width:90px">
+        <span id="f-sk-day"><select id="f-sday" style="width:90px">${SCHED_DAYS.map(d=>`<option ${d===(sc.day||"").slice(0,3).toLowerCase()?"selected":""}>${d}</option>`).join("")}</select></span>
+        <input id="f-stz" value="${esc(sc.tz||"")}" placeholder="time zone, e.g. America/Los_Angeles — blank = UTC" style="width:320px"></div></div>
+      <div class="frow"><label>last fired</label><span class="kv">${esc(sc.last_fired||"never")}</span></div>`;
+}
+function schedShow(){
+  const k=form.querySelector("#f-sk").value;
+  form.querySelector("#f-sk-int").hidden=!(k==="every"||k==="stale");
+  form.querySelector("#f-sk-at").hidden=!(k==="daily"||k==="weekly");
+  form.querySelector("#f-sk-day").hidden=k!=="weekly";
+}
+/* the form's schedule fields onto the existing sched (last_fired kept); throws a message on bad input */
+function schedRead(old){
+  const v=s=>form.querySelector(s).value.trim();
+  const sc={...old,kind:v("#f-sk")};
+  if(sc.kind==="every"||sc.kind==="stale"){
+    const n=Number(v("#f-sn")),per=SCHED_UNITS.find(([u])=>u===v("#f-su"))[1];
+    const min=Math.round(n*per);
+    if(!(n>0)||min<1)throw new Error("schedule interval must be more than 0");
+    sc.every_min=min;
+  }else{
+    const at=v("#f-sat").match(/^(\d{1,2}):(\d{2})$/);
+    if(!at||+at[1]>23||+at[2]>59)throw new Error("schedule 'at' must be HH:MM (24h)");
+    sc.at=at[1].padStart(2,"0")+":"+at[2];
+    sc.tz=v("#f-stz");
+    if(sc.tz){try{new Intl.DateTimeFormat("en",{timeZone:sc.tz});}catch(e){throw new Error("unknown time zone: "+sc.tz);}}
+    if(sc.kind==="weekly")sc.day=v("#f-sday");
+  }
+  return sc;
+}
+
 /* ================= new / edit / follow-up form ================= */
 const form=$("#form");
 form.addEventListener("click",e=>{if(e.target===form)form.close();});
@@ -1434,6 +1482,8 @@ function openForm(mode,src){
   /* the test sweep template stays a schedule: scheduled (on) or paused (off) */
   const sweepTpl=mode==="edit"&&isSweepTemplate(i);
   const stateOpts=sweepTpl?["scheduled","paused"]:(mode==="edit"?OPEN_TARGETS:["queued","parked","paused","question"]);
+  /* a schedule template (scheduled, or paused with a sched) shows its timing */
+  const schedTpl=mode==="edit"&&(i.state==="scheduled"||!!(i.sched&&i.sched.kind));
   const curState=sweepTpl?i.state:(mode==="edit"&&OPEN_TARGETS.includes(i.state))?i.state:"queued";
   form.innerHTML=`
     <div style="padding:16px">
@@ -1442,7 +1492,7 @@ function openForm(mode,src){
       <div class="frow"><label>agent</label><select id="f-agent">${agentNames.map(a=>`<option ${a===(i.agent||"code")?"selected":""}>${esc(a)}</option>`).join("")}</select></div>
       <div class="frow" id="f-exec-row" ${ (i.agent||"code")==="exec"?"":"hidden"}><label>exec shell</label><textarea id="f-exec" rows="2">${esc(i.exec_shell||"")}</textarea></div>
       <div class="frow"><label>priority</label><input id="f-prio" type="number" min="0" max="99" value="${esc(i.priority??"")}" placeholder="auto" style="width:90px"> <span class="kv">0–99, lower = sooner · 0–9 do now · 10–39 usecases (one number each) · 40–49 human · 50+ maintenance · blank = auto: a root takes the lowest unused number in its band, a child inherits its creator's</span></div>
-      <div class="frow"><label>state on save</label><select id="f-state">${stateOpts.map(s=>`<option ${s===curState?"selected":""}>${s}</option>`).join("")}</select></div>
+      <div class="frow"><label>state on save</label><select id="f-state">${stateOpts.map(s=>`<option ${s===curState?"selected":""}>${s}</option>`).join("")}</select></div>${schedTpl?schedRows(i.sched||{}):""}
       <div class="frow"><label>lockdirs</label><textarea id="f-lock" rows="2" placeholder="one per line, e.g. {topdir}/core/repos/x/">${esc(lines(i.lockdirs))}</textarea></div>
       <div class="frow"><label>blocked by</label><textarea id="f-dep" rows="2" placeholder="workitem ids, one per line">${esc(lines(i.blockedby))}</textarea></div>
       <div class="frow"><label>context files</label><textarea id="f-ctx" rows="2" placeholder="one per line; {topdir}/…, {codepath}/…, {marker}, {ancestor_markers}, globs — blank = project default">${esc(lines(i.context))}</textarea></div>
@@ -1455,6 +1505,7 @@ function openForm(mode,src){
   const agentSel=form.querySelector("#f-agent");
   agentSel.onchange=()=>{form.querySelector("#f-exec-row").hidden=agentSel.value!=="exec";};
   form.querySelector("#f-cancel").onclick=()=>form.close();
+  if(schedTpl){form.querySelector("#f-sk").onchange=schedShow;schedShow();}
   if(mode==="edit"&&i.id){requestText(i.id).then(t=>{if(!form.querySelector("#f-req").value)form.querySelector("#f-req").value=t;});}
   form.querySelector("#f-save").onclick=async()=>{
     const err=form.querySelector("#f-err");err.textContent="";
@@ -1468,9 +1519,12 @@ function openForm(mode,src){
     const body={name:val("#f-name").trim(),agent:val("#f-agent"),exec_shell:val("#f-exec"),...(prioRaw===""?{}:{priority:Math.max(0,Math.min(99,parseInt(prioRaw,10)))}),
       state:val("#f-state"),lockdirs:list("#f-lock"),blockedby:list("#f-dep"),tags:keptTags,context:list("#f-ctx"),model:val("#f-model").trim()};
     if(!body.name){err.textContent="name is required";return;}
+    let sched;
+    if(schedTpl){try{sched=schedRead(i.sched||{});}catch(e){err.textContent=e.message;return;}}
     try{
       if(mode==="edit"){
         const f=await fresh(i.id);Object.assign(f,body);
+        if(sched)f.sched={...sched,last_fired:(f.sched&&f.sched.last_fired)||sched.last_fired||""};
         await api(P(i.id)+"?expect_version="+f.version,{method:"PUT",body:JSON.stringify(f)});
         await api(P(i.id)+"/details/0",{method:"PUT",body:JSON.stringify({key:"request",valuetype:"text",value:val("#f-req")})});
         form.close();await loadItems(project);jumpToItem(i.id);
