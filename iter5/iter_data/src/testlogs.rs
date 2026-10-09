@@ -18,6 +18,9 @@ use std::sync::Arc;
 
 type Ctx = State<Arc<AppState>>;
 
+/// How a posted result names its node edit (`change`).
+pub const TEST_RESULT_CHANGE: &str = "test result ";
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects/{name}/graph/nodes/{id}/testresult", post(testresult))
@@ -88,7 +91,13 @@ async fn testresult(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Stri
     let mut doc = n.doc.clone();
     doc.front.insert("last_result".into(), serde_json::to_value(&r).unwrap_or(Value::Null));
     doc.timestamps.last_tested = nf::now_ts();
-    g.commit_edit(&id, doc, &user.sub, &format!("test result {}: {}", n.doc.name, outcome_str(outcome)), false)?;
+    // files/sync reads a pending change that starts with TEST_RESULT_CHANGE as
+    // holding nothing but results, so an edit still waiting stays named first
+    let mut change = format!("{TEST_RESULT_CHANGE}{}: {}", n.doc.name, outcome_str(outcome));
+    if n.file_state == nodes::PENDING_WRITE && !n.change.is_empty() && !n.change.starts_with(TEST_RESULT_CHANGE) {
+        change = format!("{}; {change}", n.change);
+    }
+    g.commit_edit(&id, doc, &user.sub, &change, false)?;
     g.get_mut(&id).unwrap().test = summary.clone();
     g.save(st.store.as_ref()).await?;
     drop(guard);

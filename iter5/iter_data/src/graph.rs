@@ -28,7 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/graph/view", get(graph_view))
         .route("/api/projects/{name}/graph/lookup", get(graph_lookup))
         .route("/api/projects/{name}/graph/owner", get(graph_owner))
-        .route("/api/projects/{name}/graph/conflicts", get(graph_conflicts))
+        .route("/api/projects/{name}/graph/conflicts", get(graph_conflicts).delete(graph_conflicts_clear))
         .route("/api/projects/{name}/graph/usecases/{ucid}", get(graph_usecase))
         .route("/api/projects/{name}/graph/nodes", post(node_create))
         .route("/api/projects/{name}/graph/nodes/{id}", get(node_get).patch(node_patch).delete(node_delete))
@@ -234,6 +234,27 @@ async fn graph_conflicts(_u: AuthUser, State(st): Ctx, Path(name): Path<String>)
         .await
         .map_err(nodes::backend)?;
     Ok(Json(json!({"conflicts": rows})))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ClearQ {
+    #[serde(default)]
+    id: String,
+}
+
+/// Dismiss conflict rows once someone has looked at them: every row of the
+/// project, or (`?id=`) one node's.  Admin only: a row's `loser` can be the
+/// only copy of the version that lost.
+async fn graph_conflicts_clear(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Query(q): Query<ClearQ>) -> Result<Json<Value>, ApiError> {
+    user.require_admin()?;
+    let rows = nodes::arango(st.store.as_ref())?
+        .aql(
+            "FOR c IN node_conflict FILTER c.project == @p && (@id == '' || c.id == @id) REMOVE c IN node_conflict RETURN 1",
+            json!({"p": name, "id": q.id}),
+        )
+        .await
+        .map_err(nodes::backend)?;
+    Ok(Json(json!({"removed": rows.len()})))
 }
 
 /// One use case's parts: the code nodes it uses (`tops`) and everything they

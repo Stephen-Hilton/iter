@@ -288,8 +288,13 @@
     K().modal({ title: 'Sync conflicts — ' + S.ctx.project, wide: true, confirmDiscard: false,
       body: `<p class="kit-text kit-dim">Each row is a node that changed here while its file changed in the repository. The newer edit won (a tie goes to the graph); the other version is kept on the node's detail pane.</p>
         ${CONFLICTS.length ? `<div class="g-tablewrap"><table class="g-table"><tr><th>node</th><th>outcome</th><th>why</th><th>when</th><th>file</th></tr>${rows}</table></div>` : '<p>No conflicts.</p>'}`,
-      buttons: [{ label: 'Close', value: null, primary: true }],
-      onOpen: (d) => d.querySelectorAll('[data-focus]').forEach((a) => { a.onclick = (e) => { e.preventDefault(); d.finish(null); G().focusNode(a.dataset.focus, { flash: true }); }; }) });
+      buttons: [...(S.ctx.isAdmin && CONFLICTS.length ? [{ label: 'Dismiss all', value: 'clear', title: 'Delete these rows, and the losing versions they keep' }] : []), { label: 'Close', value: null, primary: true }],
+      onOpen: (d) => d.querySelectorAll('[data-focus]').forEach((a) => { a.onclick = (e) => { e.preventDefault(); d.finish(null); G().focusNode(a.dataset.focus, { flash: true }); }; }) })
+      .then(async (v) => {
+        if (v !== 'clear') return;
+        try { const r = await api('/graph/conflicts', { method: 'DELETE' }); toast(`Dismissed ${r.removed} conflict${r.removed === 1 ? '' : 's'}`); } catch (e) { toast('Could not dismiss the conflicts: ' + errMsg(e), { kind: 'err' }); }
+        loadConflicts();
+      });
   }
 
   // ------------------------------------------------------------------ test history (GET testlogs?node=)

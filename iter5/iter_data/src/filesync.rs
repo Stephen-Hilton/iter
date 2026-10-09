@@ -12,12 +12,15 @@
 //! - when the node holds a server edit not yet written (`node_version >
 //!   base_version`, pending) and the file changed too → conflict: the newer
 //!   `timestamps.last_modified` wins, a tie goes to the server; the loser is
-//!   kept as a `node_conflict` row; a server win is answered with a rewrite;
+//!   kept as a `node_conflict` row; a server win is answered with a rewrite.
+//!   A newer test result on the node is carried onto the file's content
+//!   either way, and a pending edit that is only test results is no conflict;
 //! - `deleted` paths (and, with `full: true`, every file the engine did not
 //!   send that was once written) mark their nodes deleted.
 
 use crate::api::{ApiError, AppState, AuthUser, NOSK};
 use crate::nodes::{self, DESIGNED, Graph, PENDING_DELETE, PENDING_WRITE, SYNCED, StoredNode, bad, not_found};
+use crate::testlogs::TEST_RESULT_CHANGE;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -76,6 +79,18 @@ pub struct SyncReply {
 fn conflict_row(project: &str, id: &str, path: &str, winner: &str, loser: Value, why: &str, engine: &str) -> Value {
     json!({"project": project, "id": id, "path": path, "winner": winner, "loser": loser, "why": why, "engine": engine,
            "at": now_utc(), "_key": format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%6f"), &uuid::Uuid::new_v4().simple().to_string()[..8])})
+}
+
+fn carry_test_result(from: &nf::NodeDoc, to: &mut nf::NodeDoc) {
+    match from.front.get("last_result") {
+        Some(v) => {
+            to.front.insert("last_result".into(), v.clone());
+        }
+        None => {
+            to.front.remove("last_result");
+        }
+    }
+    to.timestamps.last_tested = from.timestamps.last_tested.clone();
 }
 
 fn new_from_file(project: &str, doc: nf::NodeDoc, prev_version: u64, hash: String, engine: &str) -> StoredNode {
@@ -162,7 +177,7 @@ pub fn apply_sync(g: &mut Graph, req: &SyncReq) -> (SyncReply, Vec<Value>) {
             existing
         };
         batch_ids.insert(doc.id.clone(), path.to_string());
-        let hash = if rewrite || f.hash.is_empty() { nf::content_hash(&text) } else { f.hash.clone() };
+        let mut hash = if rewrite || f.hash.is_empty() { nf::content_hash(&text) } else { f.hash.clone() };
         let id = doc.id.clone();
         touched.insert(id.clone());
         if doc.nodetype == NodeType::Project {
@@ -205,7 +220,25 @@ pub fn apply_sync(g: &mut Graph, req: &SyncReq) -> (SyncReply, Vec<Value>) {
             rep.applied.push(json!({"id": id, "path": path, "node_version": n.node_version}));
             continue;
         }
-        if unwritten {
+        // A test result is the server's alone (posted by the engine, never edited
+        // in a file), so a newer one waiting to be written is carried onto the
+        // file's content rather than lost with the node's version.  When that
+        // result is all the pending edit holds, nothing is in conflict: on
+        // 2026-10-09 every one of pdy-dev's 12 conflicts was a test agent's file
+        // edit landing a minute after the engine posted its run's result.
+        let result_only = unwritten && n.change.starts_with(TEST_RESULT_CHANGE);
+        // (>=: last_tested is to the second, and two runs can land in one)
+        let newer_result = n.doc.timestamps.last_tested >= doc.timestamps.last_tested
+            && (n.doc.timestamps.last_tested != doc.timestamps.last_tested || n.doc.front.get("last_result") != doc.front.get("last_result"));
+        if unwritten && newer_result {
+            carry_test_result(&n.doc, &mut doc);
+            if !at_old {
+                text = nf::render(&doc);
+                hash = nf::content_hash(&text);
+                rewrite = true;
+            }
+        }
+        if unwritten && !result_only {
             let file_newer = doc.timestamps.last_modified > n.doc.timestamps.last_modified;
             if file_newer {
                 conflicts.push(conflict_row(&project, &id, path, "file", n.json(), "file and node both changed; the file is newer", engine));

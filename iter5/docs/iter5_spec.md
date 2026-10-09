@@ -257,6 +257,8 @@ Engine service per served project, every tick (≤ few seconds):
    - server: parse; upsert by id. If the node has `node_version > base_version` (server-side edit not
      yet written) **and** the file changed → conflict: newer `timestamps.last_modified` wins (tie: server);
      the loser is kept as a `node_conflict` row and a `doc` detail; reply tells the engine to rewrite the file if server won.
+     A test result (`front.last_result` + `timestamps.last_tested`) is the server's alone: a newer one on the node is
+     carried onto whichever content wins (and the file rewritten), and a pending edit that is only test results is no conflict.
    - id collision (two files, one id) → second file gets a new id via `rewrite`.
    - reply `{applied: [{id, path, node_version}], rewrite: [{path, text, node_version}], removed: [id], conflicts: [...]}`.
    - `full: true` → nodes of this project whose path wasn't sent are marked deleted.
@@ -547,7 +549,8 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
    plan never runs before the repo exists (`iter_data/src/filesync.rs::build_done`).
 10. **`/datasync` is kept only for GraphRAG file ops** (`store_doc`, `remove_doc`, `gitignore_path`); node edits go through
     the project graph and `files/pending` (§3.3), never datasync rows.
-11. **Sync conflicts are listed via `GET /api/projects/{p}/graph/conflicts`** (the `node_conflict` rows); no work-item `doc`
+11. **Sync conflicts are listed via `GET /api/projects/{p}/graph/conflicts`** (the `node_conflict` rows; an admin dismisses
+    them with `DELETE` on the same path, `?id=` for one node's); no work-item `doc`
     detail row is written (§3.2 step 3 said "and a `doc` detail").
 12. **Test results are accepted on test nodes only** (`…/graph/nodes/{id}/testresult` refuses any other nodetype). A red or
     could-not-run result files a `code` work item at priority 50 tagged `check:tests-failing` + `container:<last 12 of the

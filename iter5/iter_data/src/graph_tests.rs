@@ -458,6 +458,72 @@ async fn files_sync_conflicts_newer_wins_tie_goes_to_the_server() {
     t.done().await;
 }
 
+/// pdy-dev, 2026-10-09: the engine posts a run's result, and a minute later the
+/// test agent's own edit to the same file syncs in.  The result must survive and
+/// nothing is in conflict, whichever side's timestamp is newer.
+#[tokio::test]
+async fn files_sync_keeps_a_pending_test_result_and_merges_without_a_conflict() {
+    let t = T::new().await;
+    t.served("p").await;
+    let tn = file(NodeType::Test, "Web smoke", "{topdir}/src/web/tests/smoke.test.iter.md", |_| {});
+    t.sync("p", json!({"engine": "e1", "files": [fjson(&tn, 0)]})).await;
+    let result = |pass: bool| json!({"overall_success": pass, "normal": {"total": 1, "pass": pass as u32, "err": 0},
+                                     "longtail": {"total": 0, "pass": 0, "err": 0}, "failure": {"total": 0, "pass": 0, "err": 0}, "file_workitem": false});
+    let rpath = format!("/api/projects/p/graph/nodes/{}/testresult", tn.id);
+    let post = |pass: bool| t.ok("eng1", "POST", &rpath, Some(result(pass)));
+
+    // file newer than the node: before the fix the file won and the result was lost
+    post(true).await;
+    let n = t.node("p", &tn.id).await;
+    assert_eq!((n["file_state"].as_str(), n["node_version"].as_u64()), (Some("pending_write"), Some(2)));
+    let tested = n["timestamps"]["last_tested"].as_str().unwrap().to_string();
+    let mut f1 = tn.clone();
+    f1.desc = "the agent's edit".into();
+    f1.timestamps.last_modified = "2099-01-01 00:00:00Z".into();
+    let r = t.sync("p", json!({"engine": "e1", "files": [fjson(&f1, 1)]})).await;
+    assert!(r["conflicts"].as_array().unwrap().is_empty(), "{r}");
+    let rw = r["rewrite"][0]["text"].as_str().expect("the merged file is written back");
+    assert!(rw.contains("the agent's edit") && rw.contains("last_result") && rw.contains(&tested), "{rw}");
+    let n = t.node("p", &tn.id).await;
+    assert_eq!(n["desc"], "the agent's edit");
+    assert_eq!(n["front"]["last_result"]["overall_success"], true);
+    assert_eq!((n["file_state"].as_str(), n["timestamps"]["last_tested"].as_str()), (Some("synced"), Some(tested.as_str())));
+    assert!(t.pending("p").await.is_empty());
+
+    // file older than the node: before the fix the server won and the agent's edit was lost
+    post(false).await;
+    let n = t.node("p", &tn.id).await;
+    let mut f2: NodeDoc = nf::conform(&tn.path, rw, "2026-10-01 10:00:00Z", "stephen").doc.unwrap();
+    f2.desc = "an older agent edit".into();
+    f2.timestamps.last_modified = "2000-01-01 00:00:00Z".into();
+    let r = t.sync("p", json!({"engine": "e1", "files": [fjson(&f2, n["file_version"].as_u64().unwrap())]})).await;
+    assert!(r["conflicts"].as_array().unwrap().is_empty(), "{r}");
+    let n = t.node("p", &tn.id).await;
+    assert_eq!(n["desc"], "an older agent edit");
+    assert_eq!(n["front"]["last_result"]["overall_success"], false, "the newer (red) result is kept");
+    assert!(t.pending("p").await.is_empty());
+
+    // a real edit waiting too: still a conflict, but the result is carried anyway
+    t.ok("adm", "PATCH", &format!("/api/projects/p/graph/nodes/{}", tn.id), Some(json!({"body": "server body"}))).await;
+    post(true).await;
+    let n = t.node("p", &tn.id).await;
+    assert!(n["change"].as_str().unwrap().starts_with("edit "), "the edit stays named: {}", n["change"]);
+    let mut f3 = f2.clone();
+    f3.desc = "file wins".into();
+    f3.timestamps.last_modified = "2099-01-02 00:00:00Z".into();
+    let r = t.sync("p", json!({"engine": "e1", "files": [fjson(&f3, n["file_version"].as_u64().unwrap())]})).await;
+    assert_eq!(r["conflicts"][0]["winner"], "file", "{r}");
+    let n = t.node("p", &tn.id).await;
+    assert_eq!((n["desc"].as_str(), n["front"]["last_result"]["overall_success"].as_bool()), (Some("file wins"), Some(true)));
+
+    // dismissing: admin only, then the list is empty
+    assert_eq!(t.call("eng1", "DELETE", "/api/projects/p/graph/conflicts", None).await.0, 403);
+    let r = t.ok("adm", "DELETE", "/api/projects/p/graph/conflicts", None).await;
+    assert_eq!(r["removed"], 1);
+    assert!(t.ok("adm", "GET", "/api/projects/p/graph/conflicts", None).await["conflicts"].as_array().unwrap().is_empty());
+    t.done().await;
+}
+
 #[tokio::test]
 async fn pending_writes_deletes_moves_and_acks() {
     let t = T::new().await;

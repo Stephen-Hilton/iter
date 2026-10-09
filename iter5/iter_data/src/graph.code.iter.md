@@ -1,7 +1,7 @@
 ---
 id: 721bbfd0-b65d-44a9-b34f-daeb3f047340
 name: "Project graph API"
-desc: "Serves the project graph routes under /api/projects/{p}/graph: reads (whole graph, stats, the view the Project graph tab draws, lookup by path or name, owner of a path, sync conflicts, a use case's parts, one node, neighbours) and direct edits (create a node with its file path planned by the folder rules and attached to a parent, patch, delete with a reason, move, add / remove / move an edge). Every edit is conformed, visible at once, and becomes a pending file write for an engine."
+desc: "Serves the project graph routes under /api/projects/{p}/graph: reads (whole graph, stats, the view the Project graph tab draws, lookup by path or name, owner of a path, sync conflicts (and an admin's DELETE to dismiss them), a use case's parts, one node, neighbours) and direct edits (create a node with its file path planned by the folder rules and attached to a parent, patch, delete with a reason, move, add / remove / move an edge). Every edit is conformed, visible at once, and becomes a pending file write for an engine."
 creator: "iter migrate5"
 teststate: inherit
 level: component
