@@ -12,6 +12,9 @@ services:
     image: iter5:latest
     container_name: iter5
     restart: unless-stopped
+    # hard cap (memswap_limit = mem_limit: no swap on top)
+    mem_limit: ${ITER_MEM_LIMIT:-6g}
+    memswap_limit: ${ITER_MEM_LIMIT:-6g}
     ports:
       - "${ITER_PORT:-8400}:8400"
       # the Arango web console; bound to localhost only
@@ -21,6 +24,9 @@ services:
         required: false
     environment:
       ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:-iter4dev}
+      # arangod sizes its caches and AQL limits from the host's RAM, not the
+      # cgroup limit above; leave headroom for iter_data in the same container
+      ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY: ${ITER_ARANGO_MEMORY:-5G}
     # everything that persists (database, Arango apps, iter_data's files) in
     # one host folder, e.g. ~/.iter5/iter_data (deploy.ps1 / deploy.sh set it)
     volumes:
