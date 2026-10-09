@@ -30,6 +30,10 @@ One global, `IterKit`, with no dependencies; every class is prefixed `kit-` and 
 - `configure`: the Configure… lightbox — an editable key/value list built from a node's frontmatter (and body) or an edge's settings, returning only what changed.
 - `menu`: a context menu inside a host element; `help`: the keyboard-shortcut popover.
 - `endpointHandles`: drag handles on a selected Cytoscape edge's two ends, reporting the node an end is dropped on.
+- `springDrag`: in a force layout, a dragged node pulls its neighbours part of the way (half for a neighbour, a quarter two hops out, at most the 40 nearest), and on release fcose re-settles the graph from where things are, with the dropped node pinned.
+- `separate`: pushes apart any node boxes a force layout left overlapping.
+- `forceLayout`: one fcose run with given nodes held in place (label-box corrected), then `separate`.
+- `pins`: P pins a node where it is: not draggable, never pulled along, kept by every layout and settle; remembered per graph and layout in the browser.
 - `clip`: the copied edge (⌘C / ⌘V), one per graph scope.
 
 ## What goes in and out

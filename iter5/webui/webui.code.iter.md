@@ -24,7 +24,7 @@ webui is static HTML, CSS and JavaScript with no server code of its own. At buil
 
 ## How it is built
 
-`index.html` holds the login, the shared header (project picker, engine dot, Running | Stopped) and five tabs, switched by `setTab` and the keys 1–5, with the state in the URL hash (`#tab=graph&p=<project>`):
+`index.html` holds the login, the shared header (project picker, the project's status line: what stops it, engine dot, running, spend) and five tabs, switched by `setTab` and the keys 1–5, with the state in the URL hash (`#tab=graph&p=<project>`):
 
 | tab | file(s) | component |
 |---|---|---|

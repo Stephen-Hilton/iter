@@ -28,7 +28,7 @@ percentages and reset times. After a dispatch the provider's `get_usage` supplie
 the stream's `rate_limit_event`; mock: `ITER_MOCK_USAGE`); with nothing running, stale accounts are
 probed with a 1-output-token request whose rate-limit headers carry the same numbers
 (`ITER_USAGE_PROBE_URL` overrides the endpoint). `usage_map` and `effective_pct_for` feed `iter_core::pick_account`, which
-applies each project's `bills`-edge order and switch / stop percentages; `available_at` says when an
+applies each project's `bills`-edge order (P0 first; among accounts of one priority the one whose 7-day window resets soonest, `resets7d_map`) and switch / stop percentages; `available_at` says when an
 account comes back; `accounts_json` and `next_json` build the heartbeat's per-account windows and the
 next account to free up.
 

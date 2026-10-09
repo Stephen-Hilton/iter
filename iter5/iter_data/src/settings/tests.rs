@@ -493,6 +493,87 @@ async fn next_refuses_unserved_stopped_and_foreign_engines() {
     t.done().await;
 }
 
+/// The switches (2026-10-08): server and engine Stopped start nothing new —
+/// the assignments read Stopped and say why, next refuses, no GraphRAG work
+/// is offered; an account switch rides on the assignments. Who may flip which.
+#[tokio::test]
+async fn switches_stop_new_work_at_every_level() {
+    let t = T::new().await;
+    t.served("p", "e1", "eng1").await;
+    t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "account", "name": "main", "settings": {"token_envar": "MAIN_TOKEN"}}))).await;
+    t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "account:main", "to": "project:p", "settings": {"order": 1, "switch": 80, "stop": 95}}))).await;
+    t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "iter_engine:e1", "to": "account:main"}))).await;
+    t.item("p", json!({"id": "a"})).await;
+    let asg = |v: &Value| (v["projects"][0]["state"].as_str().unwrap_or("").to_string(), v["projects"][0]["stopped_by"].as_str().unwrap_or("").to_string());
+    assert_eq!(t.ok("alice", "GET", "/api/server", None).await["active"], true, "no row = Active");
+    assert_eq!(asg(&t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await), ("Running".into(), "".into()));
+
+    // the server: admin only
+    assert_eq!(t.call("alice", "POST", "/api/switch", Some(json!({"target": "iter_data:self", "active": false}))).await.0, 403);
+    assert_eq!(t.call("eng1", "POST", "/api/switch", Some(json!({"target": "server", "active": false}))).await.0, 403);
+    t.ok("adm", "POST", "/api/switch", Some(json!({"target": "iter_data:self", "active": false}))).await;
+    let sv = t.ok("alice", "GET", "/api/server", None).await;
+    assert_eq!((sv["active"].as_bool(), sv["active_by"].as_str()), (Some(false), Some("adm")));
+    assert_eq!(asg(&t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await), ("Stopped".into(), "server".into()));
+    assert_eq!(t.next("eng1", "p", "e1", json!({})).await.1["reason"], "server-stopped");
+    let hb = t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running"}))).await;
+    assert_eq!((hb["stopped_by"].as_str(), hb["rag_waiting"].clone()), (Some("server"), json!({})));
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p/status", None).await["server_active"], false);
+    // the project record itself is untouched: switching the server back resumes it
+    assert_eq!(t.store().get("project", "p", NOSK).await.unwrap().unwrap()["state"], "Running");
+    t.ok("adm", "POST", "/api/switch", Some(json!({"target": "server", "active": true}))).await;
+
+    // an engine: its owner or an admin, not another engine's token
+    assert_eq!(t.call("eng2", "POST", "/api/switch", Some(json!({"target": "iter_engine:e1", "active": false}))).await.0, 403);
+    assert_eq!(t.call("alice", "POST", "/api/switch", Some(json!({"target": "iter_engine:e1", "active": false}))).await.0, 403);
+    t.ok("eng1", "POST", "/api/switch", Some(json!({"target": "iter_engine:e1", "active": false}))).await;
+    assert_eq!(asg(&t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await), ("Stopped".into(), "engine".into()));
+    assert_eq!(t.next("eng1", "p", "e1", json!({})).await.1["reason"], "engine-stopped");
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p/status", None).await["engines"][0]["active"], false);
+    // a heartbeat keeps the switch (it is not the engine's to set)
+    t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running"}))).await;
+    assert_eq!(t.store().get("engine", "e1", NOSK).await.unwrap().unwrap()["active"], false);
+    let g = t.ok("adm", "GET", "/api/settings/graph", None).await;
+    let node = |id: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).cloned().unwrap();
+    assert!(node("iter_engine:e1")["summary"].as_str().unwrap().starts_with("switched off"));
+    t.ok("adm", "POST", "/api/switch", Some(json!({"target": "iter_engine:e1", "active": true}))).await;
+    assert_eq!(t.next("eng1", "p", "e1", json!({})).await.1["item"]["id"], "a");
+
+    // an account: admin only; it rides on the assignments
+    assert_eq!(t.call("eng1", "POST", "/api/switch", Some(json!({"target": "account:main", "active": false}))).await.0, 403);
+    let acct = |v: &Value| v["projects"][0]["accounts"][0].get("stopped").and_then(|s| s.as_bool()).unwrap_or(false);
+    assert!(!acct(&t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await));
+    t.ok("adm", "POST", "/api/switch", Some(json!({"target": "account:main", "active": false}))).await;
+    assert!(acct(&t.ok("eng1", "GET", "/api/engines/e1/assignments", None).await));
+    // projects keep their state; unknown targets and other node types are refused
+    assert_eq!(t.call("adm", "POST", "/api/switch", Some(json!({"target": "project:p", "active": false}))).await.0, 400);
+    assert_eq!(t.call("adm", "POST", "/api/switch", Some(json!({"target": "agent:code", "active": false}))).await.0, 400);
+    assert_eq!(t.call("adm", "POST", "/api/switch", Some(json!({"target": "iter_engine:ghost", "active": false}))).await.0, 404);
+    t.done().await;
+}
+
+/// The Accounts pane's usage refresh (2026-10-08): probe_requested is set by
+/// any writer and cleared by the engine's heartbeat; the engine's usage report
+/// is status, not a setting, so the settings graph does not show it.
+#[tokio::test]
+async fn usage_refresh_round_trip_and_the_report_is_not_a_setting() {
+    let t = T::new().await;
+    t.served("p", "e1", "eng1").await;
+    let r = t.ok("alice", "POST", "/api/engines/e1/probe", Some(json!({}))).await;
+    let rec = t.ok("adm", "GET", "/api/engines/e1", None).await;
+    assert_eq!(rec["probe_requested"], r["requested"]);
+    assert_eq!(t.call("vic", "POST", "/api/engines/e1/probe", Some(json!({}))).await.0, 403, "a viewer cannot ask");
+    t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running", "clear_probe": true,
+        "accounts": [{"name": "main", "five_hour_pct": 12.0}], "usage": {"account": "main"}, "next": null}))).await;
+    let rec = t.ok("adm", "GET", "/api/engines/e1", None).await;
+    assert_eq!((rec["probe_requested"].as_str(), rec["accounts"][0]["five_hour_pct"].as_f64()), (Some(""), Some(12.0)));
+    let g = t.ok("adm", "GET", "/api/settings/graph", None).await;
+    let s = &g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "iter_engine:e1").unwrap()["settings"];
+    assert!(s.get("accounts").is_none() && s.get("usage").is_none() && s.get("next").is_none(), "{s}");
+    assert_eq!(s["host"].as_str().is_some() || s.get("state").is_some(), true, "settings still shown: {s}");
+    t.done().await;
+}
+
 // ---------- authz ----------
 
 #[tokio::test]

@@ -817,16 +817,17 @@ fn run_claude(
         .map_err(|e| format!("agent '{}' not defined in iter_data: {e}", item.agent))?;
     let promptbody = agent_def.get("promptbody").and_then(|p| p.as_str()).unwrap_or("").to_string();
     let overrides = project.agents.get(&item.agent).cloned().unwrap_or(Value::Null);
-    // model: the item's own, else the `bills` edge's override for this
-    // account, else the project's agent override, else the agent record's
-    let model = if !item.model.trim().is_empty() {
-        item.model.trim().to_string()
-    } else if let Some(m) = crate::provider::model_override(project.key(), account) {
-        m
-    } else {
-        overrides.get("model").and_then(|m| m.as_str())
-            .or_else(|| agent_def.get("model").and_then(|m| m.as_str())).unwrap_or("").to_string()
-    };
+    // model: the item's own, else the project's agent override, else the
+    // agent record's — and the `bills` edge's default for this account when
+    // none of them names one, or names one the account's provider cannot run
+    // (2026-10-08: an account moved to another provider keeps working while
+    // the agents still name the old provider's models)
+    let named = [item.model.as_str(), overrides.get("model").and_then(|m| m.as_str()).unwrap_or(""), agent_def.get("model").and_then(|m| m.as_str()).unwrap_or("")]
+        .into_iter()
+        .map(str::trim)
+        .find(|m| !m.is_empty())
+        .unwrap_or("");
+    let model = crate::provider::model_for(project.key(), account, named);
     let flags = overrides.get("flags").and_then(|f| f.as_str())
         .or_else(|| agent_def.get("flags").and_then(|f| f.as_str())).unwrap_or("").to_string();
     let timeout = agent_timeout(project, item, &agent_def);
@@ -1379,6 +1380,9 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
         cmd.stdin(Stdio::piped());
     }
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    // on Windows, dropping `tree` (every return below) also kills whatever
+    // the run left behind — see ProcessTree
+    let tree = iter_core::platform::ProcessTree::adopt(&child);
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         // its own thread: a child that stops reading must not wedge the engine
         std::thread::spawn(move || {
@@ -1396,7 +1400,7 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
     let deadline = Instant::now() + Duration::from_secs(timeout_sec.max(1));
     loop {
         if let Some(why) = stop.check() {
-            iter_core::platform::kill_tree(child.id());
+            tree.kill();
             let _ = child.kill();
             let _ = child.wait();
             return Err(why);
@@ -1416,7 +1420,7 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
                     // timed-out session's background builders and loops must
                     // not keep writing to the shared checkout (CR 2026-09-25
                     // 2.3 — before, only the direct child was killed)
-                    iter_core::platform::kill_tree(child.id());
+                    tree.kill();
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("timed out after {timeout_sec}s"));

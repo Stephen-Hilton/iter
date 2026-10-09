@@ -403,11 +403,190 @@
     return { clear: () => { clear(); edge = null; }, refresh: () => { if (edge) show(edge); }, get edge() { return edge; } };
   }
 
+  // ------------------------------------------------------------------ overlap removal
+  /**
+   * separate(cy, nodes, {pad, pinned: Set of ids, animate}) — fcose's repulsion does not guarantee that
+   * no two nodes overlap (two nodes with the same neighbours can land on one spot). This pushes every
+   * overlapping pair of leaf boxes apart along the axis that needs the smaller move, half each (all of it
+   * for the one that is not pinned), until nothing overlaps or 60 rounds pass.
+   */
+  function separate(cy, nodes, opts) {
+    const o = Object.assign({ pad: 14, pinned: new Set(), animate: false }, opts || {});
+    const list = nodes.filter((n) => !n.isParent() && n.visible()).map((n) => {
+      const p = n.position(); const w = n.outerWidth() + o.pad; const h = n.outerHeight() + o.pad;
+      return { n, x: p.x, y: p.y, w, h, fixed: o.pinned.has(n.id()) };
+    });
+    for (let round = 0; round < 60; round++) {
+      let moved = false;
+      for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+        const a = list[i]; const b = list[j];
+        if (a.fixed && b.fixed) continue;
+        const ox = (a.w + b.w) / 2 - Math.abs(a.x - b.x); const oy = (a.h + b.h) / 2 - Math.abs(a.y - b.y);
+        if (ox <= 0 || oy <= 0) continue;
+        moved = true;
+        const alongX = ox < oy;
+        const sign = alongX ? (a.x < b.x || (a.x === b.x && i < j) ? -1 : 1) : (a.y < b.y || (a.y === b.y && i < j) ? -1 : 1);
+        const d = alongX ? ox : oy; const sa = a.fixed ? 0 : b.fixed ? 1 : 0.5; const sb = 1 - sa;
+        if (alongX) { a.x += sign * d * sa; b.x -= sign * d * sb; } else { a.y += sign * d * sa; b.y -= sign * d * sb; }
+      }
+      if (!moved) break;
+    }
+    list.forEach((e) => {
+      const p = e.n.position(); if (Math.abs(p.x - e.x) < 0.5 && Math.abs(p.y - e.y) < 0.5) return;
+      if (o.animate) e.n.animate({ position: { x: e.x, y: e.y } }, { duration: 180 }); else e.n.position({ x: e.x, y: e.y });
+    });
+  }
+
+  // ------------------------------------------------------------------ pinned nodes
+  /**
+   * pins(cy, {key() -> localStorage key, or null when pins are off}) (decided 2026-10-08)
+   * A pinned node stays where it is: it cannot be dragged, never follows a dragged neighbour, and every
+   * layout and settle leaves it in place. Pins are remembered per key (the graph and its layout) as
+   * {id: {x, y}} in this browser. P toggles the selection (the hosts bind the key).
+   */
+  function pins(cy, opts) {
+    const o = opts || {};
+    cy.style().selector('node.kit-pinned').style({ 'border-width': 3, 'border-style': 'double', 'border-color': '#facc15' }).update();
+    const read = () => { const k = o.key && o.key(); if (!k) return {}; try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch (e) { return {}; } };
+    const write = (m) => { const k = o.key && o.key(); if (!k) return; try { localStorage.setItem(k, JSON.stringify(m)); } catch (e) { /* storage blocked */ } };
+    const api = {
+      /** ids pinned under the current key */
+      ids: () => new Set(Object.keys(read())),
+      has: (n) => n.hasClass('kit-pinned'),
+      /** put every pinned node of the current key back where it was pinned, and mark it */
+      apply() {
+        const m = read();
+        cy.batch(() => {
+          cy.nodes('.kit-pinned').forEach((n) => { if (!m[n.id()]) { n.removeClass('kit-pinned'); n.grabify(); } });
+          Object.entries(m).forEach(([id, p]) => { const n = cy.getElementById(id); if (n.empty() || n.isParent()) return; n.position(p); n.addClass('kit-pinned'); n.ungrabify(); });
+        });
+      },
+      /** fcose fixedNodeConstraint entries for the pinned nodes in view */
+      constraints() { return Object.entries(read()).filter(([id]) => cy.getElementById(id).nonempty()).map(([id, p]) => ({ nodeId: id, position: { x: p.x, y: p.y } })); },
+      /** pin or unpin: all of `nodes` unpinned -> pin them where they are, else unpin them. Returns 'pinned' | 'unpinned' | null. */
+      toggle(nodes) {
+        const list = nodes.filter((n) => !n.isParent() && !n.id().startsWith('__'));
+        if (list.empty() || !(o.key && o.key())) return null;
+        const m = read(); const pin = list.some((n) => !m[n.id()]);
+        list.forEach((n) => { if (pin) { m[n.id()] = Object.assign({}, n.position()); n.addClass('kit-pinned'); n.ungrabify(); } else { delete m[n.id()]; n.removeClass('kit-pinned'); n.grabify(); } });
+        write(m);
+        return pin ? 'pinned' : 'unpinned';
+      },
+    };
+    return api;
+  }
+
+  // ------------------------------------------------------------------ drag with neighbours, then settle (Cytoscape + fcose)
+  /**
+   * springDrag(cy, {enabled() -> bool, skip(node) -> bool, layout() -> fcose options, hops, falloff, maxFollow, onMove(nodes), onSettled()})
+   * For the force layouts (decided 2026-10-08). While a node is dragged, the nodes near it follow part of
+   * the way: falloff^hop of the move (default 0.5 for a neighbour, 0.25 two hops out), as if tied by springs;
+   * at most maxFollow (40) of them, the fewest hops away first, then the closest, so a hub does not haul
+   * the whole drawing. Followers move once per animation frame.
+   * On release, fcose runs again from the current positions (randomize: false) with the dropped node pinned,
+   * animated, so the springs (edges) and the repulsion between nodes find a new balance around it; then
+   * `separate` pushes apart any boxes still overlapping.
+   * Compound parents move with their children (Cytoscape's own); skip() nodes (helpers, nodes another rule
+   * places) neither follow nor take part in the settle. A tap — no real move — changes nothing.
+   */
+  function springDrag(cy, opts) {
+    const o = Object.assign({ hops: 2, falloff: 0.5, minMove: 4, maxFollow: 40 }, opts || {});
+    const skipped = (n) => n.hasClass('kit-ep') || n.id().startsWith('__') || (o.skip && o.skip(n));
+    const isPinned = (n) => n.hasClass('kit-pinned');
+    let drag = null; let running = null;
+    cy.on('grab', 'node', (ev) => {
+      const n = ev.target;
+      if (skipped(n) || (o.enabled && !o.enabled())) { drag = null; return; }
+      if (running) { running.stop(); running = null; }
+      // every node grabbed together (and what they carry) is moved by Cytoscape; the rest may follow
+      const held = cy.nodes(':grabbed').union(n);
+      const carried = held.union(held.descendants());
+      const weight = new Map();
+      let ring = held; const seen = new Set(carried.map((x) => x.id()));
+      held.ancestors().forEach((a) => seen.add(a.id()));
+      for (let hop = 1; hop <= o.hops; hop++) {
+        const next = ring.union(ring.descendants()).neighborhood('node').filter((x) => !seen.has(x.id()) && !skipped(x) && x.visible());
+        if (next.empty()) break;
+        const w = Math.pow(o.falloff, hop);
+        next.forEach((x) => {
+          seen.add(x.id());
+          // a compound follows by moving its leaves; a leaf inside a followed compound keeps the compound's weight
+          (x.isParent() ? x.descendants().filter((d) => !d.isParent() && !skipped(d)) : x).forEach((leaf) => { if (!weight.has(leaf.id()) && !isPinned(leaf)) weight.set(leaf.id(), w); });
+        });
+        ring = next;
+      }
+      carried.forEach((x) => weight.delete(x.id()));
+      // a hub would drag the whole drawing: only the nearest maxFollow follow (fewest hops, then closest)
+      if (weight.size > o.maxFollow) {
+        const p0 = n.position(); const dist = (id) => { const q = cy.getElementById(id).position(); return Math.hypot(q.x - p0.x, q.y - p0.y); };
+        [...weight.entries()].sort((a, b) => b[1] - a[1] || dist(a[0]) - dist(b[0])).slice(o.maxFollow).forEach(([id]) => weight.delete(id));
+      }
+      const els = [...weight.keys()].map((id) => cy.getElementById(id)).filter((el) => el.nonempty());
+      drag = { node: n, at: Object.assign({}, n.position()), from: Object.assign({}, n.position()), weight, els: cy.collection(els), dx: 0, dy: 0, frame: 0 };
+    });
+    // followers move at most once per animation frame, by everything the node moved since the last one
+    const follow = (d) => {
+      d.frame = 0;
+      const dx = d.dx; const dy = d.dy; d.dx = 0; d.dy = 0;
+      if (!dx && !dy) return;
+      cy.batch(() => d.els.forEach((el) => { const w = d.weight.get(el.id()); const q = el.position(); el.position({ x: q.x + dx * w, y: q.y + dy * w }); }));
+      if (o.onMove && d.els.nonempty()) o.onMove(d.els);
+    };
+    cy.on('drag', 'node', (ev) => {
+      const d = drag;
+      if (!d || ev.target !== d.node) return;
+      const p = d.node.position(); d.dx += p.x - d.at.x; d.dy += p.y - d.at.y;
+      d.at = Object.assign({}, p);
+      if (!d.frame) d.frame = requestAnimationFrame(() => { if (drag === d) follow(d); });
+    });
+    cy.on('free', 'node', (ev) => {
+      const d = drag; drag = null;
+      if (!d || ev.target !== d.node) return;
+      if (d.frame) { cancelAnimationFrame(d.frame); follow(d); }
+      const p = d.node.position();
+      if (Math.hypot(p.x - d.from.x, p.y - d.from.y) < o.minMove) return;
+      const dropped = (d.node.isParent() ? d.node.descendants().filter((x) => !x.isParent()) : d.node).filter((x) => !skipped(x));
+      const nodes = cy.nodes().filter((x) => !skipped(x) && x.visible());
+      running = forceLayout(cy, nodes, o.layout ? o.layout() : { name: 'fcose' }, dropped.union(nodes.filter(isPinned)), {
+        randomize: false, animate: true, animationDuration: 450,
+        done: () => { running = null; if (o.onSettled) setTimeout(o.onSettled, 200); },
+      });
+    });
+    return { get settling() { return !!running; } };
+  }
+
+  /**
+   * forceLayout(cy, nodes, fcoseOptions, fixed, {randomize, animate, animationDuration, done})
+   * fcose over `nodes` (and the edges among them) with every node in `fixed` held where it is, then
+   * `separate` (fixed nodes stay put). With label-inclusive sizes fcose holds the centre of node + label,
+   * not the node: the constraint names that box, so the node itself does not move. Returns the layout.
+   */
+  function forceLayout(cy, nodes, fcose, fixed, opts) {
+    const o = Object.assign({ randomize: false, animate: false }, opts || {});
+    const lo = Object.assign({}, fcose);
+    const at = (x) => {
+      const q = x.position();
+      if (!lo.nodeDimensionsIncludeLabels) return { x: q.x, y: q.y };
+      const bb = x.boundingBox({ includeLabels: true, includeOverlays: false });
+      return { x: (bb.x1 + bb.x2) / 2, y: (bb.y1 + bb.y2) / 2 };
+    };
+    const held = fixed.filter((x) => !x.isParent() && nodes.contains(x));
+    const eles = nodes.union(nodes.edgesWith(nodes));
+    const extra = { randomize: o.randomize, animate: o.animate, fit: false };
+    if (o.animate) extra.animationDuration = o.animationDuration || 450;
+    if (held.nonempty()) extra.fixedNodeConstraint = held.map((x) => ({ nodeId: x.id(), position: at(x) }));
+    const lay = eles.layout(Object.assign(lo, extra));
+    const ids = new Set(held.map((x) => x.id()));
+    lay.one('layoutstop', () => { separate(cy, nodes, { pinned: ids, animate: o.animate }); if (o.done) o.done(); });
+    lay.run();
+    return lay;
+  }
+
   /** True while the user types in a field (shortcuts must not fire). */
   const typing = () => { const a = document.activeElement; return !!a && (a.isContentEditable || /^(TEXTAREA|SELECT)$/.test(a.tagName) || (a.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|reset|range|color)$/i.test(a.type || ''))); };
   /** A modal dialog is open (shortcuts must not reach the page under it). */
   const dialogOpen = () => !!document.querySelector('dialog[open]');
 
-  window.IterKit = { HELPER_NODE, HELPER_EDGE, esc, md, toast, modal, ask, confirm: confirmBox, choose, configure, menu, closeMenu, help, endpointHandles, typing, dialogOpen, MOD, isMac,
+  window.IterKit = { HELPER_NODE, HELPER_EDGE, esc, md, toast, modal, ask, confirm: confirmBox, choose, configure, menu, closeMenu, help, endpointHandles, springDrag, separate, forceLayout, pins, typing, dialogOpen, MOD, isMac,
     clip: { project: null, settings: null } };
 }());

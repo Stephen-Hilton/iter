@@ -1,7 +1,7 @@
 /* iter5 webui — the GraphRAG tab. Colours from index.html's :root tokens. */
 #tab-rag{display:none}
 body.tab-rag #tab-rag{display:block}
-body.tab-rag #layout{display:none !important}
+/* the side panel stays (index.html hides main on this tab) */
 body.tab-rag #counts,body.tab-rag #ucrow,body.tab-rag #depthticks{display:none !important}
 .rag-wrap{padding:14px 16px 40px;max-width:1500px;margin:0 auto;box-sizing:border-box}
 .rag-head{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:12px}

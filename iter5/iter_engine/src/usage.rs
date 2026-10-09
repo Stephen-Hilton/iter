@@ -275,6 +275,21 @@ pub fn usage_map(accounts: &[iter_core::Account], now: DateTime<Utc>) -> BTreeMa
     out
 }
 
+/// account name -> when its 7-day window resets (unix seconds): the ladder's
+/// tie-break among accounts of one priority (2026-10-08). A reset already
+/// past means a fresh window, so it counts as a full 7 days away; an account
+/// with no snapshot is left out (it goes after those with one).
+pub fn resets7d_map(accounts: &[iter_core::Account], now: DateTime<Utc>) -> BTreeMap<String, i64> {
+    let now_s = now.timestamp();
+    accounts
+        .iter()
+        .filter_map(|a| {
+            let at = read_usage(&a.name)?.seven_day_resets_at?;
+            Some((a.name.clone(), if at > now_s { at } else { now_s + 7 * 86_400 }))
+        })
+        .collect()
+}
+
 /// Effective pct for a single (possibly unnamed/default) account.
 pub fn effective_pct_for(account: &str, now: DateTime<Utc>) -> u8 {
     read_usage(account)
@@ -321,8 +336,10 @@ pub fn accounts_json(accounts: &[iter_core::Account], in_use: &[String], now: Da
         .map(|a| {
             let u = read_usage(&a.name);
             let at = available_at(u.as_ref(), a.stop, now);
+            // usage only: order / switch / stop are the bills edge's settings and
+            // are not repeated here (2026-10-08) — available_at already uses stop
             let row = json!({
-                "name": a.name, "order": a.order, "switch": a.switch, "stop": a.stop,
+                "name": a.name,
                 "in_use": in_use.contains(&a.name),
                 // is the account's token set in the engine's env_file right now
                 // (spec: account hot reload, 2026-09-11) — the webui marks "unset"
@@ -373,6 +390,21 @@ mod tests {
         let flag = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap()["token"].as_str().unwrap().to_string();
         assert_eq!(flag("Has"), "set");
         assert_eq!(flag("Not"), "unset");
+    }
+
+    /// The ladder's tie-break input (2026-10-08): a future reset as is, a past
+    /// one as a fresh 7-day window, no snapshot left out.
+    #[test]
+    fn resets7d_map_reads_each_accounts_7d_reset() {
+        let now = Utc::now();
+        let snap = |name: &str, at: i64| write_snapshot(name, &Usage { ts: Some(now), seven_day_resets_at: Some(at), source: "mock".into(), ..Default::default() }).unwrap();
+        snap("usage-r7-soon", now.timestamp() + 3_600);
+        snap("usage-r7-past", now.timestamp() - 3_600);
+        let acct = |n: &str| iter_core::Account { name: n.into(), ..Default::default() };
+        let m = resets7d_map(&[acct("usage-r7-soon"), acct("usage-r7-past"), acct("usage-r7-never")], now);
+        assert_eq!(m.get("usage-r7-soon"), Some(&(now.timestamp() + 3_600)));
+        assert_eq!(m.get("usage-r7-past"), Some(&(now.timestamp() + 7 * 86_400)));
+        assert!(!m.contains_key("usage-r7-never"));
     }
 
     #[test]

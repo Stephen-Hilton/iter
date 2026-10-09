@@ -155,6 +155,10 @@ pub async fn get_next(user: AuthUser, State(st): State<Arc<AppState>>, Path(name
     if serves.setting("read_only").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Ok(not_served(format!("engine '{}' serves '{name}' read-only", req.engine)));
     }
+    // the server's and the engine's switches: Stopped starts nothing new
+    if let Some(by) = crate::switches::engine_block(store, &req.engine).await? {
+        return Ok(Json(json!({"item": null, "reason": format!("{by}-stopped"), "detail": format!("the {by} switch is Stopped")})));
+    }
     let project = store.get("project", &name, NOSK).await?.ok_or_else(notfound)?;
     let pstate = Some(body_str(&project, "state")).filter(|s| !s.is_empty()).unwrap_or_else(|| "Running".into());
     if pstate != "Running" {

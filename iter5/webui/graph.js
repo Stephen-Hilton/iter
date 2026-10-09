@@ -402,6 +402,7 @@
     // ------------------------------------------------------------------ state (mirrored in the URL hash)
     const DEFAULTS = { uc: '', layout: 'cluster', flow: 'process', branch: '', dim: false, own: false, hide: null };
     const state = Object.assign({}, DEFAULTS);
+    let PINS = null; // IterKit.pins, once the drawing exists
     const BOOLS = ['dim', 'own'];
     const HIDE_KEY = () => 'iter5.graph.hide2.' + (CTX.project || ''); // hide2: since req nodes (2026-10-02), so an older saved choice cannot unhide them
     /** The default node types to hide: requirement sections always; tests and requirement files too on a big project. */
@@ -732,23 +733,23 @@
         { selector: 'node.req.rs-done', style: { 'border-color': '#4ade80', 'border-width': 1.6 } },
         { selector: 'edge', style: {
           width: 'data(width)', 'line-color': 'data(color)', 'line-style': 'data(line)', 'target-arrow-color': 'data(color)', 'target-arrow-shape': 'data(arrow)',
-          'arrow-scale': 0.85, 'curve-style': 'bezier', opacity: 0.7 } },
+          'arrow-scale': 0.85, 'curve-style': 'straight', opacity: 0.7 } },
+        // every edge is a straight line (2026-10-08); a self-loop has no straight form
+        { selector: 'edge:loop', style: { 'curve-style': 'bezier' } },
         { selector: 'edge.k-codenodes', style: { opacity: 0.55, 'arrow-scale': 0.6 } },
         { selector: 'edge.k-reqs, edge.k-tests', style: { opacity: 0.55 } },
         { selector: 'edge.k-supplies, edge.k-connects', style: { opacity: 0.9, 'arrow-scale': 1 } },
-        { selector: 'edge.k-contains', style: { 'curve-style': 'taxi', 'taxi-direction': 'rightward', 'taxi-turn': '-14px', 'taxi-turn-min-distance': '4px', 'target-arrow-shape': 'none', opacity: 0.5 } },
+        { selector: 'edge.k-contains', style: { 'target-arrow-shape': 'none', opacity: 0.5 } },
         { selector: 'edge.bad', style: { 'line-dash-pattern': [7, 4] } },
         { selector: 'edge.flow, edge.start', style: {
           opacity: 0.95, label: 'data(label)', 'font-size': 14, 'font-weight': 700, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.92,
           'text-background-padding': '2px', 'text-background-shape': 'roundrectangle', 'text-border-width': 1, 'text-border-color': 'data(color)', 'text-border-opacity': 0.6, 'z-index': 5 } },
-        { selector: 'edge.curved', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': 'data(cpd)', 'control-point-weights': 0.5 } },
         { selector: 'node.focus', style: { 'font-size': 15, 'text-max-width': '180px' } },
         { selector: 'edge.flow.branch', style: { width: 2.2, opacity: 0.8 } },
         { selector: 'node.anchor', style: { width: 1, height: 1, opacity: 0, label: '', events: 'no' } },
         { selector: 'edge.lifeline', style: { width: 1.2, 'line-color': '#3a414d', 'line-style': 'dashed', 'target-arrow-shape': 'none', opacity: 1, events: 'no' } },
         { selector: 'node.seqhead', style: { 'font-size': 19, 'text-max-width': '172px', 'text-valign': 'top', 'text-margin-y': -4, 'z-index': 20, 'text-background-color': '#14161a', 'text-background-opacity': 0.92, 'text-background-padding': '3px' } },
         { selector: 'edge.seqmsg', style: { 'font-size': 17, 'curve-style': 'straight', 'arrow-scale': 1 } },
-        { selector: 'edge.seqmsg.curved', style: { 'curve-style': 'unbundled-bezier' } },
         { selector: 'node.section', style: { width: 1, height: 1, opacity: 1, 'background-opacity': 0, 'border-width': 0, label: 'data(label)', 'font-size': 16, 'font-weight': 700, color: '#8b93a1', 'text-valign': 'center', 'text-halign': 'center', events: 'no' } },
         { selector: '.dim', style: { opacity: 0.12 } },
         { selector: 'node.dim', style: { 'text-opacity': 0.35 } },
@@ -901,6 +902,7 @@
           for (let i = 1; i < 80 && !free(p); i++) { const a = i * 0.9; const r = 90 + i * 14; p = { x: at.x + r * Math.cos(a), y: at.y + r * Math.sin(a) }; }
           n.position(p); taken.push(p);
         });
+        if (PINS) PINS.apply();
         if (newReqs.size) placeReqs(newReqs);
         cy.resize(); cy.viewport({ zoom: keep.zoom, pan: keep.pan });
       } else {
@@ -927,9 +929,9 @@
       let pos = null;
       const aspect = Math.min(3, Math.max(0.8, cy.width() / Math.max(1, cy.height())));
       if (layout === 'cluster') {
-        cy.layout({ name: 'fcose', quality: 'default', randomize: true, animate: false, nodeDimensionsIncludeLabels: true,
-          idealEdgeLength: () => 85, nodeRepulsion: () => 11000, nodeSeparation: 90, edgeElasticity: () => 0.15, nestingFactor: 0.1, gravity: 0.5, gravityCompound: 2, gravityRangeCompound: 1.0,
-          numIter: 4000, packComponents: true, ...(window.__fcoseOverride || {}), tile: true, tilingPaddingVertical: 20, tilingPaddingHorizontal: 20, fit: false }).run();
+        // pinned nodes (P) are held where they were pinned
+        if (PINS) PINS.apply();
+        IterKit.forceLayout(cy, cy.nodes().filter((n) => !n.hasClass('req') && !isHelper(n)), { ...clusterForces(), packComponents: true, tile: true, tilingPaddingVertical: 20, tilingPaddingHorizontal: 20 }, cy.nodes('.kit-pinned'), { randomize: true });
       } else if (layout === 'flow') {
         cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 26, rankSep: 110, edgeSep: 8, ranker: 'network-simplex', nodeDimensionsIncludeLabels: true, fit: false, animate: false }).run();
       } else if (layout === 'tiered') {
@@ -939,6 +941,7 @@
         else pos = ringPositions(ids, layEdges.concat(structural), wholeBandR, { maxSubRings: 2, minArc: reqDrawn ? 210 : 120, ringGap: reqDrawn ? 230 : 190, subRingGap: 95 });
       }
       if (pos) cy.nodes().filter((n) => !n.hasClass('req')).positions((n) => pos.get(n.id()) || { x: 0, y: 0 });
+      if (PINS) PINS.apply();
       if (reqDrawn) placeReqs(null);
       cy.fit(undefined, v.uc && !state.dim ? 55 : 30);
       if (cy.zoom() > 1.4) { cy.zoom(1.4); cy.center(); }
@@ -969,6 +972,13 @@
         list.forEach((n, i) => cy.getElementById(n.id).position({ x: x0, y: y0 + i * REQ_COL.dy }));
       });
     }
+    /** The Cluster layout's springs, repulsion and gravity (also the settle after a drag, IterKit.springDrag);
+     *  weak springs (edgeElasticity 0.05) so a drag disturbs little beyond the nodes it pulls. */
+    function clusterForces() {
+      return { name: 'fcose', quality: 'default', nodeDimensionsIncludeLabels: true,
+        idealEdgeLength: () => 85, nodeRepulsion: () => 11000, nodeSeparation: 90, edgeElasticity: () => 0.05, nestingFactor: 0.1, gravity: 0.5, gravityCompound: 2, gravityRangeCompound: 1.0,
+        numIter: 4000, ...(window.__fcoseOverride || {}) };
+    }
     // dragging a file takes its column of sections along
     let fileDrag = null;
     cy.on('grab', 'node.bizreq, node.techreq', (evt) => { fileDrag = { id: evt.target.id(), at: Object.assign({}, evt.target.position()) }; });
@@ -979,6 +989,25 @@
       cy.nodes('.req').forEach((el) => { const n = nodesById.get(el.id()); if (n && n.file === fileDrag.id) el.position({ x: el.position('x') + dx, y: el.position('y') + dy }); });
     });
     cy.on('free', 'node.bizreq, node.techreq', () => { fileDrag = null; });
+
+    // Cluster layout: a dragged node pulls its neighbours along (a requirement file brings its
+    // column of sections), and on release the graph settles around where it was dropped
+    const reqsOfFiles = (files) => { const ids = new Set(files.map((f) => f.id())); return new Set(cy.nodes('.req').filter((el) => { const n = nodesById.get(el.id()); return n && ids.has(n.file); }).map((el) => el.id())); };
+    // P pins a node where it is (per project, layout and use case, in this browser); the Sequence view is all position maths
+    PINS = IterKit.pins(cy, { key: () => (state.layout === 'sequence' ? null : 'iter5.graph.pins.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '')) });
+    function togglePin(id) {
+      const el = cy.getElementById(id); if (el.empty()) return;
+      const r = PINS.toggle(el);
+      if (r) IterKit.toast(r === 'pinned' ? 'Pinned ' + (el.data('label') || id) : 'Unpinned ' + (el.data('label') || id), { kind: 'ok', ms: 1400 });
+      else if (state.layout === 'sequence') IterKit.toast('The Sequence view places every node itself: pin in another layout.', { kind: 'info' });
+    }
+    IterKit.springDrag(cy, {
+      enabled: () => state.layout === 'cluster' && !(window.IterGraphEdit && IterGraphEdit.drawing),
+      skip: (n) => n.hasClass('req') || isHelper(n),
+      layout: clusterForces,
+      onMove: (moved) => { const files = moved.filter('.bizreq, .techreq'); if (files.nonempty()) placeReqs(reqsOfFiles(files)); },
+      onSettled: () => { if (cy.nodes('.req').nonempty()) placeReqs(null); },
+    });
 
     function renderUcSummary(v) {
       const box = $('ucsummary');
@@ -1457,6 +1486,7 @@
       if (ev.key === 'Escape' && SELECTED && !(window.IterGraphEdit && IterGraphEdit.drawing)) { select(null); return; }
       if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); fit(); }
       else if (ev.key === 'r' || ev.key === 'R') { ev.preventDefault(); render(); }
+      else if ((ev.key === 'p' || ev.key === 'P') && SELECTED && SELECTED.kind === 'node') { ev.preventDefault(); togglePin(SELECTED.id); }
       else if (ev.key === '?') { ev.preventDefault(); openHelp(); }
     });
 
@@ -1559,7 +1589,7 @@
     function openHelp() {
       if (!window.IterKit) return;
       const groups = [
-        ['Moving around', [['/ / Mod+F', 'Search nodes and use-case steps'], ['F', 'Fit the drawing on screen'], ['R', 'Run the layout again'], ['Esc', 'Clear the selection, close a menu'], ['Scroll / two fingers', 'Pan'], ['Mod+scroll / pinch', 'Zoom'], ['?', 'This help']]],
+        ['Moving around', [['/ / Mod+F', 'Search nodes and use-case steps'], ['F', 'Fit the drawing on screen'], ['R', 'Run the layout again'], ['P', 'Pin the selected node in place (again: unpin)'], ['Esc', 'Clear the selection, close a menu'], ['Scroll / two fingers', 'Pan'], ['Mod+scroll / pinch', 'Zoom'], ['?', 'This help']]],
         ['Show and hide', [['Click a type chip', 'Show or hide that node type'], ['Alt+click a chip', 'Show only that type'], ['Network map', 'Code and connections only, left to right']]],
       ].concat(window.IterGraphEdit && IterGraphEdit.helpGroups ? IterGraphEdit.helpGroups() : []);
       IterKit.help('Project graph — shortcuts', groups, 'The type chips and the view live in the page address, so a copied link opens the same picture.');
@@ -1624,7 +1654,7 @@
       get model() { return { G, nodesById, outE, inE, usecases: USECASES }; },
       get selected() { return SELECTED ? Object.assign({}, SELECTED) : null; },
       edgeRecord: (eid) => EDGES.get(eid) || null,
-      select, focusNode, focusEdgeId, hide: hideNode, banner: (h, ms) => {
+      select, focusNode, focusEdgeId, hide: hideNode, togglePin, isPinned: (id) => cy.getElementById(id).hasClass('kit-pinned'), banner: (h, ms) => {
         const b = $('banner'); b.innerHTML = h; b.classList.toggle('hidden', !h);
         if (ms) setTimeout(() => { if (b.innerHTML === h) { b.textContent = LASTING; b.classList.toggle('hidden', !LASTING); } }, ms);
       },

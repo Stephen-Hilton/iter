@@ -21,9 +21,7 @@ services:
         required: false
     environment:
       ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:-iter4dev}
+    # everything that persists (database, Arango apps, iter_data's files) in
+    # one host folder, e.g. ~/.iter5/iter_data (deploy.ps1 / deploy.sh set it)
     volumes:
-      - arango:/var/lib/arangodb3
-      - iterdata:/var/lib/iter
-volumes:
-  arango:
-  iterdata:
+      - ${ITER_DATA_DIR:?set ITER_DATA_DIR to the host folder for iter_data}:/var/lib/iter_data

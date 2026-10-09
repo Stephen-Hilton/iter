@@ -131,6 +131,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::datasync::routes())
         .merge(crate::rag::routes())
         .merge(crate::settings::routes())
+        .merge(crate::switches::routes())
         .route("/health", get(health))
         .route("/auth/login", post(login))
         .route("/api/widget/validate", post(widget_validate))
@@ -159,6 +160,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/engines/{name}", get(engine_get).put(engine_put).delete(engine_delete))
         .route("/api/engines/{name}/heartbeat", post(engine_heartbeat))
         .route("/api/engines/{name}/test", post(engine_test))
+        .route("/api/engines/{name}/probe", post(engine_probe))
         // workitems
         .route("/api/projects/{name}/workitems", get(workitems_list).post(workitem_create))
         .route("/api/projects/{name}/migrate_priority", post(project_migrate_priority))
@@ -566,6 +568,7 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
         engines_out.push(json!({
             "name": ename, "display": body_str(&e, "name"),
             "state": body_str(&e, "state"),
+            "active": crate::switches::is_on(&e),
             "last_seen": last_seen,
             "age_sec": if age_sec == i64::MAX { Value::Null } else { json!(age_sec) },
             "stale": stale,
@@ -576,6 +579,7 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
     Ok(Json(json!({
         "project": name,
         "project_state": project_state,
+        "server_active": crate::switches::server_on(st.store.as_ref()).await?,
         "engines": engines_out,
         "inprogress": total_inprogress,
         "all_drained": total_inprogress == 0,
@@ -798,6 +802,9 @@ struct HeartbeatReq {
     /// the engine consumed test_requested
     #[serde(default)]
     clear_test: bool,
+    /// the engine consumed probe_requested (its usage report rides along)
+    #[serde(default)]
+    clear_probe: bool,
 }
 
 /// serde reads a JSON null into `Option<T>` as None, which is the same as an
@@ -815,6 +822,20 @@ async fn engine_test(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -
     let mut row = st.store.get("engine", &name, NOSK).await?.ok_or_else(notfound)?;
     let ts = now_utc();
     row["test_requested"] = json!(ts);
+    st.store.put("engine", &name, NOSK, &row).await?;
+    st.store.bump_seq(GLOBAL, "engine").await?;
+    Ok(Json(json!({"requested": ts})))
+}
+
+/// webui -> engine: re-read every account's 5h / 7d usage now (the Accounts
+/// pane's refresh, and on open / every 15 min). The engine sees
+/// probe_requested on its next tick, asks each account's provider, and
+/// heartbeats the fresh report with clear_probe.
+async fn engine_probe(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let mut row = st.store.get("engine", &name, NOSK).await?.ok_or_else(notfound)?;
+    let ts = now_utc();
+    row["probe_requested"] = json!(ts);
     st.store.put("engine", &name, NOSK, &row).await?;
     st.store.bump_seq(GLOBAL, "engine").await?;
     Ok(Json(json!({"requested": ts})))
@@ -892,6 +913,9 @@ async fn engine_heartbeat(
     if req.clear_test {
         row["test_requested"] = json!("");
     }
+    if req.clear_probe {
+        row["probe_requested"] = json!("");
+    }
     st.store.put("engine", &name, NOSK, &row).await?;
     st.store.bump_seq(GLOBAL, "engine").await?;
     if claimed {
@@ -917,8 +941,11 @@ async fn engine_heartbeat(
     reply["files_waiting"] = json!(crate::sync_hooks::files_waiting(st.store.as_ref(), &projects).await);
     reply["build_waiting"] = json!(crate::sync_hooks::build_waiting(st.store.as_ref(), &projects).await);
     // GraphRAG (2026-09-29): Summary agent work waiting, per project — the
-    // engine runs it on its own threads, outside the agent cap and the queue
-    reply["rag_waiting"] = json!(crate::rag::pipeline::waiting(st.store.as_ref(), &projects).await);
+    // engine runs it on its own threads, outside the agent cap and the queue;
+    // none is offered while the server or this engine is switched off
+    let stopped_by = crate::switches::engine_block(st.store.as_ref(), &name).await?;
+    reply["rag_waiting"] = if stopped_by.is_some() { json!({}) } else { json!(crate::rag::pipeline::waiting(st.store.as_ref(), &projects).await) };
+    reply["stopped_by"] = json!(stopped_by.unwrap_or_default());
     Ok(Json(reply))
 }
 

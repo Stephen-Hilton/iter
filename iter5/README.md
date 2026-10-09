@@ -58,9 +58,13 @@ To give the engine work, connect it in the **Settings** tab (the settings graph)
 |---|---|---|
 | `serves` | engine → project | `topdir` (the checkout), `read_only` |
 | `holds` | engine → account | optional `token_envar` override (the engine has this credential locally) |
-| `bills` | account → project | `order`, `switch` / `stop` (usage %), optional `model` |
+| `bills` | account → project | `order` (the account's priority: P0 is used first, no negatives; a tie goes to the account whose 7-day window resets soonest), `switch` / `stop` (usage %), optional `model` (the default model: used when the agent names none, or one the account's provider cannot run) |
 
 An account bills a project through this engine only when the engine also holds that account. The engine reads all of this from `GET /api/engines/{name}/assignments`. To stop a project on one engine, deactivate its `serves` edge: drag the endpoint onto the `_deactivated` placeholder.
+
+**Switches.** The server, each project, each engine and each account is **Active** or **Stopped**, set in the Work queue's side panel. Stopped starts nothing new; work already running finishes. The server's switch is the master switch (admin only); an engine's switch belongs to its owner or an admin; an account's to an admin (`POST /api/switch {"target": "iter_data:self" | "iter_engine:<id>" | "account:<id>", "active": false}`). A project's switch is its `state` (Running | Draining | Stopped). With the server or an engine Stopped, the engine's assignments report its Running projects as Stopped (`stopped_by`); a Stopped account is never picked, and with every account Stopped the project holds ("accounts switched off") rather than fall back to the machine's own login.
+
+**Agent permissions.** Agents run headless (`claude -p`), so an agent needs a permission mode in its `flags` (the agent record, or the project's per-agent override): `--dangerously-skip-permissions`, `--permission-mode …` or `--allowedTools …`. Without one, Claude Code refuses every write, every command and every read outside the agent's folder. The engine therefore never starts such an agent: its items stay queued, tagged "blocked by: agent '<name>' has no permission flags", and nothing is spent. An agent meant to run read-only says so with `readonly: true` (explain and summary).
 
 Other engine flags: `--accounts` / `--probe` (list the assigned accounts' envars, with live usage for `--probe`), `--adduser`, `--approve`, `--doc`, `--ticks N` (tests).
 
@@ -71,7 +75,7 @@ Tabs: **Intro | Work queue | Project graph | GraphRAG | Settings**. The header's
 - **Project graph**: nodes are the node files. Node-type filter chips, a "Network map" preset (code + connections), and a configure lightbox (double-click) for every node and edge. You can create nodes and edges, drag an edge's endpoint, copy and paste an edge, and remove an edge (a reason is required). An edit shows at once and waits to be written. The engine writes the file and commits it. A sync badge counts the edits still waiting.
 - **Designer → Build**: the wizard's "New project" creates a project with no engine and no repo. It is seeded with a project node and default philosophy / bizreq / techreq. Design it in the graph, then press **Build** and pick the engine and topdir. The engine creates the repo (`git init`, `.gitignore`), writes every designed file and makes the first commit. Optionally the server then queues a `plan` work item (priority 5) to build it.
 - **Settings**: the settings graph (engines, projects, accounts, providers, agents, tooling, users, work item states). A tagged edge always shows its tag; an untagged edge shows its type on hover, when selected, or zoomed in. Every node has a fixed **id** (used by edges, tokens, work items and URLs) and a **name** you can change with **Rename…** (detail pane or right-click) or in Configure; a name in a URL path or at sign-in resolves to the id.
-- **Phones**: the header is two rows (tabs + a ⋯ menu for user, timezone, help, my settings and logout; then project, engine dot + running count, Running | Stopped).
+- **Phones**: the header is two rows (tabs + a ⋯ menu for user, timezone, help, my settings and logout; then project, its status, engine dot + running count; the Active | Stopped switches are in the side panel).
 
 ## Node files (format v5)
 

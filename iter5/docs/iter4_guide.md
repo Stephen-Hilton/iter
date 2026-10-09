@@ -61,7 +61,7 @@ The `.env` loader reads plain `KEY=VALUE` lines, never runs them through a shell
 
 ### Where is my data stored?
 
-In the container, two Docker volumes: `arango` (the database, at `/var/lib/arangodb3`) and `iterdata` (iter_data's secret file, at `/var/lib/iter`). With `./deploy.sh local`: the Docker volume `iter4-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
+In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter5/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter4-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
 
 ### Does the container run the agents?
 

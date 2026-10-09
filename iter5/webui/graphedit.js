@@ -429,7 +429,9 @@
       return;
     }
     const clip = K().clip.project;
+    const pin = { key: 'pin', label: G().isPinned(n.id) ? 'Unpin' : 'Pin in place', kbd: 'P', hint: 'it stays where it is through drags and layouts' };
     const items = S.canEdit ? [
+      pin,
       { key: 'configure', label: 'Configure…', kbd: 'E', hint: 'every field of this node, editable' },
       { key: 'new', label: 'Add node here…', kbd: 'N', hint: 'a new node linked to this one' },
       { key: 'connect', label: 'Connect from here', kbd: 'C', hint: 'draw an edge to another node' },
@@ -439,10 +441,11 @@
       { key: 'hide', label: 'Hide from the drawing' },
       { sep: true },
       { key: 'delete', label: 'Delete node…', kbd: 'Del', danger: true, disabled: n.nodetype === 'project' },
-    ] : [{ key: 'configure', label: 'View all fields…', kbd: 'E' }, { key: 'hide', label: 'Hide from the drawing' }];
+    ] : [pin, { key: 'configure', label: 'View all fields…', kbd: 'E' }, { key: 'hide', label: 'Hide from the drawing' }];
     K().menu(host, pos, `${typeLabel(n)} · ${n.name}`, items, (k) => nodeAction(k, n));
   }
   function nodeAction(k, n) {
+    if (k === 'pin') { G().togglePin(n.id); return; }
     if (isReq(n)) { reqAction({ configure: 'edit', new: 'add' }[k] || k, n); return; }
     ({ configure: () => configureNode(n), new: () => newNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), tests: () => runTests(n),
       move: () => moveFile(n), hide: () => G().hide(n.id), delete: () => deleteNode(n) })[k]();

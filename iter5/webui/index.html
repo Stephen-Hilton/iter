@@ -60,10 +60,20 @@ body.viewer .docbox,body.viewer #newitem,body.viewer .actbtn,body.viewer #doc-ad
 .count.c-scheduled b{color:#9fd3e8}
 
 /* ---- layout: left pane + main ---- */
-#layout{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 90px)}
-aside{width:var(--aside-w,240px);min-width:160px;max-width:60vw;flex:none;border-right:1px solid var(--line);padding:14px;position:sticky;top:90px;
-  max-height:calc(100vh - 90px);overflow-y:auto}
-#aside-grip{flex:none;width:6px;cursor:col-resize;align-self:stretch;position:sticky;top:90px;max-height:calc(100vh - 90px);margin-left:-3px;z-index:2}
+/* one side panel beside every tab (2026-10-08); --top-h is the header's height, kept current by sizeTop() */
+#layout{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - var(--top-h,90px))}
+aside{width:var(--aside-w,240px);min-width:160px;max-width:60vw;flex:none;border-right:1px solid var(--line);padding:14px;position:sticky;top:var(--top-h,90px);
+  max-height:calc(100vh - var(--top-h,90px));overflow-y:auto;transition:margin-left .18s ease-out}
+#aside-grip{flex:none;width:6px;cursor:col-resize;align-self:stretch;position:sticky;top:var(--top-h,90px);max-height:calc(100vh - var(--top-h,90px));margin-left:-3px;z-index:2}
+/* collapsed (per tab): the panel slides out left, a slim rail brings it back */
+#aside-expand{display:none}
+#aside-collapse{float:right;font-size:13px;padding:0 6px;margin-top:-2px}
+body.aside-off aside{margin-left:calc(-1 * var(--aside-w,240px));visibility:hidden;transition:margin-left .18s ease-out,visibility 0s .18s}
+body.aside-off #aside-grip{display:none}
+body.aside-off #aside-expand{display:block;flex:none;position:sticky;top:var(--top-h,90px);height:calc(100vh - var(--top-h,90px));width:16px;padding:0;border:0;border-right:1px solid var(--line);border-radius:0;background:var(--panel);color:var(--dim);cursor:pointer;font-size:14px;line-height:1}
+#aside-expand:hover{color:var(--accent);background:#20242b}
+.gear.busy{animation:spin 1s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
 #aside-grip:hover,#aside-grip.dragging{background:var(--accent);opacity:.5}
 body.resizing{cursor:col-resize;user-select:none}
 main{flex:1;padding:14px 18px;min-width:0}
@@ -139,6 +149,12 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .seg button.on.Draining{background:#4a3f1e;color:#f0c75e}
 .seg button.on.Stopped{background:#4b2626;color:#ff9b9b}
 .seg button:disabled{cursor:default}
+/* on/off switches in the left pane (server, projects, engines, accounts) */
+.seg.sw{border-radius:6px;vertical-align:middle;flex:none}
+.seg.sw button{padding:1px 7px;font-size:11px}
+.swrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:3px 0 1px}
+.swnote{font-size:11px;color:#f0c75e}
+.pstat .ps-off{color:#ff9b9b;font-weight:600}
 #brandrow .who{margin-left:0}
 @media (max-width:760px){
   .segwrap{margin-left:0;width:100%;order:9;justify-content:space-between;flex-wrap:wrap;row-gap:6px}
@@ -151,11 +167,11 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .gear{background:transparent;color:var(--dim);border:1px solid transparent;border-radius:6px;padding:2px 6px;font-size:14px;line-height:1;cursor:pointer}
 .gear:hover{color:var(--accent);border-color:var(--line)}
 .projrow{display:flex;align-items:center;gap:4px}
-.projrow .proj{flex:1}
+.projrow .proj{flex:1;min-width:0}
+.projnote{margin:-2px 0 6px 10px}
 .eng .gear{float:right}
 .eng.compact{padding:3px 4px;font-size:12px}
 .eng.compact .gear{float:none;padding:1px 5px;margin-right:4px}
-#tooling .gear{font-size:12px}
 .sf .frow textarea{font-family:ui-monospace,monospace;font-size:12px}
 .sf .help{color:var(--dim);font-size:11px;margin-top:2px}
 .sf .ro{color:var(--dim);padding-top:7px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
@@ -224,6 +240,9 @@ a{color:var(--accent)}
   #brandrow button{padding:4px 10px;font-size:13px}
   #layout{display:block !important;min-height:0}
   #aside-grip{display:none}
+  /* phones: the drawer below replaces collapsing */
+  #aside-expand,#aside-collapse{display:none !important}
+  body.aside-off aside{margin-left:0;visibility:visible}
   /* left nav: an off-canvas drawer (hidden by default; ☰ in the header opens it) */
   aside{position:fixed;top:0;left:0;bottom:0;z-index:300;width:min(84vw,320px);max-width:none;max-height:none;
     padding:14px 14px calc(14px + env(safe-area-inset-bottom));border-right:1px solid var(--line);background:var(--panel);
@@ -275,7 +294,8 @@ body.tab-settings #counts,body.tab-settings #ucrow,body.tab-settings #depthticks
 body.tab-graph #tab-graph,body.tab-settings #tab-settings{display:flex}
 #tab-intro{display:none}
 body.tab-intro #tab-intro{display:block}
-body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:none !important}
+body.tab-graph main,body.tab-intro main,body.tab-settings main,body.tab-rag main{display:none !important}
+#tab-intro,#tab-rag{flex:1;min-width:0}
 #g-loading{padding:40px;color:var(--dim);line-height:1.6;max-width:720px}
 #g-loading code{background:#23272e;padding:1px 5px;border-radius:4px;font-size:12.5px}
 .sgl{color:var(--accent);cursor:pointer;text-decoration:none;font-size:11.5px;white-space:nowrap}
@@ -286,7 +306,7 @@ body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:
 #hdrmore-btn{display:none;font-size:18px;font-weight:700;padding:0 8px}
 #tabs .sh,.pstat .ps-s{display:none}
 .pstat .ps-eng.bad{cursor:pointer}
-/* phones: two header rows — [☰ tabs ⋯] and [project · engine dot · running · Running|Stopped] (one row on Settings / Intro) */
+/* phones: two header rows — [☰ tabs ⋯] and [project · status · engine dot · running] (one row on Settings / Intro) */
 @media (max-width:760px){
   #brandrow{position:relative;padding:6px 10px;gap:6px 6px;flex-wrap:wrap}
   #brandrow h1{display:none}
@@ -377,9 +397,10 @@ body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:
 </div>
 
 <div id="layout" style="display:none">
+  <button id="aside-expand" title="show the side panel" aria-label="show the side panel">›</button>
   <aside>
     <div class="side-section">
-      <h2>Projects</h2>
+      <h2>Projects <button class="gear" id="aside-collapse" title="hide the side panel on this tab (› brings it back)" aria-label="hide the side panel">‹</button></h2>
       <div id="projects"></div>
     </div>
     <div class="side-section">
@@ -392,16 +413,8 @@ body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:
       <div id="mapstats"></div>
     </div>
     <div class="side-section">
-      <h2>Accounts <a class="sgl" data-sgraph="" title="accounts, the projects they bill and the engines holding their tokens, in the settings graph">settings graph ↗</a></h2>
+      <h2>Accounts <button class="gear" id="acct-refresh" title="re-read every account's 5h / 7d usage now (also on opening the page and every 15 minutes)">↻</button> <a class="sgl" data-sgraph="" title="accounts, the projects they bill and the engines holding their tokens, in the settings graph">settings graph ↗</a></h2>
       <div id="accounts"></div>
-    </div>
-    <div class="side-section">
-      <h2>Agents <button class="gear" id="agent-add" title="new agent">+</button></h2>
-      <div id="agents"></div>
-    </div>
-    <div class="side-section">
-      <h2>Agent Tooling <button class="gear" id="tooling-add" title="new tooling row">+</button></h2>
-      <div id="tooling"></div>
     </div>
   </aside>
   <div id="aside-grip" title="drag to resize"></div>
@@ -414,12 +427,12 @@ body.tab-graph #layout,body.tab-intro #layout,body.tab-settings #layout{display:
     <div id="deadlocks"></div>
     <div id="items"></div>
   </main>
+  <!-- the other tabs sit beside the same side panel -->
+  <div id="tab-graph" class="gview"><div id="g-loading">loading the project graph…</div></div>
+  <div id="tab-settings" class="gview"><div id="g-loading">loading the settings graph…</div></div>
+  <div id="tab-intro"></div>
+  <div id="tab-rag"></div>
 </div>
-
-<div id="tab-graph" class="gview"><div id="g-loading">loading the project graph…</div></div>
-<div id="tab-settings" class="gview"><div id="g-loading">loading the settings graph…</div></div>
-<div id="tab-intro"></div>
-<div id="tab-rag"></div>
 
 <dialog id="detail"></dialog>
 <dialog id="form"></dialog>
@@ -577,8 +590,8 @@ async function boot(){
       const x0=e.clientX,w0=aside.getBoundingClientRect().width;
       grip.onpointermove=ev=>{const w=Math.max(160,Math.min(window.innerWidth*0.6,w0+ev.clientX-x0));document.documentElement.style.setProperty("--aside-w",w+"px");placeDepthTicks(lastMaxDepth);};
       grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;grip.classList.remove("dragging");document.body.classList.remove("resizing");
-        try{localStorage.setItem("iter5.aside_w",String(Math.round(aside.getBoundingClientRect().width)));}catch(e){}};};
-    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter5.aside_w");}catch(e){}placeDepthTicks(lastMaxDepth);};})();
+        try{localStorage.setItem("iter5.aside_w",String(Math.round(aside.getBoundingClientRect().width)));}catch(e){}resizeViews();};};
+    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter5.aside_w");}catch(e){}resizeViews();};})();
   try{token=localStorage.getItem("iter5.token");me=localStorage.getItem("iter5.user");myRole=localStorage.getItem("iter5.role")||"";
       const s=localStorage.getItem("iter5.sort");if(s)$("#sort").value=s;}catch(e){}
   if(token){try{await load();return;}catch(e){token=null;}}
@@ -599,18 +612,6 @@ $("#refresh").onclick=()=>project&&loadItems(project);
 $("#sort").onchange=()=>{try{localStorage.setItem("iter5.sort",$("#sort").value);}catch(e){};renderItems();};
 $("#newitem").onclick=()=>openForm("create",null);
 $("#user-gear").onclick=()=>openSettings("user",me);
-$("#agent-add").onclick=async()=>{
-  const name=prompt("New agent name (letters, digits, - _):");if(!name)return;
-  if(!/^[A-Za-z0-9_-]+$/.test(name)){alert("bad name");return;}
-  try{await api("/api/agents/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify({desc:"",max:2,childstate:"queued",timeoutsec:3600,model:"opus",flags:"--dangerously-skip-permissions",promptbody:"# Agent Definition: "+name+"\n\nYou are the **"+name+"** agent.\n"})});
-    await load();openSettings("agent",name);}catch(e){alert("could not add: "+e.message);}
-};
-$("#tooling-add").onclick=async()=>{
-  const name=prompt("New tooling row name (e.g. _my_capability, or a prose step name):");if(!name)return;
-  if(!/^[A-Za-z0-9_-]+$/.test(name)){alert("bad name");return;}
-  const kind=prompt("kind: shared | capability | source | prepost | critic","capability");if(!kind)return;
-  try{await api("/api/tooling/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify({kind,desc:"",body:""})});await load();openSettings("tooling",name);}catch(e){alert("could not add: "+e.message);}
-};
 $("#engine-add").onclick=async()=>{
   /* iter5: an engine registers itself on first start (iter_engine --data-url URL --env-file PATH);
      adding one by hand, and connecting it to projects and accounts, happens in the settings graph */
@@ -631,9 +632,69 @@ document.addEventListener("keydown",ev=>{if(ev.key==="Escape")setHdrMore(false);
 /* shared by the engine block and the Accounts section: a unix-seconds instant as local time, a percentage, one account's full tooltip */
 const at=s=>s?`${fmtTs(new Date(s*1000).toISOString())} ${tzAbbrev()}`:"";
 const pct=v=>v==null?"—":Math.round(v)+"%";
-const acctTitle=a=>`${nameOf("account",a.name)}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"} · stop ${a.stop}%`
+/* an account's stop% is its bills edge's setting for the selected project (the engine's report carries usage only) */
+const stopOf=n=>{const e=((sgCache&&sgCache.edges)||[]).find(x=>x.type==="bills"&&x.from==="account:"+n&&x.to==="project:"+project);const s=e&&e.settings?e.settings.stop:null;return typeof s==="number"?s:null;};
+const acctTitle=a=>`${nameOf("account",a.name)}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"}${stopOf(a.name)==null?"":` · stop ${stopOf(a.name)}%`}`
   +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
   +(a.token==="unset"?" · NO TOKEN in the engine's env_file":"");
+
+/* ---- on/off switches (2026-10-08): the server, each project, each engine and each account is
+   Active or Stopped. Stopped starts nothing new; work already running finishes. A project's switch
+   is its state (Running | Draining | Stopped); the others are `active` on their own records, set
+   with POST /api/switch (the server and accounts by an admin, an engine also by its owner). ---- */
+let serverRow={active:true};
+const swOn=r=>!(r&&r.active===false);
+function swHtml(target,on,can,label){
+  return `<span class="seg sw" data-sw="${esc(target)}" data-label="${esc(label)}" title="${esc(label)}: ${on?"Active":"Stopped — nothing new starts"}${can?"":" (an admin switches it)"}">`
+    +`<button class="Running ${on?"on":""}" data-on="1"${on||!can?" disabled":""}>Active</button>`
+    +`<button class="Stopped ${on?"":"on"}" data-on="0"${!on||!can?" disabled":""}>Stopped</button></span>`;
+}
+function projSwHtml(p,can){
+  const st=p.state||"Running",pid=esc(rid(p)),d=can?"":" disabled";
+  if(st==="Draining")return `<span class="seg sw" data-psw="${pid}"><button class="Draining on" disabled title="finishing running work; Stopped once drained">Stopping…</button>`
+    +`<button class="Running" data-st="Running"${d}>Active</button><button class="Stopped" data-st="Stopped"${d} title="stop now without waiting for running work">force</button></span>`;
+  const on=st==="Running";
+  return `<span class="seg sw" data-psw="${pid}" title="${esc(rname(p))}: ${on?"Active":"Stopped — nothing new starts"}">`
+    +`<button class="Running ${on?"on":""}" data-st="Running"${on||!can?" disabled":""}>Active</button>`
+    +`<button class="Stopped ${on?"":"on"}" data-st="Stopped"${!on||!can?" disabled":""}>Stopped</button></span>`;
+}
+async function flipSwitch(target,on,label){
+  if(!confirm(on?`Switch ${label} to Active?\nNew work may start again.`:`Switch ${label} to Stopped?\nNothing new starts; work already running finishes.`))return;
+  try{await api("/api/switch",{method:"POST",body:JSON.stringify({target,active:on})});await load();}
+  catch(e){alert("could not switch: "+e.message);}
+}
+/* a project Stopped while work runs drains first (Draining), then settles to Stopped */
+async function flipProject(p,target){
+  const pp="/api/projects/"+encodeURIComponent(p);
+  try{
+    const fresh=await api(pp),st=fresh.state;
+    let msg=target==="Running"?"Engines start picking queued work for this project.":"Engines finish what is running and start nothing new; the project shows Stopped once drained.";
+    if(target==="Stopped"&&st==="Running"){const s=await api(pp+"/status").catch(()=>null);if(s&&s.inprogress>0)target="Draining";}
+    if(target==="Stopped"&&st==="Draining")msg="Stop immediately without waiting for running work to finish (it keeps running on the engine until its turn ends).";
+    if(!confirm(`${target==="Running"?"Activate":"Stop"} ${nameOf("project",p)}?\n${msg}`))return;
+    fresh.state=target;
+    await api(pp,{method:"PUT",body:JSON.stringify(fresh)});
+    await load();
+  }catch(e){alert("could not change state: "+e.message);}
+}
+function wireSwitches(root){
+  root.querySelectorAll(".sw[data-sw] button[data-on]").forEach(b=>b.onclick=ev=>{
+    ev.stopPropagation();const sw=b.closest(".sw");flipSwitch(sw.dataset.sw,b.dataset.on==="1",sw.dataset.label);});
+  root.querySelectorAll(".sw[data-psw] button[data-st]").forEach(b=>b.onclick=ev=>{
+    ev.stopPropagation();flipProject(b.closest(".sw").dataset.psw,b.dataset.st);});
+}
+/* why a project with its own switch Active still starts nothing: the server switch, no engine
+   serving it, or every engine serving it switched off ("" = nothing in the way) */
+function projBlock(p){
+  if(!swOn(serverRow))return "server is Stopped";
+  const pid="project:"+rid(p);
+  const serving=((sgCache&&sgCache.edges)||[]).filter(e=>e.type==="serves"&&e.active!==false&&e.to===pid).map(e=>e.from.replace(/^iter_engine:/,""));
+  if(!serving.length)return "no engine serves it";
+  const engs=serving.map(id=>enginesCache.find(e=>rid(e)===id)).filter(Boolean);
+  if(engs.length&&engs.every(e=>!swOn(e)))return "its engine"+(engs.length>1?"s are":" is")+" Stopped";
+  return "";
+}
+const holdText=h=>h==="no account token"?"no account token":h==="accounts switched off"?"accounts switched off":"no usage left";
 /* one row per account that bills the selected project (an active bills edge); the engine with the newest last_seen owns the snapshot */
 function renderAccounts(engines){
   if(!project){$("#accounts").innerHTML="<div class='eng kv'>no project selected</div>";return;}
@@ -655,35 +716,39 @@ function renderAccounts(engines){
     if(n!=null&&alive(e)&&usedBy[n]==null)usedBy[n]=rname(e);
   });
   const win=(label,a,v,reset)=>{
-    const stop=a.stop==null?99:a.stop;
+    const s=stopOf(a.name);const stop=s==null?99:s;
     const cls=v==null?"":(v>=stop?' class="hot"':(v>=stop-20?' class="warm"':""));
     return `<br>• ${label} <b${cls}>${esc(pct(v))}</b>`
       +(v==null?"":` – <span title="resets ${esc(at(reset))}">${esc(fmtDur(reset))}</span>`);
   };
   const names=Object.keys(best).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  const acctNode=n=>((sgCache&&sgCache.nodes)||[]).find(x=>x.id==="account:"+n);
+  const acctSw=n=>{const node=acctNode(n);return `<div class="swrow">${swHtml("account:"+n,swOn(node&&node.settings),isAdmin(),"account "+nameOf("account",n))}</div>`;};
   $("#accounts").innerHTML=names.map(n=>{
     const a=best[n].a,src=best[n].e;
     const status=a.token==="unset"?"⚠ no token":(usedBy[n]?"· in use by "+esc(usedBy[n]):"· idle");
     return `<div class="eng acct" title="${esc(acctTitle(a)+" · reported by "+rname(src))}"><b>${esc(nameOf("account",n))}</b> <a class="sgl" data-sgraph="account:${esc(n)}" title="this account in the settings graph">↗</a> <span class="kv">${status}</span>`
-      +win("5h",a,a.five_hour_pct,a.five_hour_resets_at)+win("7d",a,a.seven_day_pct,a.seven_day_resets_at)
+      +acctSw(n)
+      +(win("5h",a,a.five_hour_pct,a.five_hour_resets_at)+win("7d",a,a.seven_day_pct,a.seven_day_resets_at)).replace(/^<br>/,"")
       +(a.is_using_overage?`<br>• <b title="a window is exhausted and requests are billing as extra usage">OVERAGE</b>`:"")
       +`</div>`;
   }).join("")
     // accounts in the settings graph that no engine has reported usage for yet
     +((sgCache&&sgCache.nodes)||[]).filter(n=>n.type==="account"&&!n.placeholder&&billed.has(n.key||n.name)&&!best[n.key||n.name]).map(n=>{
       const prov=(sgCache.edges||[]).find(e=>e.type==="of"&&e.from===n.id&&e.active!==false);
-      return `<div class="eng acct"><b>${esc(n.name)}</b> <a class="sgl" data-sgraph="${esc(n.id)}" title="this account in the settings graph">↗</a><br><span class="kv">${esc(prov?prov.to.replace(/^provider:/,""):"no provider")} · no usage reported yet</span></div>`;
+      return `<div class="eng acct"><b>${esc(n.name)}</b> <a class="sgl" data-sgraph="${esc(n.id)}" title="this account in the settings graph">↗</a>${acctSw(n.key||n.name)}<span class="kv">${esc(prov?prov.to.replace(/^provider:/,""):"no provider")} · no usage reported yet</span></div>`;
     }).join("")
     ||`<div class='eng kv'>no accounts bill ${esc(nameOf("project",project))} yet — add a bills edge (account → project) in the settings graph</div>`;
   $("#accounts").querySelectorAll("[data-sgraph]").forEach(a=>a.onclick=ev=>{ev.preventDefault();ev.stopPropagation();openSettingsGraph(a.dataset.sgraph);});
+  wireSwitches($("#accounts"));
 }
 
 async function load(){
   $("#login").style.display="none";$("#layout").style.display="flex";$("#top").style.display="";
   $("#who").textContent=me||"";
-  const[projects,engines,agents,meRow]=await Promise.all([api("/api/projects"),api("/api/engines"),api("/api/agents").catch(()=>[]),
-    me?api("/api/users/"+encodeURIComponent(me)).catch(()=>null):null]);
-  agentsCache=agents;projectsCache=projects;enginesCache=engines;
+  const[projects,engines,agents,meRow,srv]=await Promise.all([api("/api/projects"),api("/api/engines"),api("/api/agents").catch(()=>[]),
+    me?api("/api/users/"+encodeURIComponent(me)).catch(()=>null):null,api("/api/server").catch(()=>null)]);
+  agentsCache=agents;projectsCache=projects;enginesCache=engines;serverRow=srv||{active:true};
   // the settings graph says which engine serves which project (iter5); read once per refresh, best effort
   try{sgCache=await api("/api/settings/graph");}catch(e){sgCache=null;}
   if(meRow&&meRow.role){myRole=meRow.role;try{localStorage.setItem("iter5.role",myRole);}catch(e){}}
@@ -699,11 +764,19 @@ async function load(){
   document.body.classList.toggle("viewer",myRole==="viewer");
   projects.sort((a,b)=>rname(a).localeCompare(rname(b),undefined,{sensitivity:"base"}));
   try{const lp=localStorage.getItem("iter5.project");if(lp&&!project&&projects.some(p=>rid(p)===lp))project=lp;}catch(e){}
-  $("#projects").innerHTML=projects.map(p=>
-    `<div class="projrow"><button class="proj ${rid(p)===project?"sel":""}" data-p="${esc(rid(p))}">${esc(rname(p))}
-     <span class="kv">${esc(p.state)}</span></button><button class="gear" data-gear="project" data-name="${esc(rid(p))}" title="project settings">⚙</button></div>`).join("")||"<span class='kv'>none yet</span>";
+  // each project: its switch, and what else keeps it from running (server, no engine, engines off)
+  $("#projects").innerHTML=projects.map(p=>{
+    const why=projBlock(p);
+    return `<div class="projrow"><button class="proj ${rid(p)===project?"sel":""}" data-p="${esc(rid(p))}">${esc(rname(p))}</button>`
+      +projSwHtml(p,isAdmin())+`<button class="gear" data-gear="project" data-name="${esc(rid(p))}" title="project settings">⚙</button></div>`
+      +(why?`<div class="swnote projnote" title="nothing new starts for this project until this is fixed">⚠ ${esc(why)}</div>`:"");}).join("")||"<span class='kv'>none yet</span>";
   document.querySelectorAll("#projects .proj").forEach(b=>b.onclick=()=>loadItems(b.dataset.p));
-  $("#dataserver").innerHTML=`<span class="dot on"></span><b>iter_data</b> ${esc(location.host)} <button class="gear" data-gear="data" title="iter_data settings">⚙</button>`;
+  wireSwitches($("#projects"));
+  // the server's switch is the master switch: Stopped, no engine starts anything for any project
+  const srvOn=swOn(serverRow);
+  $("#dataserver").innerHTML=`<span class="dot ${srvOn?"on":"off"}"></span><b>iter_data</b> ${esc(location.host)} <button class="gear" data-gear="data" title="iter_data settings">⚙</button>`
+    +`<div class="swrow">${swHtml("iter_data:self",srvOn,isAdmin(),"the iter_data server (every engine, every project)")}${srvOn?"":`<span class="swnote">master switch: nothing new starts anywhere</span>`}</div>`;
+  wireSwitches($("#dataserver"));
   const now=Date.now();
   $("#engines").innerHTML=engines.map(e=>{
     const seen=e.last_seen?Date.parse(e.last_seen):0;
@@ -726,11 +799,14 @@ async function load(){
     const t=e.test_result;
     const test=e.test_requested?`<span class="kv" data-testing="${esc(rid(e))}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
-    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(rid(e))}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b title="id: ${esc(rid(e))}">${esc(rname(e))}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${e.hold==="no account token"?"no account token":"no usage left"}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${usage}
+    const eOn=swOn(e),canEng=isAdmin()||(!!me&&e.user===me);
+    const sw=`<div class="swrow">${swHtml("iter_engine:"+rid(e),eOn,canEng,"engine "+rname(e))}${eOn&&!srvOn?`<span class="swnote">idle: server is Stopped</span>`:""}</div>`;
+    return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(rid(e))}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b title="id: ${esc(rid(e))}">${esc(rname(e))}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${esc(holdText(e.hold))}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${sw}${usage.replace(/^<br>/,"")}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")}${e.host?" · "+esc(e.host):""}
       <br>serves: ${servesOf(e).map(p=>`<a class="sgl" data-sgraph="project:${esc(p)}">${esc(nameOf("project",p))}</a>`).join(", ")||"—"} <a class="sgl" data-sgraph="iter_engine:${esc(rid(e))}" title="this engine in the settings graph">↗</a>
       <br><button class="ghost sm" data-test="${esc(rid(e))}" ${e.test_requested?"disabled":""}>test</button> ${test}</div>`;
   }).join("")||"<div class='eng kv'>no engines registered</div>";
+  wireSwitches($("#engines"));
   document.querySelectorAll("[data-test]").forEach(b=>b.onclick=async ev=>{
     ev.stopPropagation();
     const name=b.dataset.test;b.disabled=true;b.textContent="testing…";
@@ -745,15 +821,10 @@ async function load(){
       alert(`No answer from ${name} within 2 minutes — is the engine running?`);await load();
     }catch(e){alert("test failed: "+e.message);await load();}
   });
-  $("#agents").innerHTML=agents.map(a=>`<div class="eng compact"><button class="gear" data-gear="agent" data-name="${esc(rid(a))}" title="${isAdmin()?"edit agent":"view agent (admins edit)"}">${isAdmin()?"⚙":"👁"}</button><b>${esc(rname(a))}</b> <span class="kv">${esc(a.model||"—")} · max ${esc(a.max??"—")}</span></div>`).join("")||"<div class='eng kv'>no agents defined</div>";
-  const tooling=await api("/api/tooling").catch(()=>[]);
-  const kinds=[["shared","shared rules"],["capability","capabilities"],["source","source instructions"],["prepost","prose pre/post steps"],["critic","critic persona"]];
-  $("#tooling").innerHTML=kinds.map(([k,label])=>{const rows=tooling.filter(t=>t.kind===k);if(!rows.length)return "";
-    return `<div class="eng compact"><span class="kv">${esc(label)}</span><br>${rows.map(t=>`<button class="gear" data-gear="tooling" data-name="${esc(rid(t))}" title="${esc(t.desc||"")}">${isAdmin()?"⚙":"👁"} ${esc(rname(t))}</button>`).join(" ")}</div>`;}).join("")||"<div class='eng kv'>none — import with iter_data --migrate-v2 --migrate-scope tooling, or add one</div>";
   const canAdmin=isAdmin();
   document.querySelectorAll("[data-sgraph]").forEach(a=>a.onclick=ev=>{ev.preventDefault();ev.stopPropagation();openSettingsGraph(a.dataset.sgraph);});
   $("#map-open").onclick=()=>openMap().catch(e=>alert("map: "+e.message));
-  $("#agent-add").hidden=!canAdmin;$("#tooling-add").hidden=!canAdmin;$("#engine-add").hidden=!canAdmin;
+  $("#engine-add").hidden=!canAdmin;
   document.querySelectorAll("[data-gear]").forEach(g=>g.onclick=ev=>{ev.stopPropagation();openSettings(g.dataset.gear,g.dataset.name);});
   {const hp=hashParams().get("p");if(hp&&projects.some(p=>rid(p)===hp))project=hp;}
   // the tab the URL (or the last visit) asked for, read before loadItems rewrites the hash
@@ -764,6 +835,7 @@ async function load(){
   renderAccounts(engines);
   if(project)await loadItems(project);else renderCounts();
   await setTab(tab);
+  if(!usageOpened){usageOpened=true;setTimeout(()=>refreshUsage(false),500);}
 }
 
 async function loadItems(p){
@@ -818,9 +890,9 @@ function renderDeadlocks(dl){
   el.querySelectorAll("a[data-open]").forEach(a=>a.onclick=ev=>{ev.preventDefault();openDetail(a.dataset.open);});
 }
 
-/* Running | Draining | Stopped for the selected project: the COMMANDED state.
-   Engines read it every tick and report their own actual state (left pane);
-   the status endpoint says whether every engine has honored a drain. */
+/* The selected project's status line: what keeps it from starting work (the server or project
+   switch, a drain), its engines, what runs, today's spend. The switches themselves are in the
+   left pane; the status endpoint says whether every engine has honored a drain. */
 async function renderProjectCtl(){
   if(!project){$("#projctl").innerHTML="";return;}
   const pp="/api/projects/"+encodeURIComponent(project);
@@ -832,41 +904,29 @@ async function renderProjectCtl(){
   const today=new Date().toISOString().slice(0,10);
   const todaySpend=(spend.find(r=>r.date===today)||{}).usd||0;
   const capTxt=proj.maxdailycost==null?"":(proj.maxdailycost===0?" <span style='color:var(--bad)'>(budget $0: spend nothing)</span>":` / $${Number(proj.maxdailycost).toFixed(2)} cap`);
-  const live=status?status.engines.filter(e=>!e.stale).length:0;
-  const total=status?status.engines.length:0;
+  const engs=status?status.engines:[];
+  const total=engs.length,live=engs.filter(e=>!e.stale).length,on=engs.filter(e=>!e.stale&&e.active!==false).length;
   const running=status?(status.inprogress||0):0;
-  // one compact line: engines (green / red dot), running, today's spend; no engine online
-  // means nothing queued will start, and nothing else on the page says why
-  const engTitle=status&&!live?"No engine serving this project has checked in during the last few ticks, so queued work will not start":`${live} of ${total} engines serving ${project} checked in recently`;
-  // phones show the short forms (.ps-s): a dot + live/total, and running as a small count pill
-  const bad=status&&!live;
-  const engLong=bad?(total?`${total} engine${total===1?"":"s"}, none online`:"no engine"):`${live}/${total} engine${total===1?"":"s"} online`;
-  let note=`<span class="ps-g"><span class="ps-eng ${bad?"bad":"ok"}" title="${esc(engTitle+(bad?" — click for engine setup":""))}"><i></i><span class="ps-l">${engLong}</span><span class="ps-s">${live}/${total}</span></span>`
-    +(bad?`<button class="engsetup" title="The steps to set up and start an engine for this project">Engine setup</button>`:"")+`</span>`
+  // one compact line: why nothing new starts (if so), engines (green / red dot), running,
+  // today's spend — nothing queued starts without an online engine that is switched on
+  const engTitle=!status?"":!total?"No engine serves this project (a serves edge, engine → project, in the settings graph), so queued work will not start"
+    :!live?"No engine serving this project has checked in during the last few ticks, so queued work will not start"
+    :!on?"Every online engine serving this project is switched off (left pane), so queued work will not start"
+    :`${on} of ${total} engines serving ${nameOf("project",project)} are online and switched on`;
+  // phones show the short forms (.ps-s): a dot + on/total, and running as a small count pill
+  const bad=status&&!on,setup=status&&!live;
+  const engLong=!total?"no engine serves this project":!live?`${total} engine${total===1?"":"s"}, none online`:!on?`${live} engine${live===1?"":"s"} online, switched off`:`${on}/${total} engine${total===1?"":"s"} online`;
+  const why=status&&status.server_active===false?"server Stopped":proj.state==="Stopped"?"project Stopped":proj.state==="Draining"?`stopping… (${running} running)`:"";
+  let note=(why?`<span class="ps-g"><span class="ps-off" title="nothing new starts — the switches are in the left pane">${esc(why)}</span></span>`:"")
+    +`<span class="ps-g"><span class="ps-eng ${bad?"bad":"ok"}" title="${esc(engTitle+(setup?" — click for engine setup":""))}"><i></i><span class="ps-l">${engLong}</span><span class="ps-s">${on}/${total}</span></span>`
+    +(setup?`<button class="engsetup" title="The steps to set up and start an engine for this project">Engine setup</button>`:"")+`</span>`
     +`<span class="ps-g"><span class="ps-run" title="${running} work item${running===1?"":"s"} in progress"><span class="ps-l">${running} running</span><span class="ps-s">▶ ${running}</span></span><span title="spend today (UTC)">$${todaySpend.toFixed(2)} today${capTxt}</span></span>`;
   if(status&&status.not_honoring&&status.not_honoring.length)note+=`<span style="color:var(--bad)">not honoring: ${esc(status.not_honoring.join(", "))}</span>`;
-  const st=proj.state;
-  const seg=st==="Draining"
-    ?`<button class="Draining on" disabled>Stopping… (${running} running)</button><button class="Running" data-st="Running">Running</button><button class="Stopped" data-st="Stopped" title="stop now without waiting for running work">force stop</button>`
-    :`<button class="Running ${st==="Running"?"on":""}" data-st="Running" ${st==="Running"?"disabled":""}>Running</button><button class="Stopped ${st==="Stopped"?"on":""}" data-st="Stopped" ${st==="Stopped"?"disabled":""}>Stopped</button>`;
-  $("#projctl").innerHTML=`<span class="pstat">${note}</span><span class="seg">${seg}</span>`;
-  const es=$("#projctl").querySelector("button.engsetup");
+  $("#projctl").innerHTML=`<span class="pstat">${note}</span>`;
   const openSetup=async()=>{const p=project;await setTab("intro");if(window.IterIntro&&IterIntro.openSetup)IterIntro.openSetup(p);};
+  const es=$("#projctl").querySelector("button.engsetup");
   if(es)es.onclick=openSetup;
-  const eb=$("#projctl").querySelector(".ps-eng.bad");
-  if(eb)eb.onclick=openSetup;
-  $("#projctl").querySelectorAll("button[data-st]").forEach(b=>b.onclick=async()=>{
-    let target=b.dataset.st;
-    let msg=target==="Running"?"Engines start picking queued work for this project.":"Engines finish what is running and start nothing new; the project shows Stopped once drained.";
-    if(target==="Stopped"&&st==="Running"&&running>0)target="Draining";
-    if(target==="Stopped"&&st==="Draining")msg="Stop immediately without waiting for running work to finish (it keeps running on the engine until its turn ends).";
-    if(!confirm(`${target==="Draining"?"Stop":target} ${project}?\n${msg}`))return;
-    try{
-      const fresh=await api(pp);fresh.state=target;
-      await api(pp,{method:"PUT",body:JSON.stringify(fresh)});
-      await load();
-    }catch(e){alert("could not change state: "+e.message);}
-  });
+  if(setup){const eb=$("#projctl").querySelector(".ps-eng.bad");if(eb)eb.onclick=openSetup;}
 }
 
 /* ---- pinned counts bar: total + per-state; clicks are ADDITIVE (V2 behaviour) ---- */
@@ -1857,13 +1917,51 @@ function fillProjPick(){
   if(project&&ps.length)sel.value=project;
   sel.onchange=()=>{loadItems(sel.value);};
 }
-function sizeGraph(){const h=Math.max(300,window.innerHeight-$("#top").offsetHeight)+"px";["#tab-graph","#tab-settings"].forEach(s=>{const el=$(s);if(el)el.style.height=h;});}
+/* ---- the side panel: one for every tab (2026-10-08), hidden per tab with ‹ and brought back with ›, remembered in this browser ---- */
+function sizeTop(){document.documentElement.style.setProperty("--top-h",$("#top").offsetHeight+"px");}
+const asideOff=()=>{try{return new Set(JSON.parse(localStorage.getItem("iter5.aside.off")||"[]"));}catch(e){return new Set();}};
+function applyAside(){document.body.classList.toggle("aside-off",asideOff().has(tab));}
+function resizeViews(){placeDepthTicks(lastMaxDepth);const c=window.IterGraph&&IterGraph.current;if(tab==="graph"&&c&&c.cy)c.cy.resize();if(tab==="settings"&&window.IterSettings)IterSettings.resize();}
+function setAside(off){const s=asideOff();if(off)s.add(tab);else s.delete(tab);try{localStorage.setItem("iter5.aside.off",JSON.stringify([...s]));}catch(e){}applyAside();setTimeout(resizeViews,220);}
+$("#aside-collapse").onclick=()=>setAside(true);
+$("#aside-expand").onclick=()=>setAside(false);
+window.addEventListener("resize",sizeTop);
+
+/* ---- account usage: every live engine re-reads each account's 5h / 7d now (POST /api/engines/{e}/probe), once when
+   the page opens, every 15 minutes and on ↻; the pane redraws when the engines have answered (or after 90 s) ---- */
+let usageBusy=false,usageOpened=false;
+async function refreshUsage(manual){
+  if(usageBusy||!token)return;
+  usageBusy=true;
+  const btn=$("#acct-refresh");if(btn){btn.disabled=true;btn.classList.add("busy");}
+  try{
+    const now=Date.now();
+    const live=(enginesCache||[]).filter(e=>e.last_seen&&(now-Date.parse(e.last_seen))<3*(e.ticksec||5)*1000+5000);
+    if(!live.length){if(manual)alert("No engine is online to read the accounts' usage.");return;}
+    const asked=(await Promise.all(live.map(e=>api("/api/engines/"+encodeURIComponent(rid(e))+"/probe",{method:"POST",body:"{}"})
+      .then(r=>({id:rid(e),ts:r.requested})).catch(()=>null)))).filter(Boolean);
+    if(!asked.length){if(manual)alert("Could not ask the engines for a usage refresh.");return;}
+    const t0=Date.now();
+    while(Date.now()-t0<90000){
+      await new Promise(r=>setTimeout(r,2000));
+      const es=await api("/api/engines").catch(()=>null);if(!es)continue;
+      if(asked.every(a=>{const e=es.find(x=>rid(x)===a.id);return !e||e.probe_requested!==a.ts;}))break;
+    }
+    await load();
+  }catch(e){if(manual)alert("usage refresh failed: "+e.message);}
+  finally{usageBusy=false;const b=$("#acct-refresh");if(b){b.disabled=false;b.classList.remove("busy");}}
+}
+$("#acct-refresh").onclick=()=>refreshUsage(true);
+setInterval(()=>refreshUsage(false),15*60*1000);
+
+function sizeGraph(){  sizeTop();const h=Math.max(300,window.innerHeight-$("#top").offsetHeight)+"px";["#tab-graph","#tab-settings"].forEach(s=>{const el=$(s);if(el)el.style.height=h;});}
 window.addEventListener("resize",()=>{if(tab==="graph"||tab==="settings"){sizeGraph();const c=window.IterGraph&&IterGraph.current;if(c&&c.cy)c.cy.resize();if(window.IterSettings)IterSettings.resize();}});
 let settingsMounted=false;
 async function setTab(t){
   if(!TABS.includes(t))t="queue";
   tab=t;try{localStorage.setItem("iter5.tab",t);}catch(e){}
   TABS.forEach(x=>document.body.classList.toggle("tab-"+x,x===t&&x!=="queue"));
+  applyAside();sizeTop();
   if(t!=="rag"&&window.IterRag)IterRag.hide();
   document.querySelectorAll("#tabs button").forEach(b=>{b.classList.toggle("on",b.dataset.tab===t);b.setAttribute("aria-selected",String(b.dataset.tab===t));});
   writeTabHash();

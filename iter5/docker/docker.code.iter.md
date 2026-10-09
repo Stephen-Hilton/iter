@@ -26,12 +26,17 @@ static `iter_data` with the web page (`webui/`) and the engine setup script
 (`tools/iter_engine_setup.sh`) embedded. The second starts from the official
 `arangodb:3.12` image and adds that binary, `docker/iter5-entrypoint.sh` and
 the GraphRAG embedding model (`models/all-MiniLM-L6-v2`, fetched beforehand by
-`tools/fetch_model.sh`). Defaults: `ARANGO_URL=http://127.0.0.1:8529`,
+`tools/fetch_model.sh`). It replaces `/var/lib/arangodb3`,
+`/var/lib/arangodb3-apps` and `/var/lib/iter` with links into the one data
+folder `/var/lib/iter_data`, then is copied whole into a `scratch` stage: the
+Arango image declares its own `VOLUME`s, which a Dockerfile can't remove, and
+Docker would otherwise give each an anonymous volume. Defaults: `ARANGO_URL=http://127.0.0.1:8529`,
 `ARANGO_DB=iter5`, `ITER_LISTEN=0.0.0.0:8400`.
 
 `iter5-entrypoint.sh` refuses to start without `ARANGO_ROOT_PASSWORD` (or an
 explicit no-auth setting), starts `arangod` through the image's own
-entrypoint so first-run password setup happens (never with an endpoint
+entrypoint so first-run password setup happens (after creating `arango/`,
+`arango-apps/` and `iter/` under `/var/lib/iter_data`) (never with an endpoint
 argument: that made the temporary first-run server answer on the real port),
 then starts `iter_data --backend arango --listen 0.0.0.0:8400 --secret-file
 /var/lib/iter/iter_data.secret`. It watches both processes and stops the
@@ -41,12 +46,17 @@ together.
 `docker/compose.yml` (project and container `iter5`) publishes
 `${ITER_PORT:-8400}:8400` and the Arango console on
 `127.0.0.1:${ARANGO_HOST_PORT:-8630}:8529`, reads secrets from
-`run/docker.env`, and keeps data in two named volumes (the database, and
-iter_data's secret file). The health check calls `/health`.
+`run/docker.env`, and bind-mounts one host folder, `${ITER_DATA_DIR}`
+(`deploy.ps1` / `deploy.sh` default it to `~/.iter5/iter_data`), at
+`/var/lib/iter_data`: everything that persists, visible on the host. The health
+check calls `/health`.
 
 ## What goes in and out
 
-`deploy.sh docker` writes `run/docker.env` and runs compose. Engines and
+`deploy.sh docker` (or `deploy.ps1 docker`) writes `run/docker.env` and runs
+compose. Both refuse to run without `ITER_JWT_SECRET`: iter_data would mint a
+new secret into the data folder and every existing token would stop
+verifying. Engines and
 browsers then reach the container on :8400; only the operator's own machine
 reaches the Arango console.
 

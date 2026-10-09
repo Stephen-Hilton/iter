@@ -4,6 +4,8 @@
 #   ./deploy.sh docker   the all-in-one container (ArangoDB CE + iter_data), http://127.0.0.1:8400
 #   ./deploy.sh local    native iter_data (release build) against a dev Arango container on :8529
 #
+# The container keeps everything that persists (database, Arango apps,
+# iter_data's files) in one host folder, ITER_DATA_DIR [~/.iter5/iter_data].
 # Secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) come from ITER_ENV_FILE,
 # default ../.env (the repo .env iter3 already uses, so tokens work on both).
 # Release binaries land in bin/<os>-<arch>/ (rm+cp, never cp-over: macOS kills
@@ -22,6 +24,7 @@ RUN="$ROOT/run"
 PORT="${ITER_PORT:-8400}"
 ENV_FILE="${ITER_ENV_FILE:-$ROOT/../.env}"
 ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iter4dev}"
+DATA_DIR="${ITER_DATA_DIR:-$HOME/.iter5/iter_data}"
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 mkdir -p "$BIN" "$RUN"
 
@@ -60,14 +63,18 @@ wait_health() {
 case "$MODE" in
   docker)
     stop_native
+    # without it iter_data mints a new secret into the data folder and every
+    # existing token (engines, users) stops verifying
+    [ -n "$(envval ITER_JWT_SECRET)" ] || { echo "[deploy] ITER_JWT_SECRET is not set in $ENV_FILE (set ITER_ENV_FILE)" >&2; exit 1; }
     umask 077
     {
       echo "ITER_ADMIN_PASSWORD=$(envval ITER_ADMIN_PASSWORD)"
       echo "ITER_JWT_SECRET=$(envval ITER_JWT_SECRET)"
     } > "$RUN/docker.env"
     "$ROOT/tools/fetch_model.sh"
-    echo "[deploy] building + starting the iter5 container"
-    (cd "$ROOT/docker" && ARANGO_ROOT_PASSWORD="$ARANGO_PW" ITER_PORT="$PORT" docker compose up -d --build)
+    mkdir -p "$DATA_DIR"
+    echo "[deploy] building + starting the iter5 container (data: $DATA_DIR)"
+    (cd "$ROOT/docker" && ARANGO_ROOT_PASSWORD="$ARANGO_PW" ITER_PORT="$PORT" ITER_DATA_DIR="$DATA_DIR" docker compose up -d --build)
     wait_health || { docker logs --tail 40 iter5; exit 1; }
     echo "[deploy] Arango console: http://127.0.0.1:${ARANGO_HOST_PORT:-8630}/ (root / \$ARANGO_ROOT_PASSWORD)"
     ;;

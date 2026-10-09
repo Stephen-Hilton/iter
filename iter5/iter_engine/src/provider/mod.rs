@@ -171,7 +171,7 @@ pub fn record_usage(provider: &str, account: &str, token: Option<&str>, last: Op
 struct Registry {
     /// account name -> provider
     providers: HashMap<String, String>,
-    /// (project, account) -> model override from the `bills` edge
+    /// (project, account) -> default model from the `bills` edge
     models: HashMap<(String, String), String>,
 }
 
@@ -181,7 +181,7 @@ fn registry() -> &'static RwLock<Registry> {
 }
 
 /// Record a project's accounts as the assignments name them: (account,
-/// provider, model override).  Called by the engine every tick.
+/// provider, default model).  Called by the engine every tick.
 pub fn register_accounts(project: &str, accounts: &[(String, String, String)]) {
     if let Ok(mut r) = registry().write() {
         r.models.retain(|(p, _), _| p != project);
@@ -210,9 +210,36 @@ pub fn provider_for(account: &str) -> String {
     registry().read().ok().and_then(|r| r.providers.get(account).cloned()).unwrap_or_else(|| DEFAULT_PROVIDER.into())
 }
 
-/// The `bills` edge's model override for (project, account), if any.
-pub fn model_override(project: &str, account: &str) -> Option<String> {
+/// The `bills` edge's default model for (project, account), if any.
+pub fn model_default(project: &str, account: &str) -> Option<String> {
     registry().read().ok().and_then(|r| r.models.get(&(project.to_string(), account.to_string())).cloned())
+}
+
+/// Claude's model names: the aliases and the `claude-*` ids.
+fn is_claude_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    ["claude", "opus", "sonnet", "haiku"].iter().any(|p| m.starts_with(p))
+}
+
+/// Can `provider` run `model`?  claude runs any name it is given and the mock
+/// runs anything; another provider runs any name but Claude's.
+pub fn runs_model(provider: &str, model: &str) -> bool {
+    match normalize(provider).as_str() {
+        "claude" | "mock" => true,
+        _ => !is_claude_model(model),
+    }
+}
+
+/// The model one agent turn runs on: `named` (the item's, else the project's
+/// agent override, else the agent record's) when the account's provider can
+/// run it; otherwise the `bills` edge's default for (project, account); else
+/// `named` as it is.
+pub fn model_for(project: &str, account: &str, named: &str) -> String {
+    let named = named.trim();
+    if !named.is_empty() && runs_model(&provider_for(account), named) {
+        return named.to_string();
+    }
+    model_default(project, account).unwrap_or_else(|| named.to_string())
 }
 
 /// The one-call path every engine model call uses: resolve the account's
@@ -250,11 +277,29 @@ mod tests {
         assert_eq!(provider_for("prov-acct-m"), "mock");
         assert_eq!(provider_for("prov-acct-c"), "claude");
         assert_eq!(provider_for("prov-never-seen"), "claude", "default provider");
-        assert_eq!(model_override("prov-p1", "prov-acct-m").as_deref(), Some("m-1"));
-        assert_eq!(model_override("prov-p1", "prov-acct-c"), None);
-        // re-registering the project replaces its model overrides
+        assert_eq!(model_default("prov-p1", "prov-acct-m").as_deref(), Some("m-1"));
+        assert_eq!(model_default("prov-p1", "prov-acct-c"), None);
+        // re-registering the project replaces its model defaults
         register_accounts("prov-p1", &[("prov-acct-m".into(), "mock".into(), "".into())]);
-        assert_eq!(model_override("prov-p1", "prov-acct-m"), None);
+        assert_eq!(model_default("prov-p1", "prov-acct-m"), None);
+    }
+
+    /// The bills edge's model is a default (2026-10-08): the agent's model
+    /// wins when the account's provider can run it; the default fills in when
+    /// nothing names a model, or the named one is another provider's.
+    #[test]
+    fn bills_model_is_a_default() {
+        register_accounts("prov-p2", &[
+            ("prov2-claude".into(), "claude".into(), "sonnet".into()),
+            ("prov2-other".into(), "openai".into(), "gpt-5".into()),
+            ("prov2-bare".into(), "claude".into(), "".into()),
+        ]);
+        assert_eq!(model_for("prov-p2", "prov2-claude", "opus"), "opus", "the agent's model wins");
+        assert_eq!(model_for("prov-p2", "prov2-claude", ""), "sonnet", "nothing named: the default");
+        assert_eq!(model_for("prov-p2", "prov2-other", "opus"), "gpt-5", "a Claude model on another provider: the default");
+        assert_eq!(model_for("prov-p2", "prov2-other", "gpt-4o"), "gpt-4o", "a model the provider runs wins");
+        assert_eq!(model_for("prov-p2", "prov2-bare", ""), "", "no default: the CLI's own");
+        assert_eq!(model_for("prov-p2", "prov2-bare", " haiku "), "haiku");
     }
 
     /// `call` dispatches a mock account end to end and records its usage

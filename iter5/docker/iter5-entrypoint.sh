@@ -10,6 +10,10 @@ if [ -z "${ARANGO_ROOT_PASSWORD:-}" ] && [ -z "${ARANGO_NO_AUTH:-}" ] && [ -z "$
 fi
 export ARANGO_PASSWORD="${ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-}}"
 
+# the one data mount (a host folder in compose.yml); /var/lib/arangodb3,
+# /var/lib/arangodb3-apps and /var/lib/iter are links into it
+mkdir -p /var/lib/iter_data/arango /var/lib/iter_data/arango-apps /var/lib/iter_data/iter
+
 # no endpoint argument: the image config already listens on 0.0.0.0:8529, and
 # the image entrypoint passes our arguments to its first-run init server too —
 # an endpoint here made that throwaway server answer on 8529 (iter_data then

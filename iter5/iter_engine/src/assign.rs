@@ -28,8 +28,12 @@ pub struct AssignedAccount {
     pub switch: u8,
     #[serde(default)]
     pub stop: u8,
+    /// the default model for work billed to this account
     #[serde(default)]
     pub model: String,
+    /// the account's switch is Stopped: the ladder never picks it
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// One served project (an active `serves` edge to this engine).
@@ -43,6 +47,9 @@ pub struct Assignment {
     /// Running | Draining | Stopped ("" = take the project record's)
     #[serde(default)]
     pub state: String,
+    /// "server" | "engine": that switch is Stopped, so `state` reads Stopped
+    #[serde(default)]
+    pub stopped_by: String,
     #[serde(default)]
     pub accounts: Vec<AssignedAccount>,
     #[serde(default)]

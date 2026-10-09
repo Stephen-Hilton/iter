@@ -23,6 +23,7 @@ mod rag;
 mod reqs;
 mod settings;
 mod storage;
+mod switches;
 mod testlogs;
 pub mod sync_hooks;
 #[cfg(test)]

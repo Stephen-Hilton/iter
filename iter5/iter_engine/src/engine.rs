@@ -62,6 +62,10 @@ pub struct EngineRuntime {
     pub max_ticks: Option<u64>,
     /// test_requested value already answered (never run the same nudge twice)
     last_test_handled: String,
+    /// the probe_requested stamp last answered (the webui's usage refresh)
+    last_probe_request: String,
+    /// "project/agent" already told it has no permission flags
+    unarmed_said: HashSet<String>,
     /// account -> when this engine last probed its usage ("" = ambient login)
     last_probe: HashMap<String, Instant>,
     /// project -> date the daily-budget hold was announced
@@ -176,11 +180,53 @@ fn tokenless_accounts(accounts: &[iter_core::Account]) -> Vec<String> {
     accounts.iter().filter(|a| crate::envstore::get(&a.token_envar).is_none()).map(|a| a.name.clone()).collect()
 }
 
+/// Can this agent do its work in a headless `claude -p` run? Only when its
+/// effective flags (the project's override, else the agent record's) name a
+/// permission mode — `--dangerously-skip-permissions`, `--permission-mode …`
+/// or `--allowedTools …`; without one every write, command and read outside
+/// its folder is refused. An agent meant to run read-only says so with
+/// `readonly: true` on its record. An agent with no record is left to
+/// iter_data (the run fails naming it).
+fn agent_can_work(project: &Project, def: Option<&Value>) -> bool {
+    let Some(def) = def else { return true };
+    if def.get("readonly").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return true;
+    }
+    let id = iter_core::settings::record_id(def);
+    let flags = project.agents.get(&id).and_then(|o| o.get("flags")).and_then(|f| f.as_str())
+        .or_else(|| def.get("flags").and_then(|f| f.as_str()))
+        .unwrap_or("");
+    flags.split_whitespace().any(|f| {
+        f == "--dangerously-skip-permissions" || f == "--permission-mode" || f.starts_with("--permission-mode=")
+            || f == "--allowedTools" || f == "--allowed-tools" || f.starts_with("--allowedTools=") || f.starts_with("--allowed-tools=")
+    })
+}
+
+/// The accounts the ladder may not pick: no token in the env_file, or the
+/// account's switch is Stopped (2026-10-08).  Never substituted: with all of
+/// them unpickable the engine holds rather than fall back to the ambient login.
+fn unpickable_accounts(accounts: &[iter_core::Account], stopped: &[String]) -> Vec<String> {
+    let mut v = tokenless_accounts(accounts);
+    for a in accounts.iter().filter(|a| stopped.contains(&a.name)) {
+        if !v.contains(&a.name) {
+            v.push(a.name.clone());
+        }
+    }
+    v
+}
+
 /// The project-wide hold reason when the ladder picks nothing (renders as the
-/// "blocked by: …" tag on every queued item): every account is missing its
-/// token, or every account is at its stop%.
-fn hold_reason(all_tokenless: bool) -> &'static str {
-    if all_tokenless { "no account token" } else { "accounts at stop%" }
+/// "blocked by: …" tag on every queued item): every account is switched off,
+/// every account is unusable (no token, or switched off), or every account is
+/// at its stop%.
+fn hold_reason(accounts: &[iter_core::Account], stopped: &[String], unpickable: &[String]) -> &'static str {
+    if !accounts.is_empty() && accounts.iter().all(|a| stopped.contains(&a.name)) {
+        "accounts switched off"
+    } else if unpickable.len() == accounts.len() {
+        "no account token"
+    } else {
+        "accounts at stop%"
+    }
 }
 
 /// The connectivity-test result for the engine record.  `token` is the R2
@@ -247,6 +293,8 @@ impl EngineRuntime {
             filesync: HashMap::new(),
             max_ticks: None,
             last_test_handled: String::new(),
+            last_probe_request: String::new(),
+            unarmed_said: HashSet::new(),
             holding: false,
             last_probe: HashMap::new(),
             budget_hold: HashMap::new(),
@@ -372,6 +420,11 @@ impl EngineRuntime {
         v
     }
 
+    /// The served project's accounts whose switch is Stopped.
+    fn stopped_accounts(&self, project: &str) -> Vec<String> {
+        self.assignments.get(project).map(|a| a.accounts.iter().filter(|x| x.stopped).map(|x| x.name.clone()).collect()).unwrap_or_default()
+    }
+
     /// The served project's checkout (expanded), if it is served.
     fn topdir_of(&self, project: &str) -> Option<String> {
         self.assignments.get(project).map(|a| expand_topdir(&a.topdir)).filter(|t| !t.is_empty())
@@ -432,12 +485,18 @@ impl EngineRuntime {
     /// claude probes, mock reads ITER_MOCK_USAGE).  No accounts configured =
     /// the ambient login, which only the haiku nudge can reach.
     fn probe_stale_accounts(&mut self, engine: &Engine, now: chrono::DateTime<chrono::Utc>) {
+        self.probe_accounts(engine, now, false);
+    }
+
+    /// probe_stale_accounts, or with `force` every account now (the webui's
+    /// usage refresh, `probe_requested`), stale or not.
+    fn probe_accounts(&mut self, engine: &Engine, now: chrono::DateTime<chrono::Utc>, force: bool) {
         let stale_sec = (engine.probe_stale_min * 60) as i64;
         let accounts = self.assigned_accounts();
         let due = |this: &Self, name: &str| -> bool {
             let age = usage::read_usage(name).and_then(|u| u.age_sec(now)).unwrap_or(i64::MAX);
             let since = this.last_probe.get(name).map(|t| t.elapsed().as_secs() as i64).unwrap_or(i64::MAX);
-            age > stale_sec && since > stale_sec
+            force || (age > stale_sec && since > stale_sec)
         };
         if accounts.is_empty() {
             if due(self, "") {
@@ -751,8 +810,8 @@ impl EngineRuntime {
         for a in &served {
             let accts = core_accounts(&self.assignments.accounts_of(a));
             let map = usage::usage_map(&accts, now);
-            let tokenless = tokenless_accounts(&accts);
-            if let Some(acct) = pick_account(&accts, &map, &in_use, &tokenless) {
+            let unpickable = unpickable_accounts(&accts, &self.stopped_accounts(&a.project));
+            if let Some(acct) = pick_account(&accts, &map, &in_use, &unpickable, &usage::resets7d_map(&accts, now)) {
                 chosen_account = acct.name.clone();
                 break;
             }
@@ -763,9 +822,12 @@ impl EngineRuntime {
         // stop% — usage goes up as null and the webui shows "Suspended, no
         // usage left"; accounts/next: every account's windows + reset times
         // and the one that comes back first.
-        let all_accounts = core_accounts(&self.assigned_accounts());
+        let assigned = self.assigned_accounts();
+        let all_stopped: Vec<String> = assigned.iter().filter(|a| a.stopped).map(|a| a.name.clone()).collect();
+        let all_accounts = core_accounts(&assigned);
         self.holding = chosen_account.is_empty() && !all_accounts.is_empty();
-        let all_tokenless = !all_accounts.is_empty() && all_accounts.iter().all(|a| crate::envstore::get(&a.token_envar).is_none());
+        let all_off = !all_accounts.is_empty() && all_stopped.len() == all_accounts.len();
+        let all_unusable = !all_accounts.is_empty() && unpickable_accounts(&all_accounts, &all_stopped).len() == all_accounts.len();
         let accounts = usage::accounts_json(&all_accounts, &in_use, now);
         let next = usage::next_json(&accounts);
         let heartbeat = self.api.post(
@@ -775,7 +837,7 @@ impl EngineRuntime {
                     // the threads behind this engine's in-progress records: the
                     // webui warns when the store counts more (a ghost, 2026-09-22)
                     "running": self.running.len(), "running_by_project": self.running_by_project(),
-                    "hold": if !self.holding { "" } else if all_tokenless { "no account token" } else { "all accounts at stop%" },
+                    "hold": if !self.holding { "" } else if all_off { "accounts switched off" } else if all_unusable { "no account token" } else { "all accounts at stop%" },
                     "usage": if self.holding { Value::Null } else { usage::snapshot_json(&chosen_account, now).unwrap_or(Value::Null) },
                     "accounts": accounts, "next": next}),
         );
@@ -916,6 +978,13 @@ impl EngineRuntime {
                 }
                 // Draining/Stopped: finish running work, start nothing new,
                 // fire no schedules
+                if !a.stopped_by.is_empty() {
+                    let said = format!("the {} switch is Stopped", a.stopped_by);
+                    if self.next_said.get(project_name) != Some(&said) {
+                        println!("[engine] {project_name}: {said} — starting nothing new");
+                        self.next_said.insert(project_name.clone(), said);
+                    }
+                }
                 continue;
             }
             // idle usage refresh, BEFORE picking: with nothing running, every
@@ -943,6 +1012,17 @@ impl EngineRuntime {
 
         // connectivity test requested from the webui: one nudge, then report
         // the outcome (and the refreshed usage) via heartbeat
+        // usage refresh requested from the webui: every account's 5h / 7d now,
+        // then the fresh report goes up at once with clear_probe
+        if !engine.probe_requested.is_empty() && engine.probe_requested != self.last_probe_request {
+            self.last_probe_request = engine.probe_requested.clone();
+            println!("[engine] usage refresh requested at {}", engine.probe_requested);
+            let now = chrono::Utc::now();
+            self.probe_accounts(engine, now, true);
+            let accounts = usage::accounts_json(&core_accounts(&self.assigned_accounts()), &in_use, now);
+            let next = usage::next_json(&accounts);
+            let _ = self.api.post(&format!("/api/engines/{}/heartbeat", self.name), &json!({"clear_probe": true, "accounts": accounts, "next": next}));
+        }
         if !engine.test_requested.is_empty() && engine.test_requested != self.last_test_handled {
             self.last_test_handled = engine.test_requested.clone();
             self.run_test(engine, &chosen_account);
@@ -1080,26 +1160,26 @@ impl EngineRuntime {
             // an account with no token in the env file is never picked — the
             // item is not claimed, so it can never be billed to another
             // account's token (2026-09-11)
-            let tokenless = tokenless_accounts(&project.accounts);
-            match pick_account(&project.accounts, &map, in_use, &tokenless) {
+            let stopped = self.stopped_accounts(&project_name);
+            let unpickable = unpickable_accounts(&project.accounts, &stopped);
+            match pick_account(&project.accounts, &map, in_use, &unpickable, &usage::resets7d_map(&project.accounts, now)) {
                 Some(a) => {
                     usage_pct = map.get(&a.name).copied().unwrap_or(0);
                     account = Some(a.clone());
                 }
                 None => {
-                    let all_tokenless = tokenless.len() == project.accounts.len();
-                    let said = hold_reason(all_tokenless).to_string();
-                    if self.next_said.get(&project_name) != Some(&said) {
-                        if all_tokenless {
-                            println!("[engine] {project_name}: no account token is set — {} accounts configured, none usable", project.accounts.len());
-                        } else {
-                            println!("[engine] {project_name}: all accounts at stop% — holding until a usage window resets");
+                    let reason = hold_reason(&project.accounts, &stopped, &unpickable);
+                    if self.next_said.get(&project_name).map(String::as_str) != Some(reason) {
+                        match reason {
+                            "accounts switched off" => println!("[engine] {project_name}: every account billing it is switched off — holding"),
+                            "no account token" => println!("[engine] {project_name}: no usable account — {} configured, none has a token or is switched on", project.accounts.len()),
+                            _ => println!("[engine] {project_name}: all accounts at stop% — holding until a usage window resets"),
                         }
-                        self.next_said.insert(project_name.clone(), said);
+                        self.next_said.insert(project_name.clone(), reason.to_string());
                     }
                     usage_pct = 100;
                     account = None;
-                    hold = Some(hold_reason(all_tokenless).into());
+                    hold = Some(reason.into());
                 }
             }
         }
@@ -1341,8 +1421,27 @@ impl EngineRuntime {
             let n = self.running.iter().filter(|r| r.agent == i.agent && !r.outside_cap).count();
             set_reason(&mut waits, &i.id, format!("agent cap ({} {n}/{})", i.agent, type_max(&i.agent)));
         }
+        // an agent whose flags grant claude no permission mode cannot write,
+        // run a command or read outside its folder in a headless run: it is
+        // never started (2026-10-08 — every iter5 agent had empty flags, and
+        // each attempt spent ~$1 to end as a "need write permission" question)
+        let unarmed: Vec<String> = agents_seen
+            .iter()
+            .filter(|a| a.as_str() != "exec" && !capped.contains(a))
+            .filter(|a| !agent_can_work(project, self.agents.get(a.as_str())))
+            .cloned()
+            .collect();
+        for a in &unarmed {
+            if queued.iter().any(|i| &i.agent == a && !i.is_shell()) && self.unarmed_said.insert(format!("{project_name}/{a}")) {
+                println!("[engine] {project_name}: agent '{a}' has no permission flags (e.g. --dangerously-skip-permissions) — its items wait until it has");
+            }
+        }
+        for i in queued.iter().filter(|i| unarmed.contains(&i.agent) && !i.is_shell()) {
+            set_reason(&mut waits, &i.id, format!("agent '{}' has no permission flags", i.agent));
+        }
+        let excluded: Vec<&String> = capped.iter().chain(unarmed.iter()).collect();
         let agents_allowed: Option<Vec<String>> =
-            if capped.is_empty() { None } else { Some(agents_seen.iter().filter(|a| !capped.contains(a)).cloned().collect()) };
+            if excluded.is_empty() { None } else { Some(agents_seen.iter().filter(|a| !excluded.contains(a)).cloned().collect()) };
         if agents_allowed.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
             self.reconcile_waits(project, &reconcile_items, &waits);
             return;
@@ -1763,8 +1862,14 @@ mod tests {
 
     #[test]
     fn hold_reason_names_the_missing_token() {
-        assert_eq!(hold_reason(true), "no account token");
-        assert_eq!(hold_reason(false), "accounts at stop%");
+        let acct = |n: &str| iter_core::Account { name: n.into(), ..Default::default() };
+        let (both, s) = (vec![acct("a"), acct("b")], |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(hold_reason(&both, &[], &s(&["a", "b"])), "no account token");
+        assert_eq!(hold_reason(&both, &[], &s(&["a"])), "accounts at stop%");
+        assert_eq!(hold_reason(&both, &[], &[]), "accounts at stop%");
+        // every account switched off names the switch, one off + one tokenless the token
+        assert_eq!(hold_reason(&both, &s(&["a", "b"]), &s(&["a", "b"])), "accounts switched off");
+        assert_eq!(hold_reason(&both, &s(&["a"]), &s(&["a", "b"])), "no account token");
     }
 
     /// A tokenless account's test is red and never nudges (a nudge with no
@@ -2136,7 +2241,7 @@ mod iter5_tests {
             assignments,
             engine: json!({"name": "E1", "ticksec": 1, "probe_stale_min": 0}),
             heartbeat_reply: json!({"files_waiting": [], "build_waiting": []}),
-            agents: vec![json!({"name": "code", "promptbody": "# code agent", "closegate": {"verify": "haiku"}})],
+            agents: vec![json!({"name": "code", "promptbody": "# code agent", "flags": "--dangerously-skip-permissions", "closegate": {"verify": "haiku"}})],
             ..Default::default()
         }
     }
@@ -2243,6 +2348,65 @@ mod iter5_tests {
         assert!(tags.to_string().contains("blocked by: accounts at stop%"), "{tags}");
     }
 
+    /// A usage refresh from the webui (2026-10-08): every account is asked
+    /// again whatever its snapshot's age, and the fresh report goes up once
+    /// with clear_probe; the same stamp is not answered twice.
+    #[test]
+    fn a_usage_refresh_reprobes_every_account_once() {
+        crate::envstore::set_for_test("ENGT_PR_A_TOKEN", "a");
+        crate::envstore::set_for_test("ENGT_PR_B_TOKEN", "b");
+        crate::envstore::set_for_test("ITER_MOCK_USAGE_ENGT_PR_A", "11,3");
+        crate::envstore::set_for_test("ITER_MOCK_USAGE_ENGT_PR_B", "22,4");
+        let t = topdir("pr");
+        let accts = json!([mock_account("engt-pr-a", "ENGT_PR_A_TOKEN", 1), mock_account("engt-pr-b", "ENGT_PR_B_TOKEN", 2)]);
+        let st = Arc::new(Mutex::new(state(json!({"engine": "E1", "projects": [{"project": "pr", "topdir": t, "state": "Stopped", "accounts": accts}]}))));
+        let srv = serve(st.clone());
+        let mut rt = rt_for(&srv);
+        st.lock().unwrap().engine["probe_requested"] = json!("2026-10-08T12:00:00Z");
+        rt.tick(&engine_of(&st));
+        let cleared: Vec<Value> = srv.calls_to("POST", "/heartbeat").into_iter().filter(|b| b["clear_probe"] == true).collect();
+        assert_eq!(cleared.len(), 1, "one report answers the request");
+        let pct = |n: &str| cleared[0]["accounts"].as_array().unwrap().iter().find(|a| a["name"] == n).map(|a| a["five_hour_pct"].clone()).unwrap();
+        assert_eq!((pct("engt-pr-a"), pct("engt-pr-b")), (json!(11.0), json!(22.0)));
+        // the settings stay on the edge: the report repeats none of them
+        assert!(cleared[0]["accounts"][0].get("stop").is_none() && cleared[0]["accounts"][0].get("switch").is_none());
+        rt.tick(&engine_of(&st));
+        assert_eq!(srv.calls_to("POST", "/heartbeat").into_iter().filter(|b| b["clear_probe"] == true).count(), 1, "the same stamp is answered once");
+    }
+
+    /// An account switched off (2026-10-08) is skipped by the ladder; with
+    /// every account off the project holds — never the ambient login.
+    #[test]
+    fn switched_off_accounts_are_never_picked() {
+        crate::envstore::set_for_test("ENGT_OFF_A_TOKEN", "a");
+        crate::envstore::set_for_test("ENGT_OFF_B_TOKEN", "b");
+        let t = topdir("off");
+        let mut a = mock_account("engt-off-a", "ENGT_OFF_A_TOKEN", 1);
+        a["stopped"] = json!(true);
+        let accts = json!([a, mock_account("engt-off-b", "ENGT_OFF_B_TOKEN", 2)]);
+        let st = Arc::new(Mutex::new(state(json!({"engine": "E1", "projects": [{"project": "off", "topdir": t, "state": "Running", "accounts": accts}]}))));
+        st.lock().unwrap().items.insert("off-item-0001".into(), serde_json::to_value(item("off-item-0001", "off", "x", 5, &[])).unwrap());
+        let srv = serve(st.clone());
+        let mut rt = rt_for(&srv);
+        rt.tick(&engine_of(&st));
+        rt.drain();
+        assert_eq!(srv.calls_to("POST", "/heartbeat").last().unwrap()["account"], "engt-off-b", "A comes first by order but is off");
+        assert_eq!(state_of(&st, "off-item-0001"), "complete");
+
+        // both off: hold, no next, the reason on the item and the heartbeat
+        st.lock().unwrap().assignments["projects"][0]["accounts"][1]["stopped"] = json!(true);
+        st.lock().unwrap().items.insert("off-item-0002".into(), serde_json::to_value(item("off-item-0002", "off", "y", 5, &[])).unwrap());
+        rt.load_assignments();
+        rt.seen_seq.clear();
+        let before = srv.calls_to("POST", "/next").len();
+        rt.tick(&engine_of(&st));
+        assert_eq!(srv.calls_to("POST", "/next").len(), before, "held: next is not called");
+        let last = srv.calls_to("POST", "/heartbeat").last().cloned().unwrap();
+        assert_eq!((last["account"].as_str(), last["hold"].as_str()), (Some(""), Some("accounts switched off")));
+        let tags = st.lock().unwrap().items["off-item-0002"]["tags"].clone();
+        assert!(tags.to_string().contains("blocked by: accounts switched off"), "{tags}");
+    }
+
     /// Per-agent caps travel to iter_data as `agents_allowed`; an unknown
     /// provider fails the attempt (queued behind the backoff) with the error.
     #[test]
@@ -2273,6 +2437,40 @@ mod iter5_tests {
         assert!(it["lasterror"].as_str().unwrap().contains("unknown provider 'openai'"), "{it}");
         assert!(!it["retry_after"].as_str().unwrap().is_empty());
         assert!(st.lock().unwrap().items["up-plan-0001"]["tags"].to_string().contains("agent cap (plan 0/0)"));
+    }
+
+    /// An agent whose flags grant no permission mode is never started
+    /// (2026-10-08): it is left out of agents_allowed, its item stays queued
+    /// with the reason, and nothing is spent; a project override or
+    /// `readonly: true` arms it.
+    #[test]
+    fn an_agent_without_permission_flags_is_not_started() {
+        crate::envstore::set_for_test("ENGT_PF_TOKEN", "x");
+        let t = topdir("pf");
+        let st = Arc::new(Mutex::new(state(json!({"engine": "E1", "projects": [{"project": "pf", "topdir": t, "state": "Running",
+            "accounts": [mock_account("engt-pf", "ENGT_PF_TOKEN", 1)]}]}))));
+        {
+            let mut s = st.lock().unwrap();
+            s.agents.push(json!({"name": "refactor", "promptbody": "# refactor", "flags": ""}));
+            s.agents.push(json!({"name": "explain", "promptbody": "# explain", "readonly": true}));
+            let mut r = item("pf-refa-0001", "pf", "tidy", 1, &[]);
+            r.agent = "refactor".into();
+            s.items.insert("pf-refa-0001".into(), serde_json::to_value(r).unwrap());
+        }
+        let srv = serve(st.clone());
+        let mut rt = rt_for(&srv);
+        rt.tick(&engine_of(&st));
+        rt.drain();
+        let allowed: Vec<String> = serde_json::from_value(srv.calls_to("POST", "/next")[0]["agents_allowed"].clone()).unwrap();
+        assert!(!allowed.contains(&"refactor".to_string()) && allowed.contains(&"code".to_string()) && allowed.contains(&"explain".to_string()), "{allowed:?}");
+        assert_eq!(state_of(&st, "pf-refa-0001"), "queued");
+        assert!(st.lock().unwrap().items["pf-refa-0001"]["tags"].to_string().contains("agent 'refactor' has no permission flags"));
+        // the project's override arms it: next time it may run
+        st.lock().unwrap().projects.insert("pf".into(), json!({"name": "pf", "agents": {"refactor": {"flags": "--permission-mode bypassPermissions"}}}));
+        rt.seen_seq.clear();
+        rt.tick(&engine_of(&st));
+        rt.drain();
+        assert_eq!(state_of(&st, "pf-refa-0001"), "complete");
     }
 
     /// `mock: gate incomplete` makes the mock verifier say incomplete: the

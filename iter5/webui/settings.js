@@ -34,7 +34,7 @@
   /** spec §7 / iter_core::settings::EDGE_TYPES — (from, to) pairs are unique, so the type is inferable. */
   const EDGE_TYPES = [
     { edge: 'serves', from: 'iter_engine', to: 'project', desc: 'the engine runs the project', keys: { topdir: '', read_only: false } },
-    { edge: 'bills', from: 'account', to: 'project', desc: 'the project may use the account', keys: { order: 1, switch: 80, stop: 95, model: '' } },
+    { edge: 'bills', from: 'account', to: 'project', desc: 'the project may use the account (order: its priority, 0 = used first, no negatives; a tie goes to the account whose 7-day window resets soonest · model: the default model — used when the agent names none, or one this account\'s provider cannot run)', keys: { order: 1, switch: 80, stop: 95, model: '' } },
     { edge: 'holds', from: 'iter_engine', to: 'account', desc: 'the engine has the credential locally', keys: { token_envar: '' } },
     { edge: 'of', from: 'account', to: 'provider', desc: 'the provider the account dispatches to', keys: {} },
     { edge: 'member', from: 'user', to: 'project', desc: 'the user may see / act on the project', keys: { role: 'user' } },
@@ -125,10 +125,11 @@
         { selector: 'node.project, node.iter_engine, node.iter_data', style: { 'font-weight': 600, 'font-size': 13 } },
         { selector: 'node.ph', style: { 'background-color': '#22262d', 'border-color': '#5b6270', 'border-style': 'dashed', 'border-width': 2, color: '#7c8594', 'font-style': 'italic', 'font-size': 11 } },
         { selector: 'node.off', style: { 'background-color': '#3a3f48', 'border-color': '#5b6270', color: '#8b93a1', opacity: 0.75 } },
-        { selector: 'edge', style: { width: 1.8, 'line-color': 'data(color)', 'target-arrow-color': 'data(color)', 'target-arrow-shape': 'triangle', 'arrow-scale': 0.85, 'curve-style': 'bezier', opacity: 0.8,
+        { selector: 'edge', style: { width: 1.8, 'line-color': 'data(color)', 'target-arrow-color': 'data(color)', 'target-arrow-shape': 'triangle', 'arrow-scale': 0.85, 'curve-style': 'straight', opacity: 0.8,
           label: 'data(label)', 'font-size': 10.5, color: '#c3c9d3', 'text-background-color': '#14161a', 'text-background-opacity': 0.9, 'text-background-padding': '2px', 'text-background-shape': 'roundrectangle',
           'text-rotation': 'autorotate', 'min-zoomed-font-size': 7 } },
-        { selector: 'edge.arc', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': [-90], 'control-point-weights': [0.5] } },
+        // every edge is a straight line (2026-10-08); a self-loop has no straight form
+        { selector: 'edge:loop', style: { 'curve-style': 'bezier' } },
         // an untagged edge's type label ("serves", "runs") stays hidden at overview zoom, where many converge on one node
         // and the labels stack; it shows when zoomed in (≥ ~1.5×), on hover, and for the selection and its node's edges (.lbl)
         { selector: 'edge.typed', style: { 'text-opacity': 0, 'text-background-opacity': 0 } },
@@ -187,34 +188,27 @@
     if (snap) cy.nodes().forEach((n) => { const p = snap.get(n.id()); if (p) { n.position(p); placed++; } });
     if (snap && placed >= cy.nodes().length * 0.7) {
       cy.nodes().filter((n) => !snap.has(n.id())).forEach((n) => { const nb = n.neighborhood('node').filter((x) => snap.has(x.id()))[0]; const at = nb ? nb.position() : { x: 0, y: 0 }; n.position({ x: at.x + 80, y: at.y + 50 + Math.random() * 40 }); });
+      S.pins.apply();
       cy.viewport(vp);
-      bowEdges();
     } else layout();
     renderChips(); renderSummary(); renderBar(); applySearch();
     if (S.sel) reselect();
   }
-  /** An edge that jumps over a column runs straight through the nodes of the column between
-   *  (engine → project crosses the accounts): bow it so its line and tag stay readable. */
   /** Untagged edges' type labels show once zoomed in far enough that they no longer stack (.zin). */
   function zoomLabels() {
     const cy = S.cy; const z = cy.zoom() >= 1.6;
     if (z === S.zin) return;
     S.zin = z; cy.batch(() => cy.edges('.typed').toggleClass('zin', z));
   }
-  function bowEdges() {
-    const cy = S.cy;
-    cy.batch(() => cy.edges().forEach((e) => {
-      if (isHelper(e)) return;
-      const dx = Math.abs(e.source().position('x') - e.target().position('x'));
-      const dy = Math.abs(e.source().position('y') - e.target().position('y'));
-      e.toggleClass('arc', S.layout === 'columns' && dx > 300 && dy < 120);
-    }));
-  }
+  /** The Force layout's springs and repulsion (also the settle after a drag, kit.springDrag); weak springs
+   *  (edgeElasticity 0.1, fcose's default 0.45) so a drag disturbs little beyond the nodes it pulls. */
+  const FORCE = { name: 'fcose', quality: 'default', nodeDimensionsIncludeLabels: true, idealEdgeLength: () => 110, nodeRepulsion: () => 9000, edgeElasticity: () => 0.1 };
   function layout() {
     const cy = S.cy; cy.resize();
     if (cy.nodes().empty()) return;
+    S.pins.apply();
     if (S.layout === 'flow') cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 18, rankSep: 140, nodeDimensionsIncludeLabels: true, fit: false, animate: false }).run();
-    else if (S.layout === 'force') cy.layout({ name: 'fcose', quality: 'default', randomize: true, animate: false, nodeDimensionsIncludeLabels: true, idealEdgeLength: () => 110, nodeRepulsion: () => 9000, fit: false }).run();
+    else if (S.layout === 'force') K().forceLayout(cy, cy.nodes().filter((n) => !isHelper(n)), FORCE, cy.nodes('.kit-pinned'), { randomize: true });
     else {
       // columns: one per group of types, rows sorted by name, placeholders at the bottom of their type
       const cols = new Map();
@@ -228,7 +222,8 @@
         pos.forEach(([id, yy]) => cy.getElementById(id).position({ x: c * COLW, y: yy - off }));
       });
     }
-    bowEdges();
+    // pinned nodes go back where they were pinned (fcose already held them; dagre and columns did not)
+    S.pins.apply();
     cy.fit(cy.elements().not('.kit-ep'), 30); if (cy.zoom() > 1.3) { cy.zoom(1.3); cy.center(); }
   }
 
@@ -336,11 +331,17 @@
     const sel = S.sel; if (!sel) return;
     if (sel.kind === 'node') {
       const n = S.byId.get(sel.id);
-      ({ configure: () => configureNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), delete: () => deleteNode(n), open: () => S.ctx.openProject(n.key || n.name), rename: () => renameNode(n) })[k]();
+      ({ configure: () => configureNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), delete: () => deleteNode(n), open: () => S.ctx.openProject(n.key || n.name), rename: () => renameNode(n), pin: () => togglePin(n.id) })[k]();
     } else {
       const e = S.data.edges.find((x) => x.id === sel.id);
       ({ configure: () => configureEdge(e), copy: () => copyEdge(e), tag: () => tagEdge(e), toggle: () => toggleEdge(e), delete: () => deleteEdge(e) })[k]();
     }
+  }
+  /** P: pin the node where it is (it stays put through drags and layouts), or unpin it. */
+  function togglePin(id) {
+    const el = S.cy && S.cy.getElementById(id); if (!el || el.empty()) return;
+    const r = S.pins.toggle(el);
+    if (r) toast(r === 'pinned' ? `Pinned ${nodeName(id)}` : `Unpinned ${nodeName(id)}`, { kind: 'ok', ms: 1400 });
   }
   function focus(id) {
     if (!S.cy) { S.pending = id; return false; }
@@ -362,11 +363,16 @@
     cy.on('tap', 'node', (e) => { if (isHelper(e.target)) return; if (S.draw) { finishDraw(e.target.id()); return; } select({ kind: 'node', id: e.target.id() }); });
     cy.on('tap', 'edge', (e) => { if (isHelper(e.target)) return; const r = edgeOf(e.target); if (r) select({ kind: 'edge', id: r.id }); });
     cy.on('tap', (e) => { if (e.target === cy) { if (S.draw) cancelDraw(); else select(null); } });
+    // Force layout: a dragged node pulls its neighbours along, and the graph settles around it on release
+    // a pinned node (P) stays put through drags, settles and re-layouts (per layout, in this browser)
+    S.pins = K().pins(cy, { key: () => 'iter5.settings.pins.' + S.layout });
+    K().springDrag(cy, { enabled: () => S.layout === 'force', layout: () => FORCE });
     cy.on('dbltap', 'node', (e) => { if (!isHelper(e.target)) configureNode(S.byId.get(e.target.id())); });
     cy.on('dbltap', 'edge', (e) => { const r = edgeOf(e.target); if (r) configureEdge(r); });
     const nodeMenu = (e) => { if (isHelper(e.target)) return; const n = S.byId.get(e.target.id()); if (!n) return; select({ kind: 'node', id: n.id });
-      const items = admin() && !n.placeholder ? [{ key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'connect', label: 'Connect from here', kbd: 'C' }, { key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V', disabled: !K().clip.settings }, ...(canRename(n) ? [{ key: 'rename', label: 'Rename…' }] : []), ...(n.type === 'project' && S.ctx.openProject ? [{ key: 'open', label: 'Open project' }] : []), { sep: true }, { key: 'delete', label: 'Delete…', danger: true, disabled: n.type === 'iter_data' }]
-        : [{ key: 'configure', label: 'View settings…' }, ...(admin() && K().clip.settings ? [{ key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V' }] : [])];
+      const pinItem = { key: 'pin', label: S.cy.getElementById(n.id).hasClass('kit-pinned') ? 'Unpin' : 'Pin in place', kbd: 'P' };
+      const items = admin() && !n.placeholder ? [pinItem, { key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'connect', label: 'Connect from here', kbd: 'C' }, { key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V', disabled: !K().clip.settings }, ...(canRename(n) ? [{ key: 'rename', label: 'Rename…' }] : []), ...(n.type === 'project' && S.ctx.openProject ? [{ key: 'open', label: 'Open project' }] : []), { sep: true }, { key: 'delete', label: 'Delete…', danger: true, disabled: n.type === 'iter_data' }]
+        : [pinItem, { key: 'configure', label: 'View settings…' }, ...(admin() && K().clip.settings ? [{ key: 'paste', label: 'Paste edge here', kbd: K().MOD + 'V' }] : [])];
       K().menu(host(), at(e), `${(TYPES[n.type] || {}).label || n.type} · ${nodeName(n.id)}`, items, (k) => act(k)); };
     const edgeMenu = (e) => { const r = edgeOf(e.target); if (!r) return; select({ kind: 'edge', id: r.id });
       const items = admin() ? [{ key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'copy', label: 'Copy edge', kbd: K().MOD + 'C' }, { key: 'tag', label: 'Tag…' }, { key: 'toggle', label: r.enabled === false ? 'Switch on' : 'Switch off' }, { sep: true }, { key: 'delete', label: 'Delete…', kbd: 'Del', danger: true }]
@@ -569,7 +575,7 @@
   }
   function openHelp() {
     K().help('Settings graph — shortcuts', [
-      ['Moving around', [['/', 'Find a node or tag'], ['F', 'Fit'], ['R', 'Run the layout again'], ['Esc', 'Clear the selection'], ['?', 'This help']]],
+      ['Moving around', [['/', 'Find a node or tag'], ['F', 'Fit'], ['R', 'Run the layout again'], ['P', 'Pin the selected node in place (again: unpin)'], ['Esc', 'Clear the selection'], ['?', 'This help']]],
       ['Editing (admin)', [['N', 'New node'], ['E / double-click', 'Configure the selection'], ['C', 'Connect from the selected node'], ['Drag an edge end', 'Move it to another node (onto a placeholder: switch off)'], ['Mod+C / Mod+V', 'Copy an edge, paste it (with its settings) onto the selected node'], ['Del', 'Delete the selection']]],
     ], 'An edge type follows from its two ends: an engine → project edge is serves, account → project is bills, and so on.');
   }
@@ -589,6 +595,7 @@
     if (ev.key === 'Escape' && S.sel) select(null);
     else if (k === 'f') { ev.preventDefault(); S.cy.animate({ fit: { eles: S.cy.elements().not('.kit-ep'), padding: 30 } }, { duration: 250 }); }
     else if (k === 'r') { ev.preventDefault(); layout(); }
+    else if (k === 'p') { if (n) { ev.preventDefault(); togglePin(n.id); } }
     else if (ev.key === '?') { ev.preventDefault(); openHelp(); }
     else if (k === 'e' || ev.key === 'Enter') { if (n) { ev.preventDefault(); configureNode(n); } else if (e) { ev.preventDefault(); configureEdge(e); } }
     else if (!admin()) return;

@@ -104,6 +104,9 @@ fn main() {
     // file; token reads from here on go through envstore::get, and the file
     // is re-read while running (account hot reload)
     envstore::init(&args.env_file, &[ENGINE_TOKEN_VAR]);
+    // SAFETY: still single-threaded (see envstore::init); Git Bash in every
+    // child makes real symlinks instead of copying (iter_core::platform)
+    unsafe { iter_core::platform::init_child_env() };
     let token = envstore::get(ENGINE_TOKEN_VAR).unwrap_or_default();
     let Some(data_url) = resolve_data_url(args.data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref()) else {
         eprintln!("usage: iter_engine --data-url <iter_data url> --env-file <path> [--name <engine name>]");

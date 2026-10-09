@@ -532,6 +532,10 @@ pub struct Engine {
     /// webui-owned: ISO ts of a pending connectivity test ("" = none)
     #[serde(default)]
     pub test_requested: String,
+    /// webui-owned: ISO ts of a pending usage refresh ("" = none): the engine
+    /// re-reads every account's usage and clears it (2026-10-08)
+    #[serde(default)]
+    pub probe_requested: String,
     /// engine-owned: outcome of the last connectivity test
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_result: Option<serde_json::Value>,
@@ -1171,11 +1175,18 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
 /// `tokenless` are accounts whose token is not set in the engine's env_file
 /// (2026-09-11): never picked, in either pass — a named account is never
 /// substituted with another account's token.
+///
+/// Order (decided 2026-10-08): the bills edge's `order` (P0 first), and among
+/// accounts of one priority the one whose 7-day window resets soonest —
+/// `resets7d` maps account name -> that reset (unix seconds); an account with
+/// none goes after those with one, then by name. Its 7d allowance is the one
+/// that expires unused first, so it is spent first.
 pub fn pick_account<'a>(
     accounts: &'a [Account],
     usage: &BTreeMap<String, u8>,
     in_use: &[String],
     tokenless: &[String],
+    resets7d: &BTreeMap<String, i64>,
 ) -> Option<&'a Account> {
     for threshold in ["switch", "stop"] {
         for exclusion_active in [true, false] {
@@ -1184,7 +1195,10 @@ pub fn pick_account<'a>(
                 .filter(|a| !tokenless.contains(&a.name))
                 .filter(|a| !exclusion_active || !in_use.contains(&a.name))
                 .collect();
-            sorted.sort_by_key(|a| a.order);
+            sorted.sort_by(|a, b| {
+                let reset = |x: &Account| resets7d.get(&x.name).copied().unwrap_or(i64::MAX);
+                (a.order, reset(a), &a.name).cmp(&(b.order, reset(b), &b.name))
+            });
             for acct in sorted {
                 let used = usage.get(&acct.name).copied().unwrap_or(0);
                 let limit = if threshold == "switch" { acct.switch } else { acct.stop };
@@ -1544,7 +1558,7 @@ mod tests {
     fn ladder_prefers_unused_account() {
         let accounts = vec![acct("Dev1", 1, 80, 99), acct("Dev2", 2, 80, 99)];
         let usage = BTreeMap::new();
-        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[]).unwrap();
+        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[], &BTreeMap::new()).unwrap();
         assert_eq!(picked.name, "Dev2");
     }
 
@@ -1552,7 +1566,7 @@ mod tests {
     fn ladder_falls_back_to_shared_when_exclusion_empties() {
         let accounts = vec![acct("Dev1", 1, 80, 99)];
         let usage = BTreeMap::new();
-        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[]).unwrap();
+        let picked = pick_account(&accounts, &usage, &["Dev1".into()], &[], &BTreeMap::new()).unwrap();
         assert_eq!(picked.name, "Dev1");
     }
 
@@ -1562,14 +1576,38 @@ mod tests {
         let mut usage = BTreeMap::new();
         usage.insert("Dev1".to_string(), 85u8);
         // Dev1 over switch, Dev2 under: pick Dev2
-        assert_eq!(pick_account(&accounts, &usage, &[], &[]).unwrap().name, "Dev2");
+        assert_eq!(pick_account(&accounts, &usage, &[], &[], &BTreeMap::new()).unwrap().name, "Dev2");
         usage.insert("Dev2".to_string(), 90u8);
         // both over switch, both under stop: pass 2 picks Dev1 (order)
-        assert_eq!(pick_account(&accounts, &usage, &[], &[]).unwrap().name, "Dev1");
+        assert_eq!(pick_account(&accounts, &usage, &[], &[], &BTreeMap::new()).unwrap().name, "Dev1");
         usage.insert("Dev1".to_string(), 99u8);
         usage.insert("Dev2".to_string(), 99u8);
         // both at stop: nothing
-        assert!(pick_account(&accounts, &usage, &[], &[]).is_none());
+        assert!(pick_account(&accounts, &usage, &[], &[], &BTreeMap::new()).is_none());
+    }
+
+    /// Ties on priority go to the soonest 7d reset (2026-10-08), the worked
+    /// example: DEV3, DEV2, DEV4 (all P2, by reset), then DEV1 (P5) while each
+    /// passes its switch%; then the second pass starts over at DEV3 up to stop%.
+    #[test]
+    fn ladder_breaks_priority_ties_by_the_soonest_7d_reset() {
+        let accounts = vec![acct("DEV1", 5, 80, 95), acct("DEV2", 2, 80, 95), acct("DEV3", 2, 80, 95), acct("DEV4", 2, 80, 95)];
+        let day = 86_400i64;
+        let resets: BTreeMap<String, i64> = [("DEV1", 381), ("DEV2", 423), ("DEV3", 265), ("DEV4", 659)].iter().map(|(n, d)| (n.to_string(), d * day / 100)).collect();
+        let mut usage: BTreeMap<String, u8> = BTreeMap::new();
+        let pick = |u: &BTreeMap<String, u8>| pick_account(&accounts, u, &[], &[], &resets).map(|a| a.name.clone());
+        assert_eq!(pick(&usage).as_deref(), Some("DEV3"));
+        for (full, next) in [("DEV3", "DEV2"), ("DEV2", "DEV4"), ("DEV4", "DEV1"), ("DEV1", "DEV3")] {
+            usage.insert(full.into(), 80);
+            assert_eq!(pick(&usage).as_deref(), Some(next), "after {full} reaches its switch%");
+        }
+        // pass 2 (stop%) in the same order: DEV3 until 95, then DEV2
+        usage.insert("DEV3".into(), 95);
+        assert_eq!(pick(&usage).as_deref(), Some("DEV2"));
+        // an account with no known reset goes after those with one at its priority
+        let mut partial = resets.clone();
+        partial.remove("DEV3");
+        assert_eq!(pick_account(&accounts, &BTreeMap::new(), &[], &[], &partial).unwrap().name, "DEV2");
     }
 
     /// An account with no token in the engine's env_file is never picked
@@ -1579,11 +1617,11 @@ mod tests {
     fn pick_account_skips_a_tokenless_account() {
         let accounts = vec![acct("Dev1", 1, 80, 99), acct("Dev2", 2, 80, 99)];
         let usage = BTreeMap::new();
-        assert_eq!(pick_account(&accounts, &usage, &[], &["Dev1".into()]).unwrap().name, "Dev2");
+        assert_eq!(pick_account(&accounts, &usage, &[], &["Dev1".into()], &BTreeMap::new()).unwrap().name, "Dev2");
         // pass 2 (stop) must skip it too
         let mut over = BTreeMap::new();
         over.insert("Dev2".to_string(), 85u8);
-        assert_eq!(pick_account(&accounts, &over, &[], &["Dev1".into()]).unwrap().name, "Dev2");
-        assert!(pick_account(&accounts, &usage, &[], &["Dev1".into(), "Dev2".into()]).is_none());
+        assert_eq!(pick_account(&accounts, &over, &[], &["Dev1".into()], &BTreeMap::new()).unwrap().name, "Dev2");
+        assert!(pick_account(&accounts, &usage, &[], &["Dev1".into(), "Dev2".into()], &BTreeMap::new()).is_none());
     }
 }

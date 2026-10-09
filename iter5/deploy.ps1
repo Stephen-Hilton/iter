@@ -11,6 +11,8 @@ Engine settings (defaults in brackets):
   -EnvFile  [~\.iter5\.env]   ITER_ENGINE_TOKEN + each account's token variable
   -Name     [the hostname]
 The engine's pid and log live in ~\.iter5\ (engine.pid, engine.log, engine.err.log).
+The container keeps everything that persists (database, Arango apps, iter_data's
+files) in one host folder: $env:ITER_DATA_DIR, else ~\.iter5\iter_data.
 Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), Docker Desktop.
 #>
 param(
@@ -157,7 +159,11 @@ function Wait-Health {
 }
 
 function Deploy-Docker {
-    $repoEnv = if ($env:ITER_ENV_FILE) { $env:ITER_ENV_FILE } else { Join-Path $Root '..\.env' }
+    $dataEnv = Join-Path $env:USERPROFILE '.iter5\data.env'
+    $repoEnv = if ($env:ITER_ENV_FILE) { $env:ITER_ENV_FILE } elseif (Test-Path $dataEnv) { $dataEnv } else { Join-Path $Root '..\.env' }
+    # without it iter_data mints a new secret into the data folder and every
+    # existing token (engines, users) stops verifying
+    if (-not (Get-EnvValue $repoEnv 'ITER_JWT_SECRET')) { throw "ITER_JWT_SECRET is not set in $repoEnv (set ITER_ENV_FILE)" }
     $run = Join-Path $Root 'run'
     New-Item -ItemType Directory -Force $run | Out-Null
     $lines = @(
@@ -175,6 +181,9 @@ function Deploy-Docker {
     Say 'building + starting the iter5 container'
     $env:ARANGO_ROOT_PASSWORD = if ($env:ARANGO_ROOT_PASSWORD) { $env:ARANGO_ROOT_PASSWORD } else { 'iter4dev' }
     $env:ITER_PORT = $Port
+    if (-not $env:ITER_DATA_DIR) { $env:ITER_DATA_DIR = Join-Path $env:USERPROFILE '.iter5\iter_data' }
+    New-Item -ItemType Directory -Force $env:ITER_DATA_DIR | Out-Null
+    Say "data folder: $env:ITER_DATA_DIR"
     $compose = Join-Path $Root 'docker\compose.yml'
     Invoke-Native 'docker compose' { docker compose -f $compose up -d --build }
     Wait-Health

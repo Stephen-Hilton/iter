@@ -28,7 +28,7 @@ stop check), `DispatchOut` (text, subtype, turns, cost, token counts, session id
 `Role` (work, verifier, judge, explain, summary, ocr, critic, nudge). `dispatch_agent` sends
 `"claude"` to the Claude provider, `"mock"` to the mock, and anything else to an error naming the known
 providers. A registry filled each tick from the assignments maps (project, account) to its provider and
-`bills`-edge model override (`register_accounts`, `provider_for`, `model_override`); `call` is the path
+`bills`-edge default model (`register_accounts`, `provider_for`, `model_default`, `model_for`: the agent's model when the provider can run it, else the default); `call` is the path
 every engine call uses: resolve provider and token, dispatch, then record the account's usage snapshot.
 
 - `provider/claude.rs`: builds `claude -p … --output-format stream-json --verbose` arguments

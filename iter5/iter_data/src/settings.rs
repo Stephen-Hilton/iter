@@ -470,9 +470,12 @@ pub async fn assignments(store: &dyn Storage, engine: &str) -> Result<Assignment
     };
     // held accounts: active holds edges whose account record exists
     let mut held: Vec<HeldAccount> = Vec::new();
+    // account switches: a Stopped account is never picked for new work
+    let mut acct_on: BTreeMap<String, bool> = BTreeMap::new();
     for h in edges.iter().filter(|e| e.edge_type == "holds" && e.from == eid && e.is_active()) {
         let an = h.to_name().to_string();
         let Some(rec) = store.get("account", &an, NOSK).await? else { continue };
+        acct_on.insert(an.clone(), crate::switches::is_on(&rec));
         let ovr = h.setting_str("token_envar");
         held.push(HeldAccount {
             name: an.clone(),
@@ -481,6 +484,9 @@ pub async fn assignments(store: &dyn Storage, engine: &str) -> Result<Assignment
         });
     }
     held.sort_by(|a, b| a.name.cmp(&b.name));
+    // switches: with the server or this engine Stopped, a Running project
+    // reads Stopped here (no new work; running work finishes) and says why
+    let blocked = crate::switches::engine_block(store, engine).await?;
     let mut projects = Vec::new();
     for s in edges.iter().filter(|e| e.edge_type == "serves" && e.from == eid && e.is_active()) {
         let pn = s.to_name().to_string();
@@ -500,15 +506,18 @@ pub async fn assignments(store: &dyn Storage, engine: &str) -> Result<Assignment
                     switch: pct("switch"),
                     stop: pct("stop"),
                     model: b.setting_str("model"),
+                    stopped: !acct_on.get(&h.name).copied().unwrap_or(true),
                 })
             })
             .collect();
         accounts.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
+        let pstate = Some(body_str(&prec, "state")).filter(|x| !x.is_empty()).unwrap_or_else(|| "Running".into());
         projects.push(ProjectAssignment {
             project: pn.clone(),
             topdir: s.setting_str("topdir"),
             read_only: s.setting("read_only").and_then(|v| v.as_bool()).unwrap_or(false),
-            state: Some(body_str(&prec, "state")).filter(|x| !x.is_empty()).unwrap_or_else(|| "Running".into()),
+            state: if blocked.is_some() && pstate == "Running" { "Stopped".into() } else { pstate },
+            stopped_by: blocked.unwrap_or_default().into(),
             accounts,
             edge_tag: s.tag.clone(),
             agents: agents_enabled(&edges, &pn),
@@ -547,19 +556,28 @@ fn shown_settings(t: &str, rec: &Value) -> Value {
             o.remove("pwhash");
             o.remove("tokenver");
         }
+        // an engine's usage report (every account's windows, the active one, the
+        // next to come back) is status the engine rewrites each heartbeat, not a
+        // setting: account settings live on the bills / holds edges (2026-10-08)
+        if t == "iter_engine" {
+            o.remove("accounts");
+            o.remove("usage");
+            o.remove("next");
+        }
     }
     s
 }
 
 fn summary_of(t: &str, rec: &Value) -> String {
     let s = |k: &str| body_str(rec, k);
+    let off = if crate::switches::is_on(rec) { "" } else { "switched off · " };
     match t {
         "project" => s("state"),
-        "iter_engine" => format!("{} {}", s("state"), s("last_seen")).trim().to_string(),
+        "iter_engine" => format!("{off}{} {}", s("state"), s("last_seen")).trim().to_string(),
         "agent" => s("model"),
         "agent_tools" => s("kind"),
         "user" => s("role"),
-        "account" => format!("{} {}", s("provider"), s("token_envar")).trim().to_string(),
+        "account" => format!("{off}{} {}", s("provider"), s("token_envar")).trim().to_string(),
         _ => s("desc"),
     }
 }

@@ -63,7 +63,7 @@ pub struct EdgeTypeDef {
 /// type is always inferable from its endpoints.
 pub const EDGE_TYPES: &[EdgeTypeDef] = &[
     EdgeTypeDef { edge: "serves", from: "iter_engine", to: "project", desc: "engine runs the project (settings: topdir, read_only)" },
-    EdgeTypeDef { edge: "bills", from: "account", to: "project", desc: "project may use the account (settings: order, switch, stop, model)" },
+    EdgeTypeDef { edge: "bills", from: "account", to: "project", desc: "project may use the account (settings: order, switch, stop, model = the default model)" },
     EdgeTypeDef { edge: "holds", from: "iter_engine", to: "account", desc: "engine has the credential locally (settings: token_envar override)" },
     EdgeTypeDef { edge: "of", from: "account", to: "provider", desc: "the account's provider for dispatch" },
     EdgeTypeDef { edge: "member", from: "user", to: "project", desc: "user may see/act on the project (settings: role user|viewer)" },
@@ -280,8 +280,9 @@ pub fn validate_settings(edge_type: &str, settings: &Value) -> Result<(), String
             string("model")?;
             match settings.get("order") {
                 None | Some(Value::Null) => {}
-                Some(v) if v.as_i64().is_some() => {}
-                _ => return Err("bills.order must be an integer".into()),
+                // the account's priority: P0 is picked first, no negatives
+                Some(v) if v.as_i64().is_some_and(|o| o >= 0) => {}
+                _ => return Err("bills.order (the account's priority, P0 first) must be a whole number 0 or more".into()),
             }
         }
         "holds" => string("token_envar")?,
@@ -316,9 +317,13 @@ pub struct ProjectAssignment {
     pub topdir: String,
     #[serde(default)]
     pub read_only: bool,
-    /// the project record's state (Running | Draining | Stopped)
+    /// the project record's state (Running | Draining | Stopped); a Running
+    /// project reads Stopped while the server or the engine switch is Stopped
     #[serde(default)]
     pub state: String,
+    /// "server" | "engine" when that switch is Stopped, else ""
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stopped_by: String,
     /// accounts billed to the project that this engine also holds, by `order`
     #[serde(default)]
     pub accounts: Vec<BilledAccount>,
@@ -343,8 +348,14 @@ pub struct BilledAccount {
     pub switch: u8,
     #[serde(default)]
     pub stop: u8,
+    /// the default model for work billed to this account: used when neither
+    /// the item, the project's agent override nor the agent names one, and
+    /// in place of an agent model the account's provider cannot run
     #[serde(default)]
     pub model: String,
+    /// the account's switch is Stopped: never picked for new work
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -427,6 +438,9 @@ mod tests {
     fn settings_validation() {
         assert!(validate_settings("bills", &json!({"order": 1, "switch": 80, "stop": 95, "model": ""})).is_ok());
         assert!(validate_settings("bills", &json!({"switch": 180})).is_err());
+        assert!(validate_settings("bills", &json!({"order": 0})).is_ok());
+        assert!(validate_settings("bills", &json!({"order": -1})).is_err(), "no negative priorities");
+        assert!(validate_settings("bills", &json!({"order": 1.5})).is_err());
         assert!(validate_settings("serves", &json!({"topdir": "~/x", "read_only": true})).is_ok());
         assert!(validate_settings("serves", &json!({"read_only": "yes"})).is_err());
         assert!(validate_settings("member", &json!({"role": "viewer"})).is_ok());

@@ -32,7 +32,7 @@ Reads and writes only `/api/settings/*`. The engines see the result through `GET
 
 ## Why it matters
 
-In iter4 who-runs-what was a set of lists on several records; here it is one picture, and stopping a project on one engine is a drag, not a config edit.
+In the Force layout a dragged node pulls its neighbours along and the graph settles around where it is dropped (`IterKit.springDrag`, weak springs); P pins the selected node in place in any layout. Every edge is a straight line. An engine node does not show its usage report (`accounts`, `usage`, `next`): that is status the engine rewrites each heartbeat, and the account settings live on the bills edges. was a set of lists on several records; here it is one picture, and stopping a project on one engine is a drag, not a config edit.
 
 ## Example
 
