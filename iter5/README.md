@@ -11,6 +11,7 @@ iter5 is a fork of iter4. A project lives in two places that stay in step: the r
 | `iter_rag` | GraphRAG extraction, chunking and embedding |
 | `webui/` | the web page (embedded into iter_data) |
 | `docker/` | the all-in-one image: ArangoDB CE + iter_data |
+| `linux/` | native systemd install: ArangoDB, iter_data, backups and the engine as services (also in a WSL2 distro) |
 
 iter5 is its own cargo workspace (`iter5/Cargo.toml`). Build and test from `iter5/`. It runs beside iter4: container `iter5`, port **:8400**, database `iter5`.
 
@@ -23,14 +24,29 @@ iter5 is its own cargo workspace (`iter5/Cargo.toml`). Build and test from `iter
 
 Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from `../.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). Release binaries land in `bin/<os>-<arch>/` (`bin/linux-x86_64/`, `bin/windows-x86_64/`, …).
 
-### Windows (native)
+### Native systemd Linux
 
-The engine runs natively on Windows; `deploy.ps1` is the PowerShell twin of `deploy.sh`:
+```bash
+linux/install.sh server              # ArangoDB + iter_data on :8400 + an online backup every 6 hours
+linux/install.sh engine --name NAME  # this machine's engine as a service
+linux/install.sh update | backup | status
+```
+
+See [`linux/linux.code.iter.md`](linux/linux.code.iter.md).
+
+### Windows
+
+On Windows the server runs in a WSL2 distro, and each engine runs where its project builds best. Unreal-style projects use the native Windows engine. Bash- and Linux-heavy projects use an engine in the distro, because Git Bash makes every process start expensive.
+
+1. `wsl --install -d Debian`, then in `/etc/wsl.conf`: `[boot] systemd=true`, `[user] default=<you>` (and `[interop] appendWindowsPath=false` to keep Windows tools off the Linux PATH); `wsl --terminate Debian`.
+2. In the distro: clone the repo to `~/dev/iter`, then `iter5/linux/install.sh server` (and `install.sh engine --name <host>-wsl` for a Linux engine; put its projects' checkouts on the distro's disk, e.g. `~/dev/<project>`). Docker Desktop's WSL integration gives the distro `docker`.
+3. On Windows, `deploy.ps1` handles the native engine and the startup:
 
 ```powershell
-.\deploy.ps1 docker   # the container, same as ./deploy.sh docker (Docker Desktop)
-.\deploy.ps1 engine   # cargo build --release -> bin\windows-x86_64\iter_engine.exe, then (re)start it
+.\deploy.ps1 engine     # cargo build --release -> bin\windows-x86_64\iter_engine.exe, then (re)start it
 .\deploy.ps1 start | stop | status
+.\deploy.ps1 startup    # start the distro (ArangoDB, iter_data, its engine), wait for :8400, start the Windows engine
+.\deploy.ps1 autostart  # run `startup` at every logon (Task Scheduler); also sets WSL memory reclaim
 ```
 
 - Needs Rust (`winget install Rustlang.Rustup`, MSVC toolchain), Git for Windows and the `claude` CLI on PATH.
@@ -39,6 +55,7 @@ The engine runs natively on Windows; `deploy.ps1` is the PowerShell twin of `dep
 - Give a `serves` edge a Windows topdir with forward slashes: `C:/Users/me/dev/project`.
 - Windows Smart App Control can block cargo's unsigned debug build scripts (`os error 4551`); `cargo test --release` builds past it.
 - The repo's `.gitattributes` keeps LF in a Windows checkout so the container and Git Bash scripts run.
+- `.\deploy.ps1 docker` is retired on Windows and only points here; `./deploy.sh docker` remains for Linux and macOS hosts.
 
 ## Start an engine (once per machine)
 

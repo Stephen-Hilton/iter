@@ -1,0 +1,18 @@
+[Unit]
+Description=iter5 iter_data (API + webui on :@PORT@)
+Requires=arangodb3.service
+After=arangodb3.service
+
+[Service]
+User=@USER@
+Slice=iter.slice
+WorkingDirectory=@HOME@/.iter5/iter_data
+EnvironmentFile=@HOME@/.iter5/data.env
+ExecStart=@HOME@/.iter5/bin/iter_data --backend arango --listen 0.0.0.0:@PORT@ --secret-file @HOME@/.iter5/iter_data/iter_data.secret --env-file @HOME@/.iter5/iter_data/.env
+StandardOutput=append:@HOME@/.iter5/iter_data.log
+StandardError=append:@HOME@/.iter5/iter_data.log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

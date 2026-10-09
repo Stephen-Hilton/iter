@@ -1,0 +1,19 @@
+[Unit]
+Description=iter5 engine @ENGINE@
+After=network-online.target iter-data.service
+
+[Service]
+User=@USER@
+WorkingDirectory=@HOME@/.iter5
+Environment=HOME=@HOME@
+Environment=PATH=@HOME@/.local/bin:@HOME@/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@HOME@/.iter5/bin/iter_engine --data-url http://127.0.0.1:@PORT@ --env-file @HOME@/.iter5/.env --name @ENGINE@
+StandardOutput=append:@HOME@/.iter5/engine.log
+StandardError=append:@HOME@/.iter5/engine.err.log
+Restart=on-failure
+RestartSec=10
+# a stop takes the agent sessions and shells it started with it
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

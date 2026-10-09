@@ -1,0 +1,29 @@
+#!/bin/bash
+# iter-backup: online backup of the iter5 database (arangodump reads a
+# consistent snapshot while arangod keeps serving; nothing is stopped), plus
+# iter_data's env and secret files, as one tar in $ITER_BACKUP_DIR; the newest
+# $ITER_BACKUP_KEEP are kept. Run by iter-backup.timer (linux/install.sh).
+#   restore: tar -xf iter5-<ts>.tar -C /tmp/r && arangorestore \
+#     --server.database iter5 --create-database true \
+#     --include-system-collections true --input-directory /tmp/r/db
+set -euo pipefail
+H5="$HOME/.iter5"
+set -a; . "$H5/data.env"; set +a
+DEST="${ITER_BACKUP_DIR:-$H5/backups}"
+KEEP="${ITER_BACKUP_KEEP:-28}"
+ts=$(date -u +%Y%m%d-%H%M%SZ)
+tmp=$(mktemp -d)                      # dump on the local disk, then one copy out
+trap 'rm -rf "$tmp"' EXIT
+arangodump --server.endpoint tcp://127.0.0.1:8529 --server.username "$ARANGO_USER" \
+  --server.password "$ARANGO_PASSWORD" --server.database "$ARANGO_DB" \
+  --include-system-collections true --threads 2 --log.level warning \
+  --output-directory "$tmp/db"
+cp -a "$H5/data.env" "$tmp/"
+for f in iter_data.secret .env; do
+  if [ -f "$H5/iter_data/$f" ]; then cp -a "$H5/iter_data/$f" "$tmp/"; fi
+done
+mkdir -p "$DEST"
+tar -C "$tmp" -cf "$DEST/.iter5-$ts.tar.part" .
+mv "$DEST/.iter5-$ts.tar.part" "$DEST/iter5-$ts.tar"
+ls -1t "$DEST"/iter5-*.tar | tail -n +$((KEEP + 1)) | xargs -r rm -f
+echo "iter-backup: $DEST/iter5-$ts.tar ($(du -h "$DEST/iter5-$ts.tar" | cut -f1)), $(ls "$DEST"/iter5-*.tar | wc -l) kept"

@@ -1,23 +1,29 @@
 <#
 Deploy iter5 on Windows (native PowerShell; deploy.sh is the Linux/macOS twin).
 
-  .\deploy.ps1 docker   build + start the all-in-one container (ArangoDB CE + iter_data) on :8400
-  .\deploy.ps1 engine   build iter_engine for Windows, then (re)start it against iter_data
-  .\deploy.ps1 build    build iter_engine only (-> bin\windows-x86_64\)
+  .\deploy.ps1 engine     build iter_engine for Windows, then (re)start it against iter_data
+  .\deploy.ps1 build      build iter_engine only (-> bin\windows-x86_64\)
   .\deploy.ps1 start | stop | status    the local engine process
+  .\deploy.ps1 startup    start the WSL distro (its systemd runs ArangoDB, iter_data
+                          and its engine), wait for iter_data, start the Windows engine
+  .\deploy.ps1 autostart  register `startup` as a logon task (and WSL memory reclaim)
+
+The server (ArangoDB + iter_data on :8400) runs in a WSL2 distro, installed
+there with iter5/linux/install.sh; `docker` only says so now.
 
 Engine settings (defaults in brackets):
   -DataUrl  [$env:ITER_DATA_URL, else http://127.0.0.1:8400]
   -EnvFile  [~\.iter5\.env]   ITER_ENGINE_TOKEN + each account's token variable
   -Name     [the hostname]
+  -Distro   [Debian]   the WSL distro running the server (startup, autostart)
 The engine's pid and log live in ~\.iter5\ (engine.pid, engine.log, engine.err.log).
-The container keeps everything that persists (database, Arango apps, iter_data's
-files) in one host folder: $env:ITER_DATA_DIR, else ~\.iter5\iter_data.
-Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), Docker Desktop.
+Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), WSL2.
 #>
 param(
-    [ValidateSet('docker', 'engine', 'build', 'start', 'stop', 'status')]
+    [ValidateSet('docker', 'engine', 'build', 'start', 'stop', 'status', 'startup', 'autostart')]
     [string]$Mode = 'engine',
+    [string]$Distro = 'Debian',
+    [switch]$Hold,
     [string]$DataUrl = $(if ($env:ITER_DATA_URL) { $env:ITER_DATA_URL } else { 'http://127.0.0.1:8400' }),
     [string]$EnvFile = (Join-Path $HOME '.iter5\.env'),
     # hostname keeps its case (TheBEAST); $env:COMPUTERNAME is upper-cased
@@ -58,20 +64,6 @@ function Find-Cargo {
     $c = Join-Path $HOME '.cargo\bin\cargo.exe'
     if (Test-Path $c) { return $c }
     throw 'cargo not found: install Rust with `winget install Rustlang.Rustup`'
-}
-
-# Git for Windows' bash; never System32\bash.exe, which is WSL
-function Find-GitBash {
-    $git = Get-Command git -ErrorAction SilentlyContinue
-    if ($git) {
-        $gitRoot = Split-Path (Split-Path $git.Source)
-        foreach ($b in @((Join-Path $gitRoot 'bin\bash.exe'), (Join-Path (Split-Path $gitRoot) 'bin\bash.exe'))) {
-            if (Test-Path $b) { return $b }
-        }
-    }
-    $b = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
-    if (Test-Path $b) { return $b }
-    throw 'Git for Windows bash not found (install Git for Windows)'
 }
 
 # a single KEY=value from a .env file, without running it
@@ -146,55 +138,89 @@ function Show-Status {
     if (Test-Path $Log) { Get-Content $Log -Tail 5 }
 }
 
-function Wait-Health {
-    for ($i = 0; $i -lt 120; $i++) {
+function Wait-Health([int]$seconds = 120) {
+    for ($i = 0; $i -lt $seconds; $i++) {
         try {
             $h = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
             if ($h.ok) { Say "iter_data up: http://127.0.0.1:$Port  $($h | ConvertTo-Json -Compress)"; return }
         } catch { }
         Start-Sleep 1
     }
-    docker logs --tail 40 iter5
-    throw 'iter_data did not come up'
+    throw "iter_data did not answer on :$Port within ${seconds}s (in WSL: linux/install.sh status)"
 }
 
-function Deploy-Docker {
-    $dataEnv = Join-Path $env:USERPROFILE '.iter5\data.env'
-    $repoEnv = if ($env:ITER_ENV_FILE) { $env:ITER_ENV_FILE } elseif (Test-Path $dataEnv) { $dataEnv } else { Join-Path $Root '..\.env' }
-    # without it iter_data mints a new secret into the data folder and every
-    # existing token (engines, users) stops verifying
-    if (-not (Get-EnvValue $repoEnv 'ITER_JWT_SECRET')) { throw "ITER_JWT_SECRET is not set in $repoEnv (set ITER_ENV_FILE)" }
-    $run = Join-Path $Root 'run'
-    New-Item -ItemType Directory -Force $run | Out-Null
-    $lines = @(
-        "ITER_ADMIN_PASSWORD=$(Get-EnvValue $repoEnv 'ITER_ADMIN_PASSWORD')",
-        "ITER_JWT_SECRET=$(Get-EnvValue $repoEnv 'ITER_JWT_SECRET')"
-    )
-    # no BOM: docker compose reads the first key name literally
-    [IO.File]::WriteAllLines((Join-Path $run 'docker.env'), $lines)
-    $model = Join-Path $Root 'models\all-MiniLM-L6-v2\model.safetensors'
-    if (-not (Test-Path $model)) {
-        Say 'fetching the embedding model'
-        $bash = Find-GitBash
-        Invoke-Native 'fetch_model.sh' { & $bash (Join-Path $Root 'tools/fetch_model.sh') }
+# The WSL VM keeps freed page cache (a cargo build leaves ~10 GB) counted
+# against Windows unless WSL reclaims it; make sure ~\.wslconfig asks for
+# that. It takes effect on the next `wsl --shutdown`.
+function Confirm-WslMemoryReclaim {
+    $cfg = Join-Path $env:USERPROFILE '.wslconfig'
+    $lines = @(if (Test-Path $cfg) { Get-Content $cfg })
+    if ($lines | Where-Object { $_ -match '^\s*autoMemoryReclaim\s*=' }) { return }
+    $i = [array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($l) $l -match '^\s*\[experimental\]\s*$' })
+    $set = 'autoMemoryReclaim=gradual'
+    if ($i -ge 0) {
+        $lines = @($lines[0..$i]) + $set + @(if ($i + 1 -lt $lines.Count) { $lines[($i + 1)..($lines.Count - 1)] })
+    } else {
+        $lines = $lines + @(if ($lines.Count) { '' }) + '[experimental]' + $set
     }
-    Say 'building + starting the iter5 container'
-    $env:ARANGO_ROOT_PASSWORD = if ($env:ARANGO_ROOT_PASSWORD) { $env:ARANGO_ROOT_PASSWORD } else { 'iter4dev' }
-    $env:ITER_PORT = $Port
-    if (-not $env:ITER_DATA_DIR) { $env:ITER_DATA_DIR = Join-Path $env:USERPROFILE '.iter5\iter_data' }
-    New-Item -ItemType Directory -Force $env:ITER_DATA_DIR | Out-Null
-    Say "data folder: $env:ITER_DATA_DIR"
-    $compose = Join-Path $Root 'docker\compose.yml'
-    Invoke-Native 'docker compose' { docker compose -f $compose up -d --build }
-    Wait-Health
-    Say "webui: http://127.0.0.1:$Port/  (login: admin / ITER_ADMIN_PASSWORD)"
+    [IO.File]::WriteAllLines($cfg, [string[]]$lines)
+    Say "added $set to $cfg; run 'wsl --shutdown' (restarts Docker's VM) for it to apply"
+}
+
+# On Windows the server (ArangoDB + iter_data) runs natively in a WSL2
+# distro as systemd services (linux/install.sh), not in a container: the
+# database stays off the slow Windows-drive mount and Linux-heavy projects get
+# their own engine there. Its port 8400 reaches Windows as 127.0.0.1:8400.
+function Show-DockerMoved {
+    Say 'the docker deploy is retired on Windows: the server runs in a WSL2 distro instead.'
+    Say "  in the distro:  iter5/linux/install.sh server   (then: install.sh engine --name <name>)"
+    Say "  on Windows:     .\deploy.ps1 autostart          (start it all at logon)"
+    Say '(./deploy.sh docker remains for Linux and macOS hosts)'
+}
+
+# A WSL distro stops when no Windows process holds it; one hidden
+# `wsl.exe -d <distro> sleep infinity` keeps it (and its systemd services) up.
+function Get-WslKeepAlive {
+    Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" |
+        Where-Object { $_.CommandLine -match "-d\s+$Distro\s.*sleep infinity" }
+}
+
+# Bring everything up after a reboot: the distro (whose systemd starts
+# ArangoDB, iter_data and its engine), then this machine's Windows engine.
+# -Hold keeps the keepalive in the foreground (for the logon task).
+function Start-All {
+    $keep = Get-WslKeepAlive | Select-Object -First 1
+    if (-not $keep) {
+        Say "starting WSL distro $Distro"
+        Start-Process -FilePath "$env:WINDIR\System32\wsl.exe" -ArgumentList "-d $Distro --exec /bin/sleep infinity" -WindowStyle Hidden | Out-Null
+        Start-Sleep 2
+        $keep = Get-WslKeepAlive | Select-Object -First 1
+    }
+    Wait-Health 300
+    Start-Engine
+    if ($Hold -and $keep) { Say "holding WSL distro $Distro (pid $($keep.ProcessId))"; Wait-Process -Id $keep.ProcessId }
+}
+
+# Run Start-All at every logon (Task Scheduler, current user, no admin).
+function Register-AutoStart {
+    Confirm-WslMemoryReclaim
+    $task = 'iter startup'
+    $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" startup -Hold -Distro $Distro"
+    $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $taskArgs -WorkingDirectory $Root
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Hidden
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Settings $settings -Force `
+        -Description "iter5: start WSL distro $Distro (ArangoDB, iter_data, its engine) and this machine's Windows engine" | Out-Null
+    Say "registered logon task '$task' (WSL distro $Distro, then iter_engine '$Name')"
 }
 
 switch ($Mode) {
-    'docker' { Deploy-Docker }
-    'build'  { Build-Engine }
-    'engine' { Build-Engine; Start-Engine }
-    'start'  { Start-Engine }
-    'stop'   { Stop-Engine; Say 'stopped' }
-    'status' { Show-Status }
+    'docker'    { Show-DockerMoved; exit 1 }
+    'build'     { Build-Engine }
+    'engine'    { Build-Engine; Start-Engine }
+    'start'     { Start-Engine }
+    'stop'      { Stop-Engine; Say 'stopped' }
+    'status'    { Show-Status }
+    'startup'   { Start-All }
+    'autostart' { Register-AutoStart }
 }
