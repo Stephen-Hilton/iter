@@ -7,6 +7,11 @@ Deploy iter5 on Windows (native PowerShell; deploy.sh is the Linux/macOS twin).
   .\deploy.ps1 startup    start the WSL distro (its systemd runs ArangoDB, iter_data
                           and its engine), wait for iter_data, start the Windows engine
   .\deploy.ps1 autostart  register `startup` as a logon task (and WSL memory reclaim)
+  .\deploy.ps1 restart-wsl  restart the WSL VM (to apply ~\.wslconfig or engine unit
+                          changes) without breaking Docker Desktop: refuses while any
+                          engine is running work (-Force overrides), stops Docker
+                          Desktop first, `wsl --shutdown`, restarts the distro and its
+                          keepalive, then starts Docker Desktop again
 
 The server (ArangoDB + iter_data on :8400) runs in a WSL2 distro, installed
 there with iter5/linux/install.sh; `docker` only says so now.
@@ -20,10 +25,11 @@ The engine's pid and log live in ~\.iter5\ (engine.pid, engine.log, engine.err.l
 Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), WSL2.
 #>
 param(
-    [ValidateSet('docker', 'engine', 'build', 'start', 'stop', 'status', 'startup', 'autostart')]
+    [ValidateSet('docker', 'engine', 'build', 'start', 'stop', 'status', 'startup', 'autostart', 'restart-wsl')]
     [string]$Mode = 'engine',
     [string]$Distro = 'Debian',
     [switch]$Hold,
+    [switch]$Force,
     [string]$DataUrl = $(if ($env:ITER_DATA_URL) { $env:ITER_DATA_URL } else { 'http://127.0.0.1:8400' }),
     [string]$EnvFile = (Join-Path $HOME '.iter5\.env'),
     # hostname keeps its case (TheBEAST); $env:COMPUTERNAME is upper-cased
@@ -214,6 +220,67 @@ function Register-AutoStart {
     Say "registered logon task '$task' (WSL distro $Distro, then iter_engine '$Name')"
 }
 
+# Docker Desktop runs its own WSL distro and a proxy inside $Distro; a bare
+# `wsl --shutdown` under it leaves its shared sockets gone and pops up "WSL
+# integration with distro ... unexpectedly stopped" every ~30 s (restarting
+# the integration does not help). So: stop it fully first, start it after.
+$DockerDesktopExe = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+$DockerProcs = 'Docker Desktop', 'com.docker.backend', 'com.docker.build', 'docker-agent'
+
+function Stop-DockerDesktop {
+    $procs = Get-Process $DockerProcs -ErrorAction SilentlyContinue
+    if (-not $procs) { return $false }
+    Say 'stopping Docker Desktop'
+    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 30 -and (Get-Process $DockerProcs -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    wsl.exe --terminate docker-desktop 2>&1 | Out-Null
+    $ErrorActionPreference = $eap
+    return $true
+}
+
+function Start-DockerDesktop {
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        # sockets left by the earlier Docker run would be taken for live ones
+        wsl.exe -d $Distro -u root -e rm -rf /mnt/wsl/docker-desktop /mnt/wsl/docker-desktop-bind-mounts 2>&1 | Out-Null
+        Say 'starting Docker Desktop'
+        Start-Process -FilePath $DockerDesktopExe | Out-Null
+        for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep 3
+            $v = wsl.exe -d $Distro -e docker version --format '{{.Server.Version}}' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $v) { Say "docker $v reachable in $Distro"; return }
+        }
+        Say "WARNING: docker not reachable in $Distro after 180s; check Docker Desktop"
+    } finally { $ErrorActionPreference = $eap }
+}
+
+# "<engine>: N running" for every engine with work in flight (any OS): the
+# shutdown takes iter_data down and kills the WSL engine's agent sessions.
+function Get-RunningWork {
+    $token = Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN'
+    $engines = Invoke-RestMethod "$DataUrl/api/engines" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5
+    @($engines | Where-Object { $_.running -gt 0 } | ForEach-Object { "$($_.name): $($_.running) running" })
+}
+
+# Restart the WSL VM (applies ~\.wslconfig and systemd unit changes) without
+# leaving Docker Desktop's integration broken or the distro unheld.
+function Restart-Wsl {
+    $busy = @()
+    try { $busy = Get-RunningWork } catch {
+        if (-not $Force) { throw "cannot read engine status from $DataUrl ($_); -Force restarts anyway" }
+    }
+    if ($busy.Count -and -not $Force) {
+        throw "work is running ($($busy -join '; ')): set those projects Draining and wait, or -Force (kills the sessions)"
+    }
+    $hadDocker = Stop-DockerDesktop
+    Say 'wsl --shutdown'
+    Invoke-Native 'wsl --shutdown' { wsl.exe --shutdown }
+    Start-Sleep 3
+    Start-All   # distro + keepalive, iter_data health, this machine's engine
+    if ($hadDocker) { Start-DockerDesktop }
+}
+
 switch ($Mode) {
     'docker'    { Show-DockerMoved; exit 1 }
     'build'     { Build-Engine }
@@ -223,4 +290,5 @@ switch ($Mode) {
     'status'    { Show-Status }
     'startup'   { Start-All }
     'autostart' { Register-AutoStart }
+    'restart-wsl' { Restart-Wsl }
 }

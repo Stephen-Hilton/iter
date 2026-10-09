@@ -47,7 +47,10 @@ On Windows the server runs in a WSL2 distro, and each engine runs where its proj
 .\deploy.ps1 start | stop | status
 .\deploy.ps1 startup    # start the distro (ArangoDB, iter_data, its engine), wait for :8400, start the Windows engine
 .\deploy.ps1 autostart  # run `startup` at every logon (Task Scheduler); also sets WSL memory reclaim
+.\deploy.ps1 restart-wsl  # restart the WSL VM (applies ~\.wslconfig / unit changes); refuses while any engine runs work (-Force)
 ```
+
+- Restart WSL only with `restart-wsl`, never a bare `wsl --shutdown` / `wsl --terminate <distro>`: under a running Docker Desktop that breaks its WSL integration ("WSL integration with distro ... unexpectedly stopped" every ~30 s), and it ends the logon task's keepalive, so the distro is no longer held. `restart-wsl` stops Docker Desktop first, restarts the distro and its keepalive, then starts Docker Desktop again.
 
 - Needs Rust (`winget install Rustlang.Rustup`, MSVC toolchain), Git for Windows and the `claude` CLI on PATH.
 - The engine uses `~\.iter5\.env`, registers under the hostname, and logs to `~\.iter5\engine.log` (`-EnvFile`, `-Name`, `-DataUrl` override).
