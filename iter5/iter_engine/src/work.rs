@@ -835,6 +835,8 @@ fn run_claude(
     // central tooling: shared rules, capability index, source instructions, prose steps
     let tooling_rows = api.get("/api/tooling").ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
     let tooling = crate::prompt::Tooling::from_rows(&tooling_rows);
+    // which machine and OS the agent runs on (the engine's settings node)
+    let engine = crate::prompt::engine_env();
     let top = std::path::Path::new(topdir);
     let codepath = item
         .lockdirs
@@ -870,6 +872,7 @@ fn run_claude(
         createdby_agent: &createdby_agent,
         last_response_tail: &last_response,
         close_gate_paragraph: &format!("\n\n{}", gate::WORKER_CLOSE_GATE_PROMPT),
+        engine: &engine,
     };
     // a chained item joins an existing session: only the per-item part is sent
     let (spin, context_files, warnings) = match chain {
@@ -925,7 +928,7 @@ fn run_claude(
     if AGENTMEMORY_AGENTS.contains(&item.agent.as_str()) && !item.lockdirs.is_empty() && codepath.is_dir() {
         turns.push(("agentmemory".into(), crate::prompt::agentmemory_prompt(&codepath)));
     }
-    turns.push(("selfcheck".into(), crate::prompt::selfcheck_prompt(&promptbody, &tooling.shared)));
+    turns.push(("selfcheck".into(), crate::prompt::selfcheck_prompt(&promptbody, &crate::prompt::shared_text(&tooling.shared, &engine))));
 
     // the agent's environment (V2 names kept so the shared rules still apply verbatim)
     let shim = write_iter_shim(topdir)?;
@@ -947,6 +950,8 @@ fn run_claude(
         // the critic (`iter critreview`) dispatches on the same provider/account
         ("ITER_PROVIDER".into(), crate::provider::provider_for(account)),
         ("ITER_ACCOUNT".into(), account.to_string()),
+        ("ITER_ENGINE".into(), engine.name.clone()),
+        ("ITER_ENGINE_OS".into(), engine.os.clone()),
         ("BASH_MAX_TIMEOUT_MS".into(), timeout.saturating_mul(1000).to_string()),
     ];
     if let Some(dir) = std::path::Path::new(&shim).parent() {

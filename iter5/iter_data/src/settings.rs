@@ -862,6 +862,15 @@ async fn node_create(user: AuthUser, State(st): Ctx, Json(req): Json<NodeCreateR
     if t == "project" && rec.get("state").is_none() {
         rec["state"] = json!("Running");
     }
+    // the engine's OS and how agents should work there: every agent it starts
+    // is told both (the shared text's {engine_os} / {engine_os_instructions})
+    if t == "iter_engine" {
+        for k in ["operating_system", "os_agent_instructions"] {
+            if rec.get(k).is_none() {
+                rec[k] = json!("");
+            }
+        }
+    }
     rec["name"] = json!(name);
     check_record(t, &key, &mut rec)?;
     store.put(table, &key, NOSK, &rec).await?;

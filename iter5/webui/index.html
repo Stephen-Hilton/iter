@@ -1564,7 +1564,10 @@ const PROJECT_FIELDS=[
 const ENGINE_FIELDS=[
   {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},{key:"state",type:"readonly",help:"engine-reported (actual)"},{key:"last_seen",type:"readonly"},{key:"account",type:"readonly"},
   {key:"usage",type:"readonly",help:"active account's 5h / 7d usage, refreshed by every claude session and the test button"},{key:"test_result",type:"readonly"},
-  {key:"host",type:"text"},{key:"ticksec",label:"tick (sec)",type:"number"},{key:"full_refresh_minutes",label:"full refresh (min)",type:"number",help:"unconditional reload cadence — the seq fallback"},
+  {key:"host",type:"text"},
+  {key:"operating_system",label:"operating system",type:"text",help:'the OS this engine runs on (e.g. "Windows 11", "Debian Linux"); every agent it starts is told it'},
+  {key:"os_agent_instructions",label:"OS agent instructions",type:"textarea",rows:8,help:"how agents should work on this OS (shells, their cost, paths, tools); given to every agent this engine starts, through the shared instructions' {engine_os_instructions}"},
+  {key:"ticksec",label:"tick (sec)",type:"number"},{key:"full_refresh_minutes",label:"full refresh (min)",type:"number",help:"unconditional reload cadence — the seq fallback"},
   {key:"probe_stale_min",label:"usage probe (min)",type:"number",default:20,help:"when idle, every account whose usage snapshot is older than this gets one direct 1-token probe (~9 tokens) so the ladder sees real 5h/7d numbers; 0 = off"},
   {key:"queuelock",type:"json",rows:3},
   {key:"projects",label:"projects served",type:"readonly",help:'iter5: the projects an engine serves are <b>serves</b> edges in the settings graph (topdir and read_only live on the edge)'},

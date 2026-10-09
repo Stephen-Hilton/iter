@@ -32,6 +32,9 @@ Writes the briefing an AI worker reads before it starts a task: who it is, the r
   (project node `children.reqs`, philosophy included) and the local ones (this node's and its
   ancestors'), and the codepath's `*.agentmem.iter.md` file (`agentmemory_files`).
 - **Spin-up** (`spinup`): the agent body, the shared rules and capability index (`Tooling::from_rows`),
+  the shared rules' placeholders filled by `shared_text` (`{critreview_max_rounds}`, and from the engine's
+  settings node, set each tick by `set_engine_env`: `{engine_name}`, `{engine_os}`,
+  `{engine_os_instructions}`; constant per engine, so the cached prefix holds),
   `global_context_section` with `PHILOSOPHY_SENTENCE`, the close-gate paragraph, then the per-item part:
   `source_instructions` (who asked), the work-item block, the previous attempt's error and output tail,
   the agent memory section, `node_context_section` and the item's own context patterns

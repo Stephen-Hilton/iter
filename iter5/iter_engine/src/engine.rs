@@ -152,6 +152,21 @@ struct Wait {
 /// The wait reason while the stage-2 dedup judge runs (renders "blocked by: dedup triage").
 const DEDUP_TRIAGE_REASON: &str = "dedup triage";
 
+/// The OS a self-registering engine records: Linux's PRETTY_NAME (e.g.
+/// "Debian GNU/Linux 13 (trixie)"), else the platform family.
+fn detected_os() -> String {
+    if let Ok(rel) = std::fs::read_to_string("/etc/os-release") {
+        if let Some(v) = rel.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")) {
+            return v.trim_matches('"').to_string();
+        }
+    }
+    match std::env::consts::OS {
+        "windows" => "Windows".into(),
+        "macos" => "macOS".into(),
+        other => other.to_string(),
+    }
+}
+
 /// "2026-09-07T14:05:31Z" -> "14:05Z" for the retry-after tag
 fn hhmm(iso: &str) -> String {
     if iso.len() >= 16 { format!("{}Z", &iso[11..16]) } else { iso.to_string() }
@@ -320,7 +335,9 @@ impl EngineRuntime {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
                 let row = json!({"name": self.name, "host": host, "state": "Stopped", "last_seen": "",
                     "ticksec": 5, "full_refresh_minutes": 360, "account": "",
-                    "queuelock": {"retryms": 50, "breaksec": 60}});
+                    "queuelock": {"retryms": 50, "breaksec": 60},
+                    // a starting point a human refines on the settings node
+                    "operating_system": detected_os(), "os_agent_instructions": ""});
                 match self.api.put(&format!("/api/engines/{}", self.name), &row) {
                     Ok(_) => println!("[engine] registered '{}' with iter_data — connect it to projects in the settings graph (serves edges)", self.name),
                     Err(e2) => eprintln!("[engine] cannot self-register '{}': {e2}", self.name),
@@ -375,6 +392,11 @@ impl EngineRuntime {
                 println!("[engine] '{}' is the display name of engine id '{}' — using the id", self.name, engine.id);
                 self.name = engine.id.clone();
             }
+            crate::prompt::set_engine_env(crate::prompt::EngineEnv {
+                name: if engine.name.is_empty() { self.name.clone() } else { engine.name.clone() },
+                os: engine.operating_system.clone(),
+                os_instructions: engine.os_agent_instructions.clone(),
+            });
             self.load_assignments();
             self.tick(&engine);
 

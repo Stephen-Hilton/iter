@@ -30,7 +30,7 @@ Takes one job from start to finish: has the agent (or a shell command) do it, sa
    or `run_claude`: the prompt from the Agent prompt builder, each turn sent through
    `provider::call` → `dispatch_agent` with the account's token (`resolve_account_token`; a named account
    with no token fails the run, never another account's token), the agent env (`ITER_PROJECT`,
-   `ITER_WORKID`, `ITER_NODE`, `ITER_NODEFILE`, `ITER_PROVIDER`, …), the `.iter/bin/iter` shim
+   `ITER_WORKID`, `ITER_NODE`, `ITER_NODEFILE`, `ITER_PROVIDER`, `ITER_ENGINE`, `ITER_ENGINE_OS`, …), the `.iter/bin/iter` shim
    (`write_iter_shim`) and a private MCP config (`mcp_config`: the `iter` HTTP MCP server at
    `<data_url>/mcp` with the engine token and `X-Iter-Project` / `X-Iter-Workid`). Timeouts and stop
    requests kill the whole process group (`wait_with_stop`).

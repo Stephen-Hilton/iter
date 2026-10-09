@@ -6,6 +6,14 @@ agents. Keep entries short and universal; agent-specific guidance belongs in tha
 agent's own prompt. (Tooling records whose names start with `_` are capabilities —
 read one with the `capability` tool — never agent types.)
 
+## Where you are running: this engine and its operating system
+
+Engine **{engine_name}** started you on **{engine_os}**. Your shell, paths and tools are this machine's, and another engine may serve the same project on a different OS, so don't assume what you remember from elsewhere applies here. The notes below come from the engine's settings node (`os_agent_instructions`); follow them:
+
+{engine_os_instructions}
+
+Scripts can read the same facts from `ITER_ENGINE` and `ITER_ENGINE_OS`.
+
 ## Your tools: the `iter` MCP server
 
 Every session has the `iter` MCP server (its tools are named `mcp__iter__…`). It is how you reach the work queue, the architecture map and the project's documents — use it rather than hand-built HTTP calls. Each tool's own description says what to pass; this section only says which one fits:

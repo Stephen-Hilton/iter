@@ -543,6 +543,14 @@ pub struct Engine {
     /// many minutes and nothing is running, nudge haiku once (0 = off)
     #[serde(default = "default_probe_stale_min")]
     pub probe_stale_min: u64,
+    /// human-set: the OS this engine runs on ("Windows 11", "Debian Linux");
+    /// every agent it starts sees it (`{engine_os}` in the shared text)
+    #[serde(default)]
+    pub operating_system: String,
+    /// human-set: how agents should work on that OS (shells, costs, paths);
+    /// `{engine_os_instructions}` in the shared text
+    #[serde(default)]
+    pub os_agent_instructions: String,
 }
 fn default_probe_stale_min() -> u64 { 20 }
 

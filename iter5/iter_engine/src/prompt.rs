@@ -679,6 +679,43 @@ pub struct SpinupInput<'a> {
     pub createdby_agent: &'a str,
     pub last_response_tail: &'a str,
     pub close_gate_paragraph: &'a str,
+    pub engine: &'a EngineEnv,
+}
+
+/// The engine this process runs as, as its agents see it: the shared text's
+/// `{engine_name}`, `{engine_os}` and `{engine_os_instructions}` (from the
+/// engine's settings node), and ITER_ENGINE / ITER_ENGINE_OS.
+#[derive(Debug, Clone, Default)]
+pub struct EngineEnv {
+    pub name: String,
+    pub os: String,
+    pub os_instructions: String,
+}
+
+static ENGINE_ENV: std::sync::RwLock<EngineEnv> =
+    std::sync::RwLock::new(EngineEnv { name: String::new(), os: String::new(), os_instructions: String::new() });
+
+/// Set by the engine loop from its record every tick, so an edit on the
+/// settings node reaches the next agent run without a restart.
+pub fn set_engine_env(env: EngineEnv) {
+    if let Ok(mut e) = ENGINE_ENV.write() {
+        *e = env;
+    }
+}
+
+pub fn engine_env() -> EngineEnv {
+    ENGINE_ENV.read().map(|e| e.clone()).unwrap_or_default()
+}
+
+/// The shared instructions with their placeholders filled in. Constant for
+/// an engine, so the prompt-cache prefix stays byte-identical across items.
+pub fn shared_text(shared: &str, engine: &EngineEnv) -> String {
+    let or = |v: &str, none: &str| if v.trim().is_empty() { none.to_string() } else { v.trim().to_string() };
+    shared
+        .replace("{critreview_max_rounds}", &CRITREVIEW_MAX_ROUNDS.to_string())
+        .replace("{engine_name}", &or(&engine.name, "(unnamed)"))
+        .replace("{engine_os}", &or(&engine.os, "not recorded (the engine's settings node has no operating_system)"))
+        .replace("{engine_os_instructions}", &or(&engine.os_instructions, "none recorded"))
 }
 
 /// The spin-up text prepended to the first turn.  Assembly order is load-
@@ -689,7 +726,7 @@ pub fn spinup(inp: &SpinupInput) -> (String, Vec<PathBuf>, Vec<String>) {
     s.push_str(inp.agent_body.trim_end());
     if !inp.tooling.shared.trim().is_empty() {
         s.push_str("\n\n# Shared instructions (all agents)\n");
-        s.push_str(&inp.tooling.shared.replace("{critreview_max_rounds}", &CRITREVIEW_MAX_ROUNDS.to_string()));
+        s.push_str(&shared_text(&inp.tooling.shared, inp.engine));
     }
     if !inp.tooling.capabilities.is_empty() {
         s.push_str("\n\n# Capabilities (read the full doc when you need one: `iter capability <name>`)\n");
@@ -1025,6 +1062,7 @@ mod tests {
         let inp = SpinupInput {
             agent_body: "# code agent", tooling: &tooling, ctx: &ctx_f, item: &item, codepath: &top, topdir: &top,
             requestedby: "", createdby_agent: "", last_response_tail: "", close_gate_paragraph: "",
+            engine: &EngineEnv::default(),
         };
         let (s, _, _) = spinup(&inp);
         assert!(s.contains("# Project requirements (global"), "{s}");
@@ -1037,6 +1075,17 @@ mod tests {
         assert!(s.find("# Project requirements").unwrap() < s.find("# Work item").unwrap());
         assert!(s.find("# Your node").unwrap() > s.find("# Work item").unwrap());
         let _ = std::fs::remove_dir_all(&top);
+    }
+
+    #[test]
+    fn shared_text_fills_the_engine_placeholders() {
+        let shared = "Engine {engine_name} runs {engine_os}.\nOS notes: {engine_os_instructions}\nRounds: {critreview_max_rounds}";
+        let env = EngineEnv { name: "Midoriya".into(), os: "Windows 11".into(), os_instructions: "Git Bash is slow.".into() };
+        let s = shared_text(shared, &env);
+        assert_eq!(s, format!("Engine Midoriya runs Windows 11.\nOS notes: Git Bash is slow.\nRounds: {CRITREVIEW_MAX_ROUNDS}"));
+        // an engine node without the properties still yields readable text
+        let s = shared_text(shared, &EngineEnv::default());
+        assert!(s.contains("runs not recorded") && s.contains("OS notes: none recorded") && !s.contains('{'), "{s}");
     }
 
     #[test]
