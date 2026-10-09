@@ -120,7 +120,8 @@ EOF
   sudo systemctl enable -q iter-data && sudo systemctl restart iter-data
   sudo systemctl enable -q --now iter-backup.timer
   wait_health
-  say "webui: http://127.0.0.1:$PORT/  (login: admin / ITER_ADMIN_PASSWORD); backups: iter-backup.timer -> \${ITER_BACKUP_DIR:-~/.iter5/backups}"
+  local dir; dir="$(envval ITER_BACKUP_DIR "$H5/backup.env")"
+  say "webui: http://127.0.0.1:$PORT/  (login: admin / ITER_ADMIN_PASSWORD); backups every 6h -> ${dir:-$H5/backups} (set ITER_BACKUP_DIR in $H5/backup.env)"
 }
 
 engine() {
@@ -155,7 +156,8 @@ status() {
   for s in arangodb3 iter-data iter-engine iter-backup.timer; do printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
   curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || echo "iter_data: no answer on :$PORT"
   systemctl list-timers iter-backup.timer --no-pager 2>/dev/null | sed -n 2p
-  ls -1t "${ITER_BACKUP_DIR:-$H5/backups}"/iter5-*.tar 2>/dev/null | head -3
+  local dir; dir="$(envval ITER_BACKUP_DIR "$H5/backup.env")"
+  ls -1t "${dir:-${ITER_BACKUP_DIR:-$H5/backups}}"/iter5-*.tar 2>/dev/null | head -3 || echo "no backups yet"
 }
 
 case "${1:-}" in
