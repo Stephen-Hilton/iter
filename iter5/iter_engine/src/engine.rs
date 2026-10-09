@@ -72,6 +72,10 @@ pub struct EngineRuntime {
     budget_hold: HashMap<String, String>,
     /// project -> last cluster-health verdict announced (healthy, why)
     cluster_state: HashMap<String, (bool, String)>,
+    /// project -> when this engine last saw the cluster turn healthy (its first
+    /// verdict counts as a turn): only an item that last started before then
+    /// is released by the recovery — see `released_by_recovery`
+    cluster_healthy_since: HashMap<String, String>,
     /// project -> last `next` refusal logged (so a steady reason logs once)
     next_said: HashMap<String, String>,
     /// accounts are configured but none is under its stop% (set each tick):
@@ -170,6 +174,17 @@ fn detected_os() -> String {
 /// "2026-09-07T14:05:31Z" -> "14:05Z" for the retry-after tag
 fn hhmm(iso: &str) -> String {
     if iso.len() >= 16 { format!("{}Z", &iso[11..16]) } else { iso.to_string() }
+}
+
+/// May the cluster's recovery release a parked `blocked-by-cluster-restart`
+/// item?  Only when the item last started before the cluster turned healthy
+/// (or never started): a run that began on a healthy cluster and still parked
+/// itself on the tag was not stopped by a restart, and requeueing it would
+/// loop forever (2026-10-09: pdy-dev's cluster was decommissioned, an agent
+/// parked on the tag and was rerun 125 times in 45 min).  Such an item stays
+/// parked for a person.  Both are "%Y-%m-%dT%H:%M:%SZ", so text order is time order.
+fn released_by_recovery(item_start: &str, healthy_since: &str) -> bool {
+    item_start.is_empty() || (!healthy_since.is_empty() && item_start < healthy_since)
 }
 
 /// "run now waits on running <id8> (started hh:mmZ, session limit ends it
@@ -314,6 +329,7 @@ impl EngineRuntime {
             last_probe: HashMap::new(),
             budget_hold: HashMap::new(),
             cluster_state: HashMap::new(),
+            cluster_healthy_since: HashMap::new(),
             next_said: HashMap::new(),
         }
     }
@@ -1259,7 +1275,8 @@ impl EngineRuntime {
         // still in flight (running here, or holding a live lock row)
         if cluster_healthy {
             let in_flight = |i: &WorkItem| self.running.iter().any(|r| r.current().0 == i.id) || live.iter().any(|r| r.workid == i.id);
-            for i in items.iter().filter(|i| i.state == "parked" && is_cluster_tagged(i) && !in_flight(i)) {
+            let since = self.cluster_healthy_since.get(&project_name).cloned().unwrap_or_default();
+            for i in items.iter().filter(|i| i.state == "parked" && is_cluster_tagged(i) && !in_flight(i) && released_by_recovery(&i.ts.start, &since)) {
                 self.requeue_after_cluster_restart(project, i);
             }
         }
@@ -1596,6 +1613,9 @@ impl EngineRuntime {
             .unwrap_or_default();
         let h = cluster::evaluate(cfg, clone, &details, chrono::Utc::now());
         let announced = self.cluster_state.get(project.key()).map(|(ok, why)| (*ok, why.as_str()));
+        if h.healthy && announced.map(|(ok, _)| ok) != Some(true) {
+            self.cluster_healthy_since.insert(project.key().to_string(), now_utc());
+        }
         if announced != Some((h.healthy, h.why.as_str())) {
             println!("[engine] {}: cluster {} — {}", project.key(), if h.healthy { "back up and healthy" } else { "unavailable" }, h.why);
             self.cluster_state.insert(project.key().to_string(), (h.healthy, h.why.clone()));
@@ -1892,6 +1912,17 @@ mod tests {
         // every account switched off names the switch, one off + one tokenless the token
         assert_eq!(hold_reason(&both, &s(&["a", "b"]), &s(&["a", "b"])), "accounts switched off");
         assert_eq!(hold_reason(&both, &s(&["a"]), &s(&["a", "b"])), "no account token");
+    }
+
+    /// The cluster's recovery releases only items that last started before it;
+    /// one that parked itself on the tag while the cluster was healthy stays.
+    #[test]
+    fn cluster_recovery_releases_only_items_started_before_it() {
+        let since = "2026-10-09T17:00:00Z";
+        assert!(released_by_recovery("2026-10-09T03:00:00Z", since), "parked during the outage");
+        assert!(released_by_recovery("", since), "tagged before it ever ran");
+        assert!(!released_by_recovery("2026-10-09T17:05:00Z", since), "ran on a healthy cluster and parked anyway: no loop");
+        assert!(!released_by_recovery("2026-10-09T03:00:00Z", ""), "no healthy verdict yet");
     }
 
     /// A tokenless account's test is red and never nudges (a nudge with no
