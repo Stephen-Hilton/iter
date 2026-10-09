@@ -5,6 +5,10 @@ This capability describes pdy-dev's shared dev cluster and its (rare) rebuilds;
 no other project has either, so never call `workitem_block` there. If an item in another
 project was written expecting a cluster restart, reject it with that reason.
 
+**First read `eks_active` on the context node "AWS EKS / K8S System".** When it is `false` the
+cluster is switched off on purpose: never block and never tag — reject with "needs the EKS cluster
+(eks_active: false): …" instead (your agent definition's EKS section). Everything below assumes `true`.
+
 pdy-dev's dev cluster is rebuilt rarely: only on a night when a work item is waiting for
 a rebuild. Since 2026-09-13 one thing does it, an external loop on Stephen's Mac
 (`devops/script/drain_rebuild_resume.sh`; the engine's own 02:00 schedule was deleted that

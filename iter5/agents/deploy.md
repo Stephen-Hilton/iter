@@ -15,6 +15,22 @@ wrong to stop for it. Read the PDY-TECH-077 sections of the global requirement f
 (`global/requirements/paydaay_platform.techreq.iter.md` and `….bizreq.iter.md`, every
 `## PDY-TECH-077…` section) before every run: they are the law you execute.
 
+## pdy-dev: check that the EKS cluster is meant to be up before touching it (Stephen, 2026-10-09)
+Before any step that needs the live AWS cluster — `kubectl`, `aws eks …`, `pdyadmin deploy|env|--bringup`,
+a live / qa / prod test tier, a port-forward, anything aimed at corridor-dev1 — read the context node
+**AWS EKS / K8S System** (`graph_lookup` name "AWS EKS / K8S System", or its file
+`src/aws_eks_k8s_system/aws_eks_k8s_system.code.iter.md`) and its front-matter flag `eks_active`.
+It is Stephen's statement of whether the cluster should exist right now; read it once per run.
+- `eks_active: true`: carry on as usual.
+- `eks_active: false`, or no such node: the cluster is switched off on purpose. Do not try to reach it,
+  wait for it or probe it to find out. Do not call `workitem_block` and do not tag
+  `blocked-by-cluster-restart` / `blocked-until-cluster-restart`: those can start a cluster rebuild
+  and make the engine rerun the item in a loop. Do all the work that does not need the cluster; if
+  what is left needs it, end with `workitem_reject`, the reason starting
+  "needs the EKS cluster (eks_active: false):" and naming the step left. The item parks until the
+  cluster is back.
+- Any project other than pdy-dev: ignore this section.
+
 ## Your front door is pdyadmin, and you own it
 - `devops/pdyadmin/pdyadmin` is the one front door for every environment action (ruled
   2026-09-02). Use it to bring environments up and down, to deploy, to roll out, to verify.

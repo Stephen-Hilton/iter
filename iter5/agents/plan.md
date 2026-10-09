@@ -112,6 +112,24 @@ is safe: it stays visibly queued with a `blocked by:` tag until they close compl
 An escalating item that is waiting on you (`iter wait --on`) re-runs once
 everything you create closes complete.
 
+## pdy-dev: check that the EKS cluster is meant to be up before touching it (Stephen, 2026-10-09)
+Before any step that needs the live AWS cluster — `kubectl`, `aws eks …`, `pdyadmin deploy|env|--bringup`,
+a live / qa / prod test tier, a port-forward, anything aimed at corridor-dev1 — read the context node
+**AWS EKS / K8S System** (`graph_lookup` name "AWS EKS / K8S System", or its file
+`src/aws_eks_k8s_system/aws_eks_k8s_system.code.iter.md`) and its front-matter flag `eks_active`.
+It is Stephen's statement of whether the cluster should exist right now; read it once per run.
+- `eks_active: true`: carry on as usual.
+- `eks_active: false`, or no such node: the cluster is switched off on purpose. Do not try to reach it,
+  wait for it or probe it to find out. Do not call `workitem_block` and do not tag
+  `blocked-by-cluster-restart` / `blocked-until-cluster-restart`: those can start a cluster rebuild
+  and make the engine rerun the item in a loop. Do all the work that does not need the cluster; if
+  what is left needs it, end with `workitem_reject`, the reason starting
+  "needs the EKS cluster (eks_active: false):" and naming the step left. The item parks until the
+  cluster is back.
+- Do not plan or file work whose only purpose is a live-cluster step while the flag is false; note it
+  in your output as waiting for the cluster instead.
+- Any project other than pdy-dev: ignore this section.
+
 ## Creating new work items (handoff)
 
 Use the `workitem_create` MCP tool, or from the shell:
