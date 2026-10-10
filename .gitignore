@@ -1,45 +1,16 @@
-.env
-
-# Rust
-/target
-
-# The self-hosted iter project (iter/): the deployed binary is a build
-# artifact; the queue home's files (head files, agents, engine config) are
-# tracked like the samples'.
-/iter/iter
-/iter/.iter/server.out
-
-# iterloop runtime artifacts
-*.iter.lock
-.iter/.engine/stop.signal
-**/.iter/.engine/stop.signal
-workitems.jsonl.lock
-logs/
-
-# OS
-.DS_Store
-
-# SQLite storage (features/sqlite_storage.md). The database is per-machine
-# runtime state; sample projects ship their queue as jsonl seed data, which the
-# engine imports on first run — the *.imported files are that one-time rename's
-# leftovers, kept on disk as the escape hatch but never committed.
-**/.iter/.engine/iter.db
-**/.iter/.engine/iter.db-wal
-**/.iter/.engine/iter.db-shm
-*.jsonl.imported
-**/.iter/.engine/queue.meta.json
-
-# iter3 runtime artifacts (never commit secrets or local dbs)
+target/
+bin/
+run/
+*.db
+*.db-wal
+*.db-shm
 iter_data.secret
-*.secret
-iter3.db
-iter3.db-wal
-iter3.db-shm
-iter3/.deploy.notes
+.iter/temp/
+.iter/users/
+models/
 
-# iter3 local deploy runtime
-iter3/bin/
-iter3/run/
-
-# local credentials (AWS keys)
+# local secrets (.env links to ~/dev/.syek; .ofsw.env holds AWS keys)
+.env
 .ofsw.env
+*.secret
+.DS_Store
