@@ -690,6 +690,8 @@ pub(crate) struct GitEvidence {
     pub outside_scope_committed: Vec<(String, String)>,
     /// (hash, subject): other items' commits touching the scope this run
     pub other_scope_commits: Vec<(String, String)>,
+    /// (hash, subject): id-less commits touching the scope over its life
+    pub untagged_scope_commits: Vec<(String, String)>,
 }
 
 /// Does `path` (relative to the checkout) fall inside one of the scope's
@@ -753,7 +755,17 @@ pub(crate) fn git_run_evidence(topdir: &str, head_before: &str, head_after: &str
             .map(|(h, s)| (h.trim().to_string(), s.trim().to_string()))
             .collect()
     };
-    GitEvidence { diffstat, commits, outside_scope_committed: outside, other_scope_commits: others }
+    // id-less commits in the scope over the item's life: an agent's own
+    // `git commit`; never listed as another item's work (2026-10-10).  A
+    // whole-tree item gets none: every sibling's id-less commit would match
+    let untagged: Vec<(String, String)> = if scope.is_empty() {
+        Vec::new()
+    } else {
+        let scoped = run_shell(topdir, &format!("git log -n 200 --format='{}' {range}{spec}", gate::COMMIT_LOG_FORMAT), 30).unwrap_or_default();
+        gate::commits_without_any_id(&scoped).into_iter().filter(|(h, _)| !hashes.contains(h)).take(20).collect()
+    };
+    let others = others.into_iter().filter(|(h, _)| !untagged.iter().any(|(u, _)| u == h)).collect();
+    GitEvidence { diffstat, commits, outside_scope_committed: outside, other_scope_commits: others, untagged_scope_commits: untagged }
 }
 
 /// Session timeout: the project's per-agent override, else the agent record's
@@ -1488,6 +1500,10 @@ enum GateOutcome {
     Hold { source: &'static str, open: Vec<String>, reason: String, to_human: bool, advice: gate::Advice },
 }
 
+/// The verifier's tools: reading, plus read-only git so it can check a commit
+/// the worker names instead of asking a human (2026-10-10).
+const VERIFIER_TOOLS: &str = "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*)";
+
 /// Run the close gate: deterministic checks first (free); the verifier only
 /// when they all pass and a verify model is configured.
 fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &GateCtx) -> (GateOutcome, Evidence) {
@@ -1525,7 +1541,10 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
         commits: git.commits,
         outside_scope_committed: git.outside_scope_committed,
         other_scope_commits: git.other_scope_commits,
+        untagged_scope_commits: git.untagged_scope_commits,
         notes: new_doc_rows(&ctx.details, details),
+        test_runs: gate::recorded_test_runs(details),
+        human_answers: gate::answered_questions(details),
     };
 
     let mut open: Vec<String> = Vec::new();
@@ -1570,7 +1589,7 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
         let vctx = crate::provider::AgentContext {
             prompt: p.to_string(),
             cwd: std::path::PathBuf::from(&ctx.topdir),
-            allowed_tools: Some("Read,Glob,Grep".to_string()),
+            allowed_tools: Some(VERIFIER_TOOLS.to_string()),
             role: crate::provider::Role::Verifier,
             ..Default::default()
         };
@@ -1583,10 +1602,18 @@ fn run_gate(api: &Api, project: &Project, item: &WorkItem, out: &RunOut, ctx: &G
             GateOutcome::Hold { source: "verifier", open, reason: format!("verifier: {reason}"), to_human: false, advice },
             ev,
         ),
-        Verdict::Unclear { reason, advice } => (
-            GateOutcome::Hold { source: "verifier", open: vec![], reason: format!("verifier unclear: {reason}"), to_human: true, advice },
-            ev,
-        ),
+        // an unclear verdict goes back to the worker first, with the doubt as
+        // its open obligation (2026-10-10: it went straight to a human, and
+        // most doubts were proof the worker could have pasted); the bounce
+        // budget still sends it to a human after that
+        Verdict::Unclear { reason, advice } => {
+            let open = if advice.question.trim().is_empty() {
+                vec![format!("settle the verifier's doubt with proof in your final message: {reason}")]
+            } else {
+                vec![format!("answer the verifier's question with proof in your final message (git show --stat output, test run lines): {}", advice.question)]
+            };
+            (GateOutcome::Hold { source: "verifier", open, reason: format!("verifier unclear: {reason}"), to_human: false, advice }, ev)
+        }
         Verdict::Unparsed { reason } => {
             let advice = gate::unparsed_advice(&ev);
             (GateOutcome::Hold { source: "verifier", open: vec![], reason: format!("verifier output did not parse twice: {reason}"), to_human: true, advice }, ev)
@@ -2081,6 +2108,23 @@ mod tests {
         assert!(ev.diffstat.contains("a/mine.rs") && !ev.diffstat.contains("a/theirs.rs"), "{}", ev.diffstat);
         assert_eq!(ev.other_scope_commits.len(), 1);
         assert_eq!(ev.other_scope_commits[0].1, "iter: sibling (99998888)");
+    }
+
+    /// An id-less commit in the scope (an agent's own `git commit`) is listed
+    /// as possibly this item's work, never as another item's (2026-10-10).
+    #[test]
+    fn an_id_less_commit_in_scope_is_not_called_another_items() {
+        let d = temp_repo("untagged");
+        let item = item_with(&["{topdir}/a"]);
+        let before = git_head(&d);
+        commit(&d, "a/fix.rs", "fix the loader clock");
+        commit(&d, "a/theirs.rs", "iter: sibling (99998888)");
+        commit(&d, "b/elsewhere.rs", "unrelated tidy");
+        let after = git_head(&d);
+        let ev = git_run_evidence(&d, &before, &after, &["a".into()], &item);
+        let subjects = |v: &[(String, String)]| v.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>();
+        assert_eq!(subjects(&ev.untagged_scope_commits), vec!["fix the loader clock"]);
+        assert_eq!(subjects(&ev.other_scope_commits), vec!["iter: sibling (99998888)"]);
     }
 
     #[test]

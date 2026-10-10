@@ -80,8 +80,23 @@ pub struct Evidence {
     /// evidence (2026-09-14..26: they were reported as "left uncommitted")
     pub outside_scope_committed: Vec<(String, String)>,
     /// (short hash, subject): other items' commits inside this scope during
-    /// the run — listed apart so they are never read as this item's work
+    /// the run — listed apart so they are never read as this item's work.
+    /// Only commits carrying ANOTHER item's id; an id-less commit is in
+    /// `untagged_scope_commits`
     pub other_scope_commits: Vec<(String, String)>,
+    /// (short hash, subject): commits inside this item's scope over its whole
+    /// life that carry no work-item id at all — what an agent's own
+    /// `git commit` looks like (2026-10-10: they were listed as "other items'
+    /// work", and the verifier sent dozens of items a day to a human asking
+    /// whether the commit was the item's)
+    pub untagged_scope_commits: Vec<(String, String)>,
+    /// the header lines of every `iter runtests` result the runner recorded on
+    /// this item (engine fact, not the worker's claim; 2026-10-10: claimed
+    /// counts the verifier could not check went to a human)
+    pub test_runs: Vec<String>,
+    /// questions a human already answered on this item, with the answer
+    /// (2026-10-10: the verifier never saw them and asked again)
+    pub human_answers: Vec<String>,
     /// `doc` rows this attempt appended to the item (2026-09-29: a "record the
     /// answer as a note, change no files" item was bounced as unproven —
     /// the verifier saw no commit and never the note itself)
@@ -113,6 +128,85 @@ pub fn commits_with_id(log: &str, id: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Whether a commit names ANY work item: a full uuid anywhere, or a subject
+/// ending in `(<8 hex>)` / `(<12 hex>)` (the engine's and the webui's forms).
+pub fn carries_any_id(subject: &str, body: &str) -> bool {
+    fn hex_paren_suffix(s: &str) -> bool {
+        let s = s.trim_end();
+        let Some(inner) = s.strip_suffix(')').and_then(|t| t.rsplit_once('(')).map(|(_, i)| i) else { return false };
+        (inner.len() == 8 || inner.len() == 12) && inner.chars().all(|c| c.is_ascii_hexdigit())
+    }
+    fn has_uuid(s: &str) -> bool {
+        let b = s.as_bytes();
+        let shape = [8usize, 4, 4, 4, 12];
+        let total = 36;
+        (0..b.len().saturating_sub(total - 1)).any(|i| {
+            let mut p = i;
+            shape.iter().enumerate().all(|(k, &n)| {
+                let ok = b.get(p..p + n).map(|w| w.iter().all(|c| c.is_ascii_hexdigit())).unwrap_or(false)
+                    && (k == 4 || b.get(p + n) == Some(&b'-'));
+                p += n + 1;
+                ok
+            })
+        })
+    }
+    hex_paren_suffix(subject) || has_uuid(subject) || has_uuid(body)
+}
+
+/// The commits in a `COMMIT_LOG_FORMAT` listing that name no work item at all.
+pub fn commits_without_any_id(log: &str) -> Vec<(String, String)> {
+    log.split('\x1e')
+        .filter_map(|rec| {
+            let mut f = rec.trim_start_matches('\n').splitn(3, '\x1f');
+            let (h, subj, body) = (f.next()?.trim(), f.next()?.trim(), f.next().unwrap_or(""));
+            (!h.is_empty() && !carries_any_id(subj, body)).then(|| (h.to_string(), subj.to_string()))
+        })
+        .collect()
+}
+
+/// The first two lines (node and result) of every `log_header` row the
+/// runner wrote on this item, oldest first; at most the last 15.
+pub fn recorded_test_runs(details: &[Value]) -> Vec<String> {
+    let mut rows: Vec<&Value> = details.iter().filter(|d| d.get("key").and_then(|k| k.as_str()) == Some("log_header")).collect();
+    rows.sort_by_key(|d| order_of(d));
+    let runs: Vec<String> = rows
+        .iter()
+        .filter_map(|d| d.get("value").and_then(|v| v.as_str()))
+        .map(|v| v.lines().take(2).collect::<Vec<_>>().join(" — "))
+        .collect();
+    runs[runs.len().saturating_sub(15)..].to_vec()
+}
+
+/// Every question on this item that a human answered: a close-gate widget
+/// with an action chosen or guidance written, or an agent question whose
+/// free-text answer is filled in.  "asked: … / answered: …", oldest first.
+pub fn answered_questions(details: &[Value]) -> Vec<String> {
+    let mut rows: Vec<&Value> = details.iter().filter(|d| d.get("key").and_then(|k| k.as_str()) == Some("question")).collect();
+    rows.sort_by_key(|d| order_of(d));
+    rows.iter()
+        .filter_map(|d| {
+            let w = d.get("value")?;
+            let asked = w.get("answered_question").or_else(|| w.get("title")).and_then(|t| t.as_str()).unwrap_or("").trim();
+            let text = |k: &str| field_value(w, k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let answer = if is_gate_widget(d) {
+                let (action, guidance) = (text("action"), text("guidance"));
+                // the radio defaults to the recommendation: only an answered widget carries answered_question or guidance
+                if w.get("answered_question").is_none() && guidance.is_empty() {
+                    return None;
+                }
+                if guidance.is_empty() { format!("action {action}") } else { format!("action {action}; {guidance}") }
+            } else {
+                let a = text("answer");
+                if a.is_empty() {
+                    return None;
+                }
+                a
+            };
+            Some(format!("asked: {} / answered: {}", clip(asked, 300), clip(&answer, 2_000)))
+        })
+        .collect()
+}
+
 impl Evidence {
     pub fn committed(&self) -> bool {
         !self.head_after.is_empty() && self.head_before != self.head_after
@@ -130,6 +224,9 @@ impl Evidence {
             "commits": self.commits.iter().map(|(h, s)| json!({"hash": h, "subject": s})).collect::<Vec<_>>(),
             "outside_scope_committed": self.outside_scope_committed.iter().map(|(p, h)| json!({"path": p, "hash": h})).collect::<Vec<_>>(),
             "other_scope_commits": self.other_scope_commits.iter().map(|(h, s)| json!({"hash": h, "subject": s})).collect::<Vec<_>>(),
+            "untagged_scope_commits": self.untagged_scope_commits.iter().map(|(h, s)| json!({"hash": h, "subject": s})).collect::<Vec<_>>(),
+            "test_runs": self.test_runs.len(),
+            "human_answers": self.human_answers.len(),
             "notes": self.notes.len(),
         })
     }
@@ -164,6 +261,14 @@ impl Evidence {
             let v: Vec<String> = self.other_scope_commits.iter().map(|(h, s)| format!("{h} \"{s}\"")).collect();
             out.push_str(&format!(" Commits by other items in this scope (not this item's work): {}.", v.join(", ")));
         }
+        if !self.untagged_scope_commits.is_empty() {
+            let v: Vec<String> = self.untagged_scope_commits.iter().map(|(h, s)| format!("{h} \"{s}\"")).collect();
+            out.push_str(&format!(
+                " Commits in this item's scope since it was received that carry NO work-item id (an agent's own `git commit` looks like this; \
+when one matches what the worker says it did, it is this item's work — check with `git show --stat <hash>`): {}.",
+                v.join(", ")
+            ));
+        }
         out
     }
     fn describe(&self) -> String {
@@ -192,6 +297,20 @@ impl Evidence {
             }
         }
         s.push_str(&format!("- review rows without a disposition: {}\n", self.open_reviews));
+        if self.test_runs.is_empty() {
+            s.push_str("- test runs recorded on this item by `iter runtests`: 0\n");
+        } else {
+            s.push_str("- test runs recorded on this item by `iter runtests` (engine fact, oldest first; a node's LAST run is its current result):\n");
+            for r in &self.test_runs {
+                s.push_str(&format!("    {}\n", clip(r, 400)));
+            }
+        }
+        if !self.human_answers.is_empty() {
+            s.push_str("- questions a human ALREADY ANSWERED on this item (rulings: apply them, never ask them again):\n");
+            for a in &self.human_answers {
+                s.push_str(&format!("{}\n", indent(a)));
+            }
+        }
         s
     }
 }
@@ -218,6 +337,15 @@ but whose items were never filed are all INCOMPLETE.  You may read files to chec
 Several agents share this checkout: a file outside the item's lock scope is NOT evidence about this item unless the worker's \
 own message claims it or the evidence lists it as committed by this item — a path committed under this item's id is its work, \
 wherever it is; never call a report dishonest over a path the evidence marks as outside the scope or as another item's commit.\n\n\
+Check facts yourself before you doubt them; a question to a human costs a day of queue time.  You have read-only git \
+(`git log`, `git show --stat <hash>`, `git diff`): when the worker names a commit, look at it — a commit that matches the worker's \
+account and carries no other item's id is this item's work.  The test runs listed under the engine evidence were recorded by the \
+runner itself and are fact; test node files (*.test.iter.md) carry each node's latest result in `last_result`.  \
+`iter runtests --group` no longer exists: a run of the matching test node by path or name satisfies a request that names a group.  \
+Questions a human already answered on this item are rulings: apply them and never ask them again.  \
+Use \"unclear\" only for a doubt that reading files and git cannot settle; a missing proof the worker could supply is \"incomplete\", \
+with that proof in \"open\".  A step the worker reports NOT RUN because the live cluster is switched off on purpose is open: \
+list it under \"open\" (verdict incomplete), never as a question.\n\n\
 Answer with exactly one json object and nothing else:\n\
 {{\"verdict\": \"complete\" | \"incomplete\" | \"unclear\", \"open\": [\"each obligation still open, one per entry\"], \"reason\": \"one or two sentences\", \
 \"question\": \"ONE sentence ending in '?' naming the single fact a human must settle — empty when complete\", \
@@ -567,6 +695,42 @@ mod tests {
         assert!(commits_with_id(&log, "ffffffff-0000-0000-0000-000000000000").is_empty());
     }
 
+    /// An agent's own commit names no item; the engine's and the webui's
+    /// suffix forms and a full uuid all count as naming one.
+    #[test]
+    fn commits_without_any_id_finds_agents_own_commits() {
+        let rec = |h: &str, s: &str, b: &str| format!("{h}\x1f{s}\x1f{b}\x1e\n");
+        let log = [
+            rec("aaa0001", "iter: bundle loader (aca51627)", ""),
+            rec("aaa0002", "techreq R219 (5c22ab7f0d11)", ""),
+            rec("aaa0003", "ledger row", "for aca51627-1111-4222-8333-5c22ab7f0d11\n"),
+            rec("aaa0004", "fix the loader's clock (see notes)", ""),
+            rec("aaa0005", "bump floor (12345678 checks)", ""),
+        ].concat();
+        let got: Vec<String> = commits_without_any_id(&log).into_iter().map(|(h, _)| h).collect();
+        assert_eq!(got, vec!["aaa0004", "aaa0005"]);
+    }
+
+    /// The runner's log_header rows reach the verifier as two-line facts;
+    /// answered questions (gate widget or free text) reach it as rulings,
+    /// unanswered ones do not.
+    #[test]
+    fn test_runs_and_answered_questions_are_read_from_details() {
+        let details = vec![
+            row(4, "log_header", json!("Test run T — test node \"a dev\" in a/dev.test.iter.md\nresult: PASSED  pass 5/5\n- pass a/dev/t1.sh 5/5")),
+            row(5, "question", json!({"gate": "close", "title": "Is c1 this item's?", "answered_question": "Is c1 this item's?",
+                "fields": [{"key": "action", "value": "continue"}, {"key": "guidance", "value": "yes, c1 is"}]})),
+            row(6, "question", json!({"gate": "close", "title": "unanswered gate", "fields": [{"key": "action", "value": "continue"}, {"key": "guidance", "value": ""}]})),
+            row(7, "question", json!({"title": "Which vendor?", "fields": [{"key": "answer", "value": "Twilio"}]})),
+            row(8, "question", json!({"title": "Open one?", "fields": [{"key": "answer", "value": ""}]})),
+        ];
+        assert_eq!(recorded_test_runs(&details), vec!["Test run T — test node \"a dev\" in a/dev.test.iter.md — result: PASSED  pass 5/5"]);
+        assert_eq!(answered_questions(&details), vec![
+            "asked: Is c1 this item's? / answered: action continue; yes, c1 is".to_string(),
+            "asked: Which vendor? / answered: Twilio".to_string(),
+        ]);
+    }
+
     /// F7: the verifier is told the commits are from every attempt, and never
     /// a bare "none" while the item has commits; with no new head this
     /// attempt, earlier attempts' commits still count as work.
@@ -592,7 +756,10 @@ mod tests {
             commits: vec![("abc1234".into(), "iter: thing (deadbeef)".into())],
             outside_scope_committed: vec![("LEDGER.md".into(), "abc1234".into())],
             other_scope_commits: vec![("ba2d6a2".into(), "iter: sibling (99998888)".into())],
+            untagged_scope_commits: vec![("5eed5ee".into(), "fix the loader".into())],
             notes: vec![],
+            test_runs: vec!["Test run 2026-10-10T03:53:38Z — test node \"x dev tier\" in x/dev.test.iter.md — result: PASSED  pass 458/458".into()],
+            human_answers: vec!["asked: Is 5eed5ee this item's commit? / answered: action continue; yes it is".into()],
         };
         let d = ev.describe();
         assert!(d.contains("limited to its lock scope (lock scope (1 paths))"), "{d}");
@@ -600,6 +767,11 @@ mod tests {
         assert!(d.contains("Committed by this item outside its lock scope: LEDGER.md (abc1234)"), "{d}");
         assert!(d.contains("Commits by other items in this scope (not this item's work): ba2d6a2"), "{d}");
         assert!(d.contains("abc1234 \"iter: thing (deadbeef)\""), "{d}");
+        assert!(d.contains("carry NO work-item id") && d.contains("5eed5ee \"fix the loader\""), "{d}");
+        assert!(d.contains("engine fact") && d.contains("pass 458/458"), "{d}");
+        assert!(d.contains("ALREADY ANSWERED") && d.contains("yes it is"), "{d}");
+        let p = verifier_prompt("n", "r", "m", &ev);
+        assert!(p.contains("read-only git") && p.contains("`iter runtests --group` no longer exists"), "{p}");
         let j = ev.to_json();
         assert_eq!(j["commit_scope"], "lock scope (1 paths)");
         assert_eq!(j["outside_scope_dirty"], 2);
