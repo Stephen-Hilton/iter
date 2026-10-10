@@ -449,6 +449,15 @@
     cy.style().selector('node.kit-pinned').style({ 'border-width': 3, 'border-style': 'double', 'border-color': '#facc15' }).update();
     const read = () => { const k = o.key && o.key(); if (!k) return {}; try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch (e) { return {}; } };
     const write = (m) => { const k = o.key && o.key(); if (!k) return; try { localStorage.setItem(k, JSON.stringify(m)); } catch (e) { /* storage blocked */ } };
+    // a compound node (a wrapper with nodes inside it) has no position of its own: Cytoscape derives it from
+    // its children, so pinning one pins every leaf inside it (2026-10-10: P on a wrapper did nothing)
+    const leaves = (nodes) => nodes.union(nodes.filter((n) => n.isParent()).descendants()).filter((n) => !n.isParent() && !n.id().startsWith('__'));
+    // a wrapper reads as pinned (and stops being draggable) once every leaf inside it is pinned
+    const markParents = () => cy.nodes().filter((n) => n.isParent()).forEach((p) => {
+      const inner = leaves(p);
+      const all = inner.nonempty() && inner.every((n) => n.hasClass('kit-pinned'));
+      if (all && !p.hasClass('kit-pinned')) { p.addClass('kit-pinned'); p.ungrabify(); } else if (!all && p.hasClass('kit-pinned')) { p.removeClass('kit-pinned'); p.grabify(); }
+    });
     const api = {
       /** ids pinned under the current key */
       ids: () => new Set(Object.keys(read())),
@@ -457,18 +466,23 @@
       apply() {
         const m = read();
         cy.batch(() => {
-          cy.nodes('.kit-pinned').forEach((n) => { if (!m[n.id()]) { n.removeClass('kit-pinned'); n.grabify(); } });
+          cy.nodes('.kit-pinned').forEach((n) => { if (!n.isParent() && !m[n.id()]) { n.removeClass('kit-pinned'); n.grabify(); } });
           Object.entries(m).forEach(([id, p]) => { const n = cy.getElementById(id); if (n.empty() || n.isParent()) return; n.position(p); n.addClass('kit-pinned'); n.ungrabify(); });
+          markParents();
         });
       },
       /** fcose fixedNodeConstraint entries for the pinned nodes in view */
       constraints() { return Object.entries(read()).filter(([id]) => cy.getElementById(id).nonempty()).map(([id, p]) => ({ nodeId: id, position: { x: p.x, y: p.y } })); },
-      /** pin or unpin: all of `nodes` unpinned -> pin them where they are, else unpin them. Returns 'pinned' | 'unpinned' | null. */
+      /** pin or unpin: any of `nodes` unpinned -> pin them where they are, else unpin them; a wrapper stands for
+       *  every leaf inside it. Returns 'pinned' | 'unpinned' | null. */
       toggle(nodes) {
-        const list = nodes.filter((n) => !n.isParent() && !n.id().startsWith('__'));
+        const list = leaves(nodes);
         if (list.empty() || !(o.key && o.key())) return null;
         const m = read(); const pin = list.some((n) => !m[n.id()]);
-        list.forEach((n) => { if (pin) { m[n.id()] = Object.assign({}, n.position()); n.addClass('kit-pinned'); n.ungrabify(); } else { delete m[n.id()]; n.removeClass('kit-pinned'); n.grabify(); } });
+        cy.batch(() => {
+          list.forEach((n) => { if (pin) { m[n.id()] = Object.assign({}, n.position()); n.addClass('kit-pinned'); n.ungrabify(); } else { delete m[n.id()]; n.removeClass('kit-pinned'); n.grabify(); } });
+          markParents();
+        });
         write(m);
         return pin ? 'pinned' : 'unpinned';
       },
