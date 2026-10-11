@@ -403,3 +403,46 @@ fn a_hand_edit_is_stamped_with_the_file_mtime_not_the_scan_time() {
     assert_eq!(ts, want);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A renamed part's folder moves as one directory: its code goes along with
+/// the node files, the old folder is gone, and the commit holds the rename
+/// (2026-10-10: renames never reached the file and folder names).
+#[test]
+fn a_renamed_parts_folder_moves_with_its_code() {
+    let top = repo("folder_rename");
+    write(&top, "global/p.project.iter.md", &conformed("global/p.project.iter.md", "P"));
+    write(&top, "src/shop/orders/orders.code.iter.md", &conformed("src/shop/orders/orders.code.iter.md", "Orders"));
+    write(&top, "src/shop/orders/ledger/ledger.code.iter.md", &conformed("src/shop/orders/ledger/ledger.code.iter.md", "Ledger"));
+    write(&top, "src/shop/orders/main.rs", "fn main() {}\n");
+    sh(&top, &["add", "-A"]);
+    sh(&top, &["commit", "-q", "-m", "nodes"]);
+    let o_text = conformed("src/shop/order_book/order_book.code.iter.md", "Order book");
+    let l_text = conformed("src/shop/order_book/ledger/ledger.code.iter.md", "Ledger");
+    // the server sorts by the new path: the inner node's row comes first
+    let pending = vec![
+        json!({"id": "l1", "op": "move", "path": "{topdir}/src/shop/order_book/ledger/ledger.code.iter.md", "old_path": "{topdir}/src/shop/orders/ledger/ledger.code.iter.md", "text": l_text, "node_version": 3}),
+        json!({"id": "o1", "op": "move", "path": "{topdir}/src/shop/order_book/order_book.code.iter.md", "old_path": "{topdir}/src/shop/orders/orders.code.iter.md", "text": o_text, "node_version": 4}),
+    ];
+    let world = Arc::new(Mutex::new(World { pending, ..Default::default() }));
+    let srv = server(world.clone());
+    let mut st = FileSyncState::default();
+    tick(&srv.api(), "e1", "p", &top, false, true, &mut st).unwrap();
+    assert!(!top.join("src/shop/orders").exists(), "the old folder is gone");
+    assert_eq!(std::fs::read_to_string(top.join("src/shop/order_book/main.rs")).unwrap(), "fn main() {}\n", "the code moved with it");
+    assert_eq!(std::fs::read_to_string(top.join("src/shop/order_book/order_book.code.iter.md")).unwrap(), o_text);
+    assert!(!top.join("src/shop/order_book/orders.code.iter.md").exists(), "the node file took its new name");
+    assert_eq!(std::fs::read_to_string(top.join("src/shop/order_book/ledger/ledger.code.iter.md")).unwrap(), l_text);
+    let files = last_commit_files(&top);
+    for f in ["src/shop/order_book/main.rs", "src/shop/orders/main.rs", "src/shop/order_book/order_book.code.iter.md", "src/shop/orders/orders.code.iter.md"] {
+        assert!(files.contains(&f.to_string()), "{f} in {files:?}");
+    }
+    assert!(sh(&top, &["status", "--porcelain"]).trim().is_empty(), "everything committed: {}", sh(&top, &["status", "--porcelain"]));
+    assert_eq!(st.last.pending_applied, 2);
+    assert!(st.known("src/shop/orders/orders.code.iter.md").is_none() && st.known("src/shop/orders/ledger/ledger.code.iter.md").is_none(), "old paths forgotten");
+    let before = syncs(&srv).len();
+    tick(&srv.api(), "e1", "p", &top, false, false, &mut st).unwrap();
+    assert_eq!(syncs(&srv).len(), before, "the next tick has nothing to send (no phantom deletes)");
+    // a move that is not a folder's namesake stays a single-file move
+    assert_eq!(crate::filesync::folder_rename("{topdir}/src/old/o.code.iter.md", "{topdir}/src/moved/o.code.iter.md"), None);
+    assert_eq!(crate::filesync::folder_rename("{topdir}/a/x/x.code.iter.md", "{topdir}/b/y/y.code.iter.md"), None, "a different parent is a move, not a rename");
+}

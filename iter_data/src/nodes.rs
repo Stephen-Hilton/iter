@@ -413,6 +413,55 @@ impl Graph {
         Ok(Some(oid))
     }
 
+    /// Where a rename would put a node whose path was made from its name
+    /// (`…/<slug>/<slug>.<type>.iter.md`, slug of `old_name`): `(old_dir,
+    /// new_dir)`, or None when the path does not follow the name (an existing
+    /// code folder adopted as a node) or the new slug changes nothing.
+    pub fn rename_plan(&self, id: &str, old_name: &str, new_name: &str) -> Option<(String, String)> {
+        let n = self.get(id)?;
+        let path = n.doc.path.as_str();
+        let (stem, dir) = (nf::stem_of(path), nf::dir_of(path));
+        let (old_slug, new_slug) = (nf::slug(old_name), nf::slug(new_name));
+        if stem.is_empty() || stem != old_slug || nf::file_name_of(&dir) != stem || new_slug.is_empty() || new_slug == old_slug {
+            return None;
+        }
+        let new_dir = format!("{}/{}", nf::dir_of(&dir), new_slug);
+        Some((dir, new_dir))
+    }
+
+    /// Move a node's folder: every live node file under `old_dir` to the same
+    /// place under `new_dir`, and the folder's own `<old stem>.*.iter.md` files
+    /// (the node, its agent memory) to `<new stem>.*`. References in other nodes
+    /// follow (`move_node`). The engine applies it as one folder rename, so the
+    /// code and anything else in the folder go with it. Refuses (409) when
+    /// `new_dir` already holds a node.
+    pub fn rename_folder(&mut self, old_dir: &str, new_dir: &str, by: &str) -> Result<Vec<String>, ApiError> {
+        let (old_stem, new_stem) = (nf::file_name_of(old_dir), nf::file_name_of(new_dir));
+        let under = |p: &str, d: &str| p.starts_with(&format!("{d}/"));
+        if self.live().any(|n| under(&n.doc.path, new_dir)) {
+            return Err(status(StatusCode::CONFLICT, format!("{new_dir} already holds a node: rename the folder by hand or pick another name")));
+        }
+        let moves: Vec<(String, String)> = self
+            .live()
+            .filter(|n| under(&n.doc.path, old_dir))
+            .map(|n| {
+                let rest = &n.doc.path[old_dir.len() + 1..];
+                let rest = match rest.strip_prefix(&format!("{old_stem}.")) {
+                    Some(tail) if !rest.contains('/') => format!("{new_stem}.{tail}"),
+                    _ => rest.to_string(),
+                };
+                (n.doc.id.clone(), format!("{new_dir}/{rest}"))
+            })
+            .collect();
+        let mut touched = Vec::new();
+        for (id, to) in moves {
+            touched.extend(self.move_node(&id, &to, by)?);
+        }
+        touched.sort();
+        touched.dedup();
+        Ok(touched)
+    }
+
     /// Hang a code node under another owner (2026-10-10: a container could be
     /// put inside a context, or a component inside a container, only when it
     /// was created). `parent` is a code node (not a connection) or None for the

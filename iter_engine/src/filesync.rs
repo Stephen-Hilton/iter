@@ -715,6 +715,15 @@ fn file_name(stored_path: &str) -> &str {
     stored_path.rsplit('/').next().unwrap_or(stored_path)
 }
 
+/// The folder a node move renames, when the move is the server's rename of a
+/// part's own folder: the file is its folder's namesake on both sides
+/// (`a/x/x.code.iter.md` → `a/y/y.code.iter.md`), under the same parent.
+pub(crate) fn folder_rename(old: &str, new: &str) -> Option<(String, String)> {
+    let (od, nd) = (nodefile::dir_of(old), nodefile::dir_of(new));
+    let named = |p: &str, d: &str| !d.is_empty() && nodefile::file_name_of(d) == nodefile::stem_of(p);
+    (od != nd && named(old, &od) && named(new, &nd) && nodefile::dir_of(&od) == nodefile::dir_of(&nd) && od != "{topdir}").then_some((od, nd))
+}
+
 /// Apply the pending graph edits: (applied, waiting on a lock, commit).
 /// `build` = the designer build (commit message and no lock waits on a
 /// fresh tree are the caller's business; `extra` paths join the commit).
@@ -735,11 +744,47 @@ fn apply_pending(
     let mut acks: Vec<Value> = Vec::new();
     let mut summary: Vec<String> = Vec::new();
     let mut waiting = 0usize;
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    // A renamed part's folder (`…/<old>/<old>.code.iter.md` → `…/<new>/<new>.code.iter.md`)
+    // moves as one directory first, so its code and anything else in it go
+    // along (2026-10-10); the per-node moves below then find their files in place
+    for row in rows.iter().filter(|r| r["op"].as_str() == Some("move")) {
+        let (Some(o), Some(n)) = (row["old_path"].as_str(), row["path"].as_str()) else { continue };
+        if let Some((od, nd)) = folder_rename(o, n) {
+            if locks.holds(&od) || locks.holds(&nd) {
+                continue; // the per-node rows wait on the same lock
+            }
+            let (Ok(op), Ok(np)) = (walk::real_path(top, &od), walk::real_path(top, &nd)) else { continue };
+            if !op.is_dir() || np.exists() {
+                continue;
+            }
+            match std::fs::rename(&op, &np) {
+                Ok(()) => {
+                    println!("[engine] {project}: renamed folder {} → {}", rel_of(&od), rel_of(&nd));
+                    touched.push(rel_of(&od).to_string());
+                    touched.push(rel_of(&nd).to_string());
+                    summary.push(format!("rename folder {} → {}", file_name(&od), file_name(&nd)));
+                    st.dirty = true;
+                    // the old folder's files are gone: forget them, or the next tick reports them deleted
+                    let gone = format!("{}/", rel_of(&od));
+                    st.files.retain(|k, _| !k.starts_with(&gone));
+                    renamed.push((od, nd));
+                }
+                Err(e) => eprintln!("[engine] {project}: cannot rename folder {} → {}: {e}", rel_of(&od), rel_of(&nd)),
+            }
+        }
+    }
     for row in &rows {
         let id = row["id"].as_str().unwrap_or("").to_string();
         let op = row["op"].as_str().unwrap_or("write");
         let sp = row["path"].as_str().unwrap_or("").to_string();
-        let old = row["old_path"].as_str().map(String::from);
+        // a file inside a folder renamed above now sits under the new folder name
+        let old = row["old_path"].as_str().map(|o| {
+            renamed
+                .iter()
+                .find_map(|(od, nd)| o.strip_prefix(&format!("{od}/")).map(|rest| format!("{nd}/{rest}")))
+                .unwrap_or_else(|| o.to_string())
+        });
         let text = row["text"].as_str().unwrap_or("").to_string();
         let version = row["node_version"].as_u64().unwrap_or(0);
         let path = match walk::real_path(top, &sp) {

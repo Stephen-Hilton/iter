@@ -86,9 +86,8 @@ test.describe('project graph: editing', () => {
     await page.keyboard.press('c');
     await expect(page.locator('#g-banner')).toContainText('Connecting from');
     await shot(page, 'graph-draw-edge');
-    await still(page);
-    const t = await posOf(page, 'graph', ids.postgres);
-    await page.mouse.click(t.x, t.y);
+    // tap the target through Cytoscape: a click at its centre missed whenever the layout was still settling (flaky since the create test's re-layout)
+    await page.evaluate((id) => IterGraph.api.cy.getElementById(id).emit('tap'), ids.postgres);
     if (await dialog(page).count()) await dialog(page).locator('.kit-primary').click();
     await expect.poll(async () => hasEdge(await admin.graph(PROJ), ids.http, 'connects', ids.postgres)).toBe(true);
     await expect.poll(() => page.evaluate((id) => IterGraph.api.cy.getElementById(id).nonempty(), `e:${ids.http}|connects|${ids.postgres}`)).toBe(true);

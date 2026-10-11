@@ -830,9 +830,21 @@
         const keys = Object.keys(patch).filter((k) => k !== 'expect_version');
         if (!keys.length) return true;
         if (patch.name !== undefined && !String(patch.name).trim()) throw new Error('name: a node needs a name');
-        try { await api('/graph/nodes/' + enc(fresh.id), { method: 'PATCH', body: JSON.stringify(patch) }); }
+        // a rename: when its folder and file were named after the old name, offer to rename them too (2026-10-10)
+        let plan = {};
+        if (patch.name !== undefined && patch.name !== fresh.name) {
+          try { plan = await api('/graph/nodes/' + enc(fresh.id) + '/rename_plan?name=' + encodeURIComponent(patch.name)); } catch (e) { plan = {}; }
+          if (plan && plan.from) {
+            const rel = (p) => String(p).replace('{topdir}/', '');
+            patch.rename_path = await K().confirm({ title: 'Rename its folder too?', okLabel: 'Rename folder and file',
+              text: `<code>${esc(rel(plan.from))}/</code> → <code>${esc(rel(plan.to))}/</code><br><br>${plan.nodes} node file${plan.nodes === 1 ? '' : 's'} move with it, and so does everything else in that folder (code included): the engine renames the folder in one git commit. <b>Cancel</b> keeps the old folder and file names and changes only the name.` });
+          }
+        }
+        let saved;
+        try { saved = await api('/graph/nodes/' + enc(fresh.id), { method: 'PATCH', body: JSON.stringify(patch) }); }
         catch (e) { if (e.status === 409) throw new Error('Someone (or an engine) changed this node since you opened it. Close and open Configure again to see the new version.'); throw new Error(errMsg(e)); }
-        toast(`Saved ${patch.name || fresh.name}`, { kind: 'ok' });
+        if (saved && saved.moved) toast(`Renamed ${patch.name}: its folder is now ${String(plan.to || '').replace('{topdir}/', '')}/ (the engine moves it on its next sync)`, { kind: 'ok', ms: 6000 });
+        else toast(`Saved ${patch.name || fresh.name}`, { kind: 'ok' });
         refresh(fresh.id);
         return true;
       },

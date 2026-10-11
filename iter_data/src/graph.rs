@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/graph/nodes/{id}/neighbors", get(node_neighbors))
         .route("/api/projects/{name}/graph/nodes/{id}/move", post(node_move))
         .route("/api/projects/{name}/graph/nodes/{id}/parent", post(node_parent))
+        .route("/api/projects/{name}/graph/nodes/{id}/rename_plan", get(node_rename_plan))
         .route("/api/projects/{name}/graph/edges", post(edge_add).delete(edge_remove))
         .route("/api/projects/{name}/graph/edges/move", post(edge_move))
         .merge(crate::testlogs::routes())
@@ -555,12 +556,24 @@ async fn node_patch(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Stri
     }
     apply_front(&mut doc, req.get("front").unwrap_or(&Value::Null))?;
     apply_children(&mut doc, req.get("children").unwrap_or(&Value::Null))?;
+    // a rename with "rename_path": true also renames the folder its path was
+    // made from (2026-10-10: the file kept the old name's folder forever)
+    let plan = if req.get("rename_path").and_then(|v| v.as_bool()).unwrap_or(false) { g.rename_plan(&id, &n.doc.name, &doc.name) } else { None };
+    let mut moved = Vec::new();
     if doc != n.doc {
         let what: Vec<&str> = ["name", "desc", "body", "teststate", "level", "front", "children"].into_iter().filter(|k| req.get(*k).is_some()).collect();
         g.commit_edit(&id, doc, &user.sub, &format!("edit {} ({})", n.doc.name, what.join(", ")), true)?;
+        if let Some((from, to)) = &plan {
+            moved = g.rename_folder(from, to, &user.sub)?;
+        }
         g.save(st.store.as_ref()).await?;
     }
-    Ok(Json(g.get(&id).unwrap().json()))
+    let mut out = g.get(&id).unwrap().json();
+    if !moved.is_empty() {
+        out["moved"] = json!(moved);
+        out["nodes"] = json!(touched_nodes(&g, &moved));
+    }
+    Ok(Json(out))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -596,6 +609,27 @@ async fn node_move(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Strin
     let touched = g.move_node(&id, s(&req, "path"), &user.sub)?;
     g.save(st.store.as_ref()).await?;
     Ok(Json(json!({"node": g.get(&id).unwrap().json(), "touched": touched})))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RenameQ {
+    #[serde(default)]
+    name: String,
+}
+
+/// `GET …/graph/nodes/{id}/rename_plan?name=New name`: the folder a rename
+/// with `rename_path` would move (`{"from", "to", "nodes"}`), or `{}` when the
+/// path does not follow the name. Nothing changes.
+async fn node_rename_plan(_u: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>, Query(q): Query<RenameQ>) -> Result<Json<Value>, ApiError> {
+    let g = Graph::load(st.store.as_ref(), &name).await?;
+    let n = g.live_node(&id)?;
+    Ok(Json(match g.rename_plan(&id, &n.doc.name, &q.name) {
+        Some((from, to)) => {
+            let inside = g.live().filter(|x| x.doc.path.starts_with(&format!("{from}/"))).count();
+            json!({"from": from, "to": to, "nodes": inside})
+        }
+        None => json!({}),
+    }))
 }
 
 /// `POST …/graph/nodes/{id}/parent` `{"parent": "<code node id>"}` hangs a part

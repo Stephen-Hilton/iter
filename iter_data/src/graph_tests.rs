@@ -1274,3 +1274,31 @@ async fn parts_move_between_owners() {
     assert_eq!(t.call("adm", "POST", &u, Some(b1)).await.0, 400);
     t.done().await;
 }
+
+/// A rename with rename_path moves the folder its path was made from, with
+/// every node inside it, and the owner's reference follows; without it, or
+/// when the path no longer follows the name, nothing moves (2026-10-10).
+#[tokio::test]
+async fn rename_moves_the_folder_made_from_the_name() {
+    let t = T::new().await;
+    t.project("p").await;
+    let shop = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "Shop"})).await);
+    let orders = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Orders", "attach_to": shop})).await);
+    let ledger = id(&t.create("p", json!({"nodetype": "code", "level": "component", "name": "Ledger", "attach_to": orders})).await);
+    assert_eq!(t.node("p", &orders).await["path"], json!("{topdir}/src/shop/orders/orders.code.iter.md"));
+    let plan = t.ok("adm", "GET", &format!("/api/projects/p/graph/nodes/{orders}/rename_plan?name=Order%20book"), None).await;
+    assert_eq!(plan, json!({"from": "{topdir}/src/shop/orders", "to": "{topdir}/src/shop/order_book", "nodes": 2}));
+    let r = t.ok("adm", "PATCH", &format!("/api/projects/p/graph/nodes/{orders}"), Some(json!({"name": "Order book", "rename_path": true}))).await;
+    assert_eq!(r["path"], json!("{topdir}/src/shop/order_book/order_book.code.iter.md"), "{r}");
+    assert_eq!(r["name"], json!("Order book"));
+    assert_eq!(t.node("p", &ledger).await["path"], json!("{topdir}/src/shop/order_book/ledger/ledger.code.iter.md"));
+    assert_eq!(t.node("p", &shop).await["children"]["codenodes"], json!(["{topdir}/src/shop/order_book/order_book.code.iter.md"]));
+    let g = t.graph("p").await;
+    assert!(has_edge(&g, &shop, "codenodes", &orders) && has_edge(&g, &orders, "codenodes", &ledger));
+    // a plain rename leaves the path; the path then no longer follows the name, so a later rename_path moves nothing
+    let r = t.ok("adm", "PATCH", &format!("/api/projects/p/graph/nodes/{ledger}"), Some(json!({"name": "General ledger"}))).await;
+    assert_eq!(r["path"], json!("{topdir}/src/shop/order_book/ledger/ledger.code.iter.md"));
+    let plan = t.ok("adm", "GET", &format!("/api/projects/p/graph/nodes/{ledger}/rename_plan?name=Books"), None).await;
+    assert_eq!(plan, json!({}));
+    t.done().await;
+}

@@ -17,6 +17,8 @@ const menu = async (page, id, item) => {
 };
 
 test.describe('project graph: calls edges and moving parts', () => {
+  // one seeded project, changed step by step: a failure must not re-seed it under the later tests
+  test.describe.configure({ mode: 'serial' });
   test.beforeAll(async () => {
     const st = readState();
     const admin = new Api(st.base, st.adminToken);
@@ -28,9 +30,9 @@ test.describe('project graph: calls edges and moving parts', () => {
     await openTab(page, 'graph', PROJ);
     await select(page, { kind: 'node', id: ids.webapp });
     await page.keyboard.press('c');
-    await still(page);
-    const t = await posOf(page, 'graph', ids.gateway);
-    await page.mouse.click(t.x, t.y);
+    await expect(page.locator('#g-banner')).toContainText('Connecting from');
+    // tap the target through Cytoscape: a click at its centre can land on another box while the layout settles
+    await page.evaluate((id) => IterGraph.api.cy.getElementById(id).emit('tap'), ids.gateway);
     await expect(dialog(page)).toBeVisible();
     const first = dialog(page).locator('.kit-radio').first();
     await expect(first).toContainText('Web app calls API gateway');
@@ -84,6 +86,44 @@ test.describe('project graph: calls edges and moving parts', () => {
     await page.mouse.click(p.x, p.y);
     await still(page);
     await expect(dialog(page)).toHaveCount(0);
+  });
+
+  test('renaming a part offers to rename its folder; yes moves it and every node file inside', async ({ page, admin }) => {
+    const before = await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.webapp}`);
+    expect(before.path.endsWith('/web_app/web_app.code.iter.md')).toBe(true);
+    const want = before.path.replace('/web_app/web_app.code.iter.md', '/shop_front/shop_front.code.iter.md');
+    const checkoutBefore = (await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.checkout}`)).path;
+    await openTab(page, 'graph', PROJ);
+    await select(page, { kind: 'node', id: ids.webapp });
+    await page.keyboard.press('e');
+    await expect(dialog(page)).toBeVisible();
+    await dialog(page).locator('#kit-cf-0').fill('Shop front');
+    await dialog(page).locator('.kit-primary').click();
+    const ask = dialog(page).filter({ hasText: 'Rename its folder too?' });
+    await expect(ask).toBeVisible();
+    await expect(ask).toContainText('src/storefront/web_app/');
+    await expect(ask).toContainText('src/storefront/shop_front/');
+    await shot(page, 'graph-rename-folder');
+    await ask.locator('.kit-primary').click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(async () => (await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.webapp}`)).path).toBe(want);
+    const after = await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.webapp}`);
+    expect(after.name).toBe('Shop front');
+    expect((await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.checkout}`)).path).toBe(checkoutBefore.replace('/web_app/', '/shop_front/'));
+  });
+
+  test('renaming and declining keeps the folder and file names', async ({ page, admin }) => {
+    const before = (await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.ledger}`)).path;
+    await openTab(page, 'graph', PROJ);
+    await select(page, { kind: 'node', id: ids.ledger });
+    await page.keyboard.press('e');
+    await dialog(page).locator('#kit-cf-0').fill('Ledger API');
+    await dialog(page).locator('.kit-primary').click();
+    const ask = dialog(page).filter({ hasText: 'Rename its folder too?' });
+    await expect(ask).toBeVisible();
+    await ask.locator('.kit-ghost', { hasText: 'Cancel' }).click();
+    await expect.poll(async () => (await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.ledger}`)).name).toBe('Ledger API');
+    expect((await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.ledger}`)).path).toBe(before);
   });
 
   test('a new part still hangs from its parent by "owns"', async ({ page }) => {

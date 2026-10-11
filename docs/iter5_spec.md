@@ -385,9 +385,11 @@ Live smoke: `e2e.sh --live` queues one tiny item to a real `claude` account (ski
 | GET | `graph/view` | webui shape: nodes with `level` (code level or nodetype), `parent` (owner chain), `usecases`, file_state; edges; usecases with flowmaps; summary |
 | GET | `graph/nodes/{id}` / `graph/nodes/{id}/neighbors?depth&direction` / `graph/lookup?path=|name=&nodetype=` / `graph/stats` | as iter4 |
 | POST | `graph/nodes` | `{nodetype, level?, name, desc?, body?, attach_to?: id, attach_kind?: codenodes|tests|reqs|uses|drives|touches|supplies|connects, front?, children?}` → creates (path via §2.5), adds the attaching edge on the parent node, returns `{node, touched:[ids]}` |
-| PATCH | `graph/nodes/{id}` | `{expect_version?, name?, desc?, body?, teststate?, level?, front?, children?}` → node |
+| PATCH | `graph/nodes/{id}` | `{expect_version?, name?, rename_path?, desc?, body?, teststate?, level?, front?, children?}` → node (with `rename_path: true`, a rename also moves the folder named after the old name: `moved`, `nodes`) |
 | DELETE | `graph/nodes/{id}` | `{reason}` → pending_delete (also removes it from every parent's children lists) |
 | POST | `graph/nodes/{id}/move` | `{path}` → move op |
+| POST | `graph/nodes/{id}/parent` | `{parent: <code node id> | null}` → the part's `codenodes` owner becomes `parent` (null = the project node, top level); its file stays put; refuses a loop (2026-10-10) |
+| GET | `graph/nodes/{id}/rename_plan?name=` | `{from, to, nodes}`: the folder a rename with `rename_path` moves, or `{}` when the path does not follow the name |
 | POST | `graph/edges` | `{from, to, kind}` → updates the owning node (see §2.4: for supplies/connects the connection node owns it) |
 | DELETE | `graph/edges` | `{from, to, kind, reason}` |
 | POST | `graph/edges/move` | `{from, to, kind, new_from?, new_to?}` (drag an endpoint) |
@@ -484,6 +486,7 @@ also reachable from the graph view's picker as "Settings graph").
   bizreq, techreq, philosophy, usecase, actor) to hide/show; state in the URL hash. Connection view preset ("Network map":
   code + connection only).
 - **Connections**: styled as small diamond/hexagon nodes; `supplies` edges into, `connects` edges out.
+- **Moving parts**: a part's menu has *Move into…* (filterable list) and *Move out* (to its owner's owner); in the Cluster layout, dragging a part onto another part's box asks to move it inside (`nodes/{id}/parent`). **Renaming** in Configure: when the node's folder and file were named after the old name, the page offers to rename them too (PATCH with `rename_path: true`); every node file under the folder moves, and the engine renames the folder in one step so its code goes along.
 - **Edge editing**: select an edge → endpoint handles appear; drag an endpoint onto another node → `edges/move`.
   Copy an edge (⌘C / menu), select a node, paste (⌘V) → new edge with the same kind/settings from/to that node
   (side chosen in a small prompt). Settings graph edges show their `tag` as label.
