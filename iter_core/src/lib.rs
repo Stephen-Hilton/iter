@@ -728,13 +728,16 @@ pub const TEST_SWEEP_EVERY_MIN: u64 = 240;
 /// engine creates it — a person turns it on — or `scheduled`.
 pub fn test_sweep_template_body(state: &str, every_min: u64) -> serde_json::Value {
     serde_json::json!({
-        "name": format!("Test sweep, every {}: run the map's test groups and file work for what they find", every_label(every_min)),
+        "name": format!("Test sweep, every {}: run one use case's tests (the one tested longest ago) and file work for what they find", every_label(every_min)),
         "agent": "test", "state": state, "exec_shell": "iter sweep", "system": TEST_SWEEP,
         "sched": {"kind": "every", "every_min": every_min},
         "lockdirs": [], "blockedby": [], "context": [], "tags": [{"text": "sweep", "color": ""}],
         "requestedby": "engine", "prework": [], "postwork": [],
         "request": "The project's test sweep (engine-owned; it can be paused but not deleted). `iter sweep` reads the architecture map, \
-            runs every test group a chain from main includes, records each result on the map, and files work for what it finds: \
+            picks ONE use case, the one whose tests ran longest ago, and runs that use case's tests (its own and those of every part \
+            it uses, oldest first, starting no new test after 30 minutes; what is left waits for the next sweep), so the sweep cycles \
+            through the project without timing out (Stephen, 2026-10-11; `iter sweep --all` runs everything). It records each result \
+            on the map, and files work for what it finds: \
             one `code` item per red group, one `test` item per code node with no tests, and one `ingest` item per node whose text \
             breaks the node-text standard. When due it runs at once on the timer, outside the agent cap and the usage holds, \
             but only while the project is Running.",

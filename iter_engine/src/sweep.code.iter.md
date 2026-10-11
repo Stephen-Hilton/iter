@@ -18,12 +18,18 @@ timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-02 23:10:52
 
 ## Summary
 
-Runs every test the project graph says should run, records the results, and files work for anything failing, untested or poorly described.
+Runs one use case's tests per sweep (the use case whose tests ran longest ago), records the results, and files work for anything failing, untested or poorly described.
 
 ## How it works
 
 `iter_engine/src/sweep.rs: sweep_verb` is `iter sweep`. It reads `GET /api/projects/{p}/graph`
 (`fetch_graph`) for nodes and edges.
+
+- **Which use case** (`usecase_tests`, `pick_usecase`, since 2026-10-11): a use case's tests are its own test nodes and
+  those of every part it reaches down `uses` and `codenodes` edges. Its age is its oldest runnable test's `last_tested`
+  (never run = oldest). The sweep takes the oldest use case and runs its tests oldest first, starting no new test node
+  after `--budget-min` (30), so a use case left half-done is picked again next time. `--usecase <name>` picks one;
+  `--all` runs every eligible test node (the old sweep); `--node` runs one test node.
 
 - **Which tests run** (`eligible`, `chain_states`, `step`): chains start at the project node and at every
   use case / actor and run down `codenodes` and `uses` edges; a `block` stops a chain, `omit` / `include`

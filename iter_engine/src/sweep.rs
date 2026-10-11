@@ -145,6 +145,68 @@ pub struct SweepOpts {
     pub text_max: usize,
     pub tests_max: usize,
     pub coverage_max: usize,
+    /// run every eligible test node (the pre-2026-10-11 sweep) instead of one use case's
+    pub all: bool,
+    /// the use case to sweep (name, id or file stem); default: the one tested longest ago
+    pub usecase: Option<String>,
+    /// stop starting test nodes after this many minutes (the rest wait for the next sweep)
+    pub budget_min: u64,
+}
+
+/// For every use case: (id, name, the test nodes its journey reaches — its own
+/// and those of every part it uses, down `uses` and `codenodes` edges).
+pub fn usecase_tests(nodes: &[Value], edges: &[Value]) -> Vec<(String, String, Vec<String>)> {
+    let is_test: HashSet<&str> = nodes.iter().filter(|v| s(v, "nodetype") == "test").filter_map(|v| v["id"].as_str()).collect();
+    let mut down: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut tests: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in edges {
+        let (Some(f), Some(k), Some(t)) = (e["from"].as_str(), e["kind"].as_str(), e["to"].as_str()) else { continue };
+        match k {
+            "codenodes" | "uses" => down.entry(f).or_default().push(t),
+            "tests" if is_test.contains(t) => tests.entry(f).or_default().push(t),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for u in nodes.iter().filter(|v| s(v, "nodetype") == "usecase") {
+        let Some(uid) = u["id"].as_str() else { continue };
+        let (mut seen, mut stack) = (HashSet::from([uid]), vec![uid]);
+        while let Some(x) = stack.pop() {
+            for &t in down.get(x).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(t) {
+                    stack.push(t);
+                }
+            }
+        }
+        let mut ts: Vec<String> = seen.iter().flat_map(|x| tests.get(x).cloned().unwrap_or_default()).map(String::from).collect();
+        ts.sort();
+        ts.dedup();
+        out.push((uid.to_string(), s(u, "name").to_string(), ts));
+    }
+    out
+}
+
+/// The use case this sweep runs (Stephen, 2026-10-11: one use case per sweep,
+/// the one whose tests ran longest ago, so the sweep cycles through the
+/// project without timing out or flooding the queue): `(name, its runnable
+/// tests, oldest first)`. A use case's age is its OLDEST runnable test's
+/// `last_tested` (never run = oldest), so one left half-done by the time
+/// budget is picked again next time. `wanted` names one explicitly.
+pub fn pick_usecase(ucs: &[(String, String, Vec<String>)], last_tested: &HashMap<String, String>, runnable: &HashSet<String>, wanted: Option<&str>) -> Option<(String, Vec<String>)> {
+    let age = |t: &String| last_tested.get(t).cloned().unwrap_or_default();
+    let mut cands: Vec<(String, String, Vec<String>)> = ucs
+        .iter()
+        .filter(|(id, name, _)| wanted.is_none_or(|w| w == id || w.eq_ignore_ascii_case(name) || nodefile::slug(name) == nodefile::slug(w)))
+        .map(|(_, name, ts)| {
+            let mut run: Vec<String> = ts.iter().filter(|t| runnable.contains(*t)).cloned().collect();
+            run.sort_by(|a, b| age(a).cmp(&age(b)).then(a.cmp(b)));
+            let oldest = run.first().map(age).unwrap_or_default();
+            (oldest, name.clone(), run)
+        })
+        .filter(|(_, _, run)| !run.is_empty())
+        .collect();
+    cands.sort();
+    cands.into_iter().next().map(|(_, name, run)| (name, run))
 }
 
 /// Graph nodes + edges of the project (deleted nodes are not listed).
@@ -182,9 +244,35 @@ pub fn sweep_verb(c: &Conn, o: &SweepOpts) -> i32 {
     }
     let mut ids: Vec<&String> = decided.keys().collect();
     ids.sort_by_key(|id| s(&byid[*id], "path").to_string());
+    // one use case per sweep, oldest first, within the time budget (unless --all or --node)
+    let mut budget: Option<std::time::Duration> = None;
+    if o.node.is_none() && !o.all {
+        let runnable: HashSet<String> = decided.iter().filter(|(_, d)| d.0).map(|(k, _)| k.clone()).collect();
+        let last: HashMap<String, String> = nodes
+            .iter()
+            .filter_map(|v| Some((v["id"].as_str()?.to_string(), v["timestamps"]["last_tested"].as_str().unwrap_or("").to_string())))
+            .collect();
+        match pick_usecase(&usecase_tests(&nodes, &edges), &last, &runnable, o.usecase.as_deref()) {
+            Some((name, order)) => {
+                println!("sweep: use case \"{name}\" ({} test node(s), oldest first; budget {} min)", order.len(), o.budget_min);
+                ids = order.iter().filter_map(|t| decided.get_key_value(t).map(|(k, _)| k)).collect();
+                budget = Some(std::time::Duration::from_secs(o.budget_min.max(1) * 60));
+            }
+            None => {
+                println!("sweep: no use case{} has a runnable test node; nothing to run", o.usecase.as_ref().map(|u| format!(" named {u:?}")).unwrap_or_default());
+                ids.clear();
+            }
+        }
+    }
+    let started = std::time::Instant::now();
+    let total = ids.len();
     let mut worst = 0;
     let (mut ran, mut red, mut skipped) = (0, 0, 0);
-    for tn in ids {
+    for (i, tn) in ids.into_iter().enumerate() {
+        if budget.is_some_and(|b| started.elapsed() >= b) {
+            println!("sweep: time budget reached; {} test node(s) left for the next sweep", total - i);
+            break;
+        }
         let t = &byid[tn];
         let (ok, owner_id, why) = &decided[tn];
         let path = s(t, "path");
@@ -599,6 +687,40 @@ mod tests {
         json!({"from": f, "kind": k, "to": t})
     }
 
+    /// One use case per sweep: its own tests and its parts' tests, the use
+    /// case whose oldest runnable test ran longest ago (never run = oldest),
+    /// that use case's tests oldest first; `wanted` picks one by name or slug.
+    #[test]
+    fn the_sweep_picks_the_use_case_tested_longest_ago() {
+        let mut ua = v("UA", "usecase", ""); ua["name"] = json!("Pay a bill");
+        let mut ub = v("UB", "usecase", ""); ub["name"] = json!("Settle the day");
+        let mut uc = v("UC", "usecase", ""); uc["name"] = json!("No tests at all");
+        let vs = vec![ua, ub, uc, v("X", "code", ""), v("Y", "code", ""), v("Z", "code", ""),
+            v("ta", "test", ""), v("tx", "test", ""), v("ty", "test", ""), v("tz", "test", "")];
+        let es = vec![
+            e("UA", "tests", "ta"), e("UA", "uses", "X"), e("X", "codenodes", "Y"), e("X", "tests", "tx"), e("Y", "tests", "ty"),
+            e("UB", "uses", "Z"), e("Z", "tests", "tz"), e("UC", "uses", "Y2"),
+        ];
+        let ucs = usecase_tests(&vs, &es);
+        let get = |id: &str| ucs.iter().find(|u| u.0 == id).unwrap().2.clone();
+        assert_eq!(get("UA"), vec!["ta", "tx", "ty"], "own tests and the parts' tests, down codenodes");
+        assert_eq!(get("UB"), vec!["tz"]);
+        let runnable: HashSet<String> = ["ta", "tx", "ty", "tz"].iter().map(|s| s.to_string()).collect();
+        let at = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, t)| (k.to_string(), t.to_string())).collect::<HashMap<_, _>>();
+        // A last ran 5 days ago, B 9 days ago: B goes
+        let last = at(&[("ta", "2026-10-06 10:00:00Z"), ("tx", "2026-10-06 11:00:00Z"), ("ty", "2026-10-06 12:00:00Z"), ("tz", "2026-10-02 09:00:00Z")]);
+        assert_eq!(pick_usecase(&ucs, &last, &runnable, None), Some(("Settle the day".into(), vec!["tz".into()])));
+        // a never-run test makes its use case the oldest; its tests run oldest first
+        let last = at(&[("ta", "2026-10-06 10:00:00Z"), ("tx", "2026-10-01 11:00:00Z"), ("tz", "2026-10-02 09:00:00Z")]);
+        assert_eq!(pick_usecase(&ucs, &last, &runnable, None), Some(("Pay a bill".into(), vec!["ty".into(), "tx".into(), "ta".into()])));
+        // a test the teststate rules skip is not run, and does not age its use case
+        let only: HashSet<String> = ["ta", "tz"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pick_usecase(&ucs, &last, &only, None).unwrap().1, vec!["tz".to_string()]);
+        // asked by name or slug
+        assert_eq!(pick_usecase(&ucs, &last, &runnable, Some("pay_a_bill")).unwrap().0, "Pay a bill");
+        assert_eq!(pick_usecase(&ucs, &last, &runnable, Some("nobody")), None);
+    }
+
     #[test]
     fn teststate_is_per_chain() {
         // P -> A(omit) -> S ; U(usecase) uses S ; S tests t1
@@ -681,7 +803,7 @@ mod tests {
             Some((200, json!({})))
         });
         let c = Conn { api: Some(srv.api()), project: "p".into(), topdir: top.clone(), source: "test".into() };
-        let o = SweepOpts { node: None, dry_run: false, file_items: true, timeout_min: 1, text_max: 5, tests_max: 5, coverage_max: 0 };
+        let o = SweepOpts { node: None, dry_run: false, file_items: true, timeout_min: 1, text_max: 5, tests_max: 5, coverage_max: 0, all: true, usecase: None, budget_min: 30 };
         assert_eq!(sweep_verb(&c, &o), 1);
         let rec = srv.calls_to("POST", &format!("/graph/nodes/{tid}/testresult"));
         assert_eq!(rec.len(), 1);
