@@ -869,7 +869,7 @@ async function renderMapStats(p){
   const pend=(fs.pending_write||0)+(fs.pending_delete||0),designed=fs.designed||0;
   $("#mapstats").innerHTML=`<div class="eng">${esc(total)} nodes · ${esc(st.edges??st.links??"?")} links
     <div class="mstats">${types}</div>
-    ${pend?`<br><span style="color:var(--warn)">⟳ ${pend} waiting for an engine to write</span>`:""}${designed?`<br><span style="color:var(--accent)">✎ ${designed} designed (not built yet)</span>`:""}</div>`;
+    ${pend?(st.sync_paused?`<br><span style="color:var(--warn)">❚❚ ${pend} held (file sync paused)</span>`:`<br><span style="color:var(--warn)">⟳ ${pend} waiting for an engine to write</span>`):(st.sync_paused?`<br><span style="color:var(--warn)">❚❚ file sync paused</span>`:"")}${designed?`<br><span style="color:var(--accent)">✎ ${designed} designed (not built yet)</span>`:""}</div>`;
 }
 function openMap(focus){return setTab("graph").then(()=>{if(focus&&window.IterGraph&&IterGraph.focus)setTimeout(()=>IterGraph.focus(focus),500);});}
 

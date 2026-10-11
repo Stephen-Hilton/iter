@@ -181,6 +181,9 @@ pub struct Graph {
     pub(crate) req_idx: HashMap<String, usize>,
     /// the req node documents as stored (id → document), for the save diff
     pub(crate) old_reqs: HashMap<String, Value>,
+    /// graph → file sync is paused (files_sync sets it): a graph edit that
+    /// wins a conflict stays pending instead of being written to the file now
+    pub hold_writes: bool,
 }
 
 pub struct Saved {
@@ -241,6 +244,7 @@ impl Graph {
             reqs: Vec::new(),
             req_idx: HashMap::new(),
             old_reqs,
+            hold_writes: false,
         };
         g.reindex();
         g.rederive_reqs();

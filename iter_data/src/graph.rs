@@ -150,7 +150,8 @@ async fn graph_get(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Re
     let g = load_ensured(&st, &name).await?;
     let mut nodes: Vec<Value> = g.live().map(StoredNode::json).collect();
     nodes.extend(g.reqs.iter().map(crate::reqs::ReqNode::json));
-    Ok(Json(json!({"project": name, "nodes": nodes, "edges": edges_json(&g), "stats": stats_of(&g)})))
+    let paused = crate::filesync::sync_paused(st.store.as_ref(), &name).await;
+    Ok(Json(json!({"project": name, "nodes": nodes, "edges": edges_json(&g), "stats": stats_of(&g), "sync_paused": paused})))
 }
 
 async fn graph_stats(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -158,6 +159,7 @@ async fn graph_stats(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> 
     let mut v = stats_of(&g);
     v["project"] = json!(name);
     v["backend"] = json!(st.store.backend_name());
+    v["sync_paused"] = json!(crate::filesync::sync_paused(st.store.as_ref(), &name).await);
     Ok(Json(v))
 }
 

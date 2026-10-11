@@ -37,6 +37,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects/{name}/files/sync", post(files_sync))
         .route("/api/projects/{name}/files/pending", get(files_pending))
+        .route("/api/projects/{name}/files/pause", get(sync_pause_get).post(sync_pause_set))
         .route("/api/projects/{name}/files/ack", post(files_ack))
         .route("/api/projects/{name}/build", post(build).get(build_get))
         .route("/api/projects/{name}/build/done", post(build_done))
@@ -250,6 +251,9 @@ pub fn apply_sync(g: &mut Graph, req: &SyncReq) -> (SyncReply, Vec<Value>) {
                 if n.file_state == PENDING_DELETE {
                     continue; // the delete still goes out through files/pending
                 }
+                if g.hold_writes {
+                    continue; // sync paused: the graph's version waits in files/pending
+                }
                 let stext = nf::render(&n.doc);
                 let x = g.get_mut(&id).unwrap();
                 if n.doc.path == path {
@@ -354,6 +358,7 @@ async fn files_sync(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Js
     user.require_writer()?;
     let _g = nodes::lock(&name).await;
     let mut g = Graph::load(st.store.as_ref(), &name).await?;
+    g.hold_writes = sync_paused(st.store.as_ref(), &name).await;
     let (rep, rows) = apply_sync(&mut g, &req);
     let saved = g.save(st.store.as_ref()).await?;
     insert_conflicts(&st, &rows).await?;
@@ -388,7 +393,38 @@ pub fn pending_ops(g: &Graph) -> Vec<Value> {
 async fn files_pending(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let g = Graph::load(st.store.as_ref(), &name).await?;
     let ops = pending_ops(&g);
+    // paused: the edits wait in the graph; the engine is handed nothing to write
+    if sync_paused(st.store.as_ref(), &name).await {
+        return Ok(Json(json!({"project": name, "count": 0, "pending": [], "paused": true, "held": ops.len()})));
+    }
     Ok(Json(json!({"project": name, "count": ops.len(), "pending": ops})))
+}
+
+/// Whether the project's graph → file sync is paused (`sync_paused` on its record).
+pub async fn sync_paused(store: &dyn crate::storage::Storage, project: &str) -> bool {
+    store.get("project", project, crate::api::NOSK).await.ok().flatten().is_some_and(|p| p.get("sync_paused").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+async fn sync_pause_get(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let g = Graph::load(st.store.as_ref(), &name).await?;
+    Ok(Json(json!({"project": name, "paused": sync_paused(st.store.as_ref(), &name).await, "held": pending_ops(&g).len()})))
+}
+
+/// `POST …/files/pause {"paused": bool}`: hold or release graph → file sync
+/// (2026-10-11: build a graph out without every step landing in the repo).
+async fn sync_pause_set(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(req): Json<Value>) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let paused = req.get("paused").and_then(|v| v.as_bool()).ok_or_else(|| ApiError::Status(StatusCode::BAD_REQUEST, "paused must be true or false".into()))?;
+    let mut proj = st.store.get("project", &name, crate::api::NOSK).await?.ok_or_else(|| ApiError::Status(StatusCode::NOT_FOUND, format!("no project {name}")))?;
+    if paused {
+        proj["sync_paused"] = json!(true);
+    } else if let Some(o) = proj.as_object_mut() {
+        o.remove("sync_paused");
+    }
+    st.store.put("project", &name, crate::api::NOSK, &proj).await?;
+    st.store.bump_seq(&name, "project").await?;
+    let g = Graph::load(st.store.as_ref(), &name).await?;
+    Ok(Json(json!({"project": name, "paused": paused, "held": pending_ops(&g).len()})))
 }
 
 struct Ack {
@@ -607,16 +643,25 @@ pub async fn files_waiting(store: &dyn crate::storage::Storage, projects: &[Stri
     if projects.is_empty() {
         return Vec::new();
     }
-    a.aql(
-        "FOR n IN node FILTER n.project IN @ps AND n.file_state IN ['pending_write', 'pending_delete'] AND n.deleted != true AND n.nodetype != 'req'
-         COLLECT p = n.project SORT p RETURN p",
-        json!({"ps": projects}),
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|v| v.as_str().map(String::from))
-    .collect()
+    let waiting: Vec<String> = a
+        .aql(
+            "FOR n IN node FILTER n.project IN @ps AND n.file_state IN ['pending_write', 'pending_delete'] AND n.deleted != true AND n.nodetype != 'req'
+             COLLECT p = n.project SORT p RETURN p",
+            json!({"ps": projects}),
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    // a paused project's edits wait: no engine is told to write them
+    let mut out = Vec::new();
+    for p in waiting {
+        if !sync_paused(store, &p).await {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// Projects (of `projects`) whose build was requested and is not done.

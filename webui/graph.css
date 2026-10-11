@@ -74,6 +74,7 @@
 .gview .g-sync.synced { color: #7de0ae; border-color: #24563a; background: #13291c; }
 .gview .g-sync.pending { color: #f0c75e; border-color: #6b5a1e; background: #2a2413; }
 .gview .g-sync.designed { color: #9ec9ff; border-color: #28405c; background: #16243a; }
+.gview .g-sync.paused { color: #f5a97f; border-color: #6b3b1e; background: #2a1a13; }
 .g-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; display: inline-block; animation: g-spin .8s linear infinite; flex: none; }
 @keyframes g-spin { to { transform: rotate(360deg); } }
 

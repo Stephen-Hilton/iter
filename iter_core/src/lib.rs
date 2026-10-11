@@ -373,6 +373,11 @@ pub struct Project {
     /// Aspirational: Running | Draining | Stopped
     #[serde(default = "default_running")]
     pub state: String,
+    /// graph → file sync held (2026-10-11): graph edits stay pending and no
+    /// engine writes them to the repo until it is lifted; repo changes still
+    /// flow into the graph
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sync_paused: bool,
     #[serde(default)]
     pub gitrepo: String,
     /// ordered usage-gates, e.g. {">98%": 0, "else": 4}

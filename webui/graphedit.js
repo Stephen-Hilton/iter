@@ -135,20 +135,37 @@
   async function poll() {
     if (!S || !G()) return;
     if (!S.root.offsetParent) { pollTimer = setTimeout(poll, 5000); return; } // the tab is hidden: look again later
-    const before = JSON.stringify(S.data.nodes.map((n) => [n.id, n.file_state, n.node_version]));
+    const before = JSON.stringify([S.data.syncPaused, S.data.nodes.map((n) => [n.id, n.file_state, n.node_version])]);
     let raw; try { raw = await S.ctx.api(P() + '/graph'); } catch (e) { pollTimer = setTimeout(poll, 8000); return; }
     const fresh = IterGraph.normalize(raw);
-    const after = JSON.stringify(fresh.nodes.map((n) => [n.id, n.file_state, n.node_version]));
+    const after = JSON.stringify([fresh.syncPaused, fresh.nodes.map((n) => [n.id, n.file_state, n.node_version])]);
     if (before !== after) { if (S.ctx.onData) S.ctx.onData(raw); IterGraph.update(raw); S.data = model().G; }
     afterData();
   }
   function renderSync() {
     const el = S.root.querySelector('#g-sync'); if (!el) return;
-    const c = counts(); const n = c.pending + c.del;
+    const c = counts(); const n = c.pending + c.del; const paused = !!(S.data && S.data.syncPaused);
+    const pb = S.root.querySelector('#g-syncpause');
+    if (pb) { pb.textContent = paused ? `▶ Resume sync${n ? ` (${n})` : ''}` : '❚❚ Pause sync'; pb.classList.toggle('g-primary', paused); }
+    if (paused) {
+      el.className = 'g-sync paused';
+      el.innerHTML = `❚❚ sync paused${n ? ` — ${n} held` : ''}`;
+      el.title = `Graph → file sync is paused: ${n} edit(s) wait in the graph and nothing is written to the repository until you resume. Changes made in the repository still come in. Click for the list.`;
+      return;
+    }
     el.className = 'g-sync ' + (n ? 'pending' : c.designed ? 'designed' : 'synced');
     el.innerHTML = n ? `<span class="g-spin"></span>${n} pending sync` : c.designed ? `✎ ${c.designed} designed` : '✓ synced';
     el.title = n ? `${c.pending} node(s) changed here and ${c.del} deleted here, waiting for an engine to write the files. Checking every 5 seconds. Click for the list.`
       : c.designed ? 'Every node exists only in the designer: Build creates the repository.' : 'Every node matches its file in the repository.';
+  }
+  /** pause / resume graph → file sync for this project (2026-10-11) */
+  async function toggleSyncPause() {
+    const paused = !!(S.data && S.data.syncPaused); const c = counts(); const n = c.pending + c.del;
+    if (paused && n && !(await K().confirm({ title: 'Resume file sync?', okLabel: 'Resume and write', text: `${n} held edit${n === 1 ? '' : 's'} will be written to the repository by the engine on its next heartbeat, in one commit.` }))) return;
+    try { await api('/files/pause', { method: 'POST', body: JSON.stringify({ paused: !paused }) }); }
+    catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return; }
+    toast(paused ? 'File sync resumed' : 'File sync paused: edits stay in the graph until you resume', { kind: 'ok', ms: 4000 });
+    await refresh();
   }
   function showPendingList() {
     const list = S.data.nodes.filter((n) => n.file_state !== 'synced' && n.nodetype !== 'req');
@@ -173,11 +190,13 @@
         return;
       }
       bar.innerHTML = '<span id="g-buildstate" class="g-buildstate hidden"></span><button type="button" id="g-conflicts" class="g-conflictsbtn hidden"></button><button type="button" class="g-sync" id="g-sync"></button>'
+        + '<button type="button" class="g-btn" id="g-syncpause" title="Hold graph → file sync while you build: edits stay in the graph and nothing is written to the repo until you resume"></button>'
         + '<button type="button" class="g-btn g-primary" data-ed="new" title="Add a node: a context, container, component, connection, test, requirement, use case or actor (N)">+ Node</button>'
         + '<button type="button" class="g-btn" data-ed="connect" title="Draw an edge from the selected node to another (C)">Connect</button>'
         + '<button type="button" class="g-btn" data-ed="paste" title="Paste the copied edge onto the selected node (⌘V)">Paste edge</button>'
         + '<button type="button" class="g-btn" data-ed="tests" title="Queue a test run for the selected node (T)">Run tests</button>';
       bar.querySelector('#g-sync').onclick = showPendingList;
+      bar.querySelector('#g-syncpause').onclick = toggleSyncPause;
       bar.querySelector('#g-conflicts').onclick = showConflicts;
       bar.querySelectorAll('[data-ed]').forEach((b) => { b.onclick = () => toolbar(b.dataset.ed); });
     }

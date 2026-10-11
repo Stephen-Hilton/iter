@@ -1338,3 +1338,37 @@ async fn dataflow_edges_carry_a_protocol() {
     assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges/protocol", Some(json!({"from": c, "kind": "calls", "to": a, "protocol": "TCP"}))).await.0, 404);
     t.done().await;
 }
+
+/// Paused graph → file sync (2026-10-11): edits made while paused stay
+/// pending, no engine is told to write them and files/pending hands out
+/// nothing; a conflict the graph wins is not written either; resuming releases
+/// every held edit at once.
+#[tokio::test]
+async fn paused_sync_holds_graph_edits_until_resumed() {
+    let t = T::new().await;
+    t.served("p").await;
+    let proj = file(NodeType::Project, "Shop", "{topdir}/global/shop.project.iter.md", |_| {});
+    t.sync("p", json!({"engine": "e1", "full": true, "files": [fjson(&proj, 0)]})).await;
+    let r = t.ok("adm", "POST", "/api/projects/p/files/pause", Some(json!({"paused": true}))).await;
+    assert_eq!(r["paused"], json!(true));
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p/graph", None).await["sync_paused"], json!(true));
+    let a = t.create("p", json!({"nodetype": "code", "level": "context", "name": "Web"})).await;
+    t.create("p", json!({"nodetype": "code", "level": "container", "name": "Api", "attach_to": id(&a)})).await;
+    t.ok("adm", "PATCH", &format!("/api/projects/p/graph/nodes/{}", id(&a)), Some(json!({"desc": "draft one"}))).await;
+    let held = t.ok("eng1", "GET", "/api/projects/p/files/pending", None).await;
+    assert_eq!((held["count"].as_u64(), held["paused"].as_bool(), held["held"].as_u64().unwrap() >= 3), (Some(0), Some(true), true), "{held}");
+    let hb = t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running"}))).await;
+    assert_eq!(hb["files_waiting"], json!([]), "no engine is told to write a paused project");
+    assert_eq!(t.node("p", &id(&a)).await["file_state"], json!("pending_write"), "the edit waits in the graph");
+    // a bad body is refused
+    assert_eq!(t.call("adm", "POST", "/api/projects/p/files/pause", Some(json!({"paused": "yes"}))).await.0, 400);
+    // resume: everything held goes out at once
+    let r = t.ok("adm", "POST", "/api/projects/p/files/pause", Some(json!({"paused": false}))).await;
+    assert_eq!(r["paused"], json!(false));
+    let ops = t.pending("p").await;
+    assert!(ops.len() >= 3, "{ops:?}");
+    let hb = t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running"}))).await;
+    assert_eq!(hb["files_waiting"], json!(["p"]));
+    assert_eq!(t.ok("adm", "GET", "/api/projects/p/graph", None).await["sync_paused"], json!(false));
+    t.done().await;
+}
