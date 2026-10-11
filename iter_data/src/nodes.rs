@@ -519,6 +519,41 @@ impl Graph {
         Ok(touched)
     }
 
+    /// The protocol of a calls / pulls / pushes edge (2026-10-11), from its owner's front matter.
+    pub fn edge_protocol(&self, from: &str, to: &str, kind: EdgeKind) -> Option<String> {
+        if !nf::DATAFLOW.contains(&kind) {
+            return None;
+        }
+        let (f, t) = (self.get(from)?, self.get(to)?);
+        nf::protocol_of(&f.doc, kind, &t.doc.path)
+    }
+
+    /// Record or clear a calls / pulls / pushes edge's protocol; the edge must
+    /// exist. Returns the owner id when its file changed.
+    pub fn set_edge_protocol(&mut self, from: &str, to: &str, kind: EdgeKind, protocol: Option<&str>, by: &str) -> Result<Option<String>, ApiError> {
+        if !nf::DATAFLOW.contains(&kind) {
+            return Err(bad(format!("only calls, pulls and pushes edges carry a protocol, not {}", kind.as_str())));
+        }
+        let (f, t) = (self.live_node(from)?.clone(), self.live_node(to)?.clone());
+        if !self.edges().contains(&Edge { from: from.to_string(), kind, to: to.to_string() }) {
+            return Err(status(StatusCode::NOT_FOUND, format!("no {} edge from {} to {}", kind.as_str(), f.doc.name, t.doc.name)));
+        }
+        if protocol.is_some_and(|p| p.trim().chars().count() > 40) {
+            return Err(bad("a protocol is a short name (TCP, UDP, gRPC, WebSocket, …)"));
+        }
+        let mut doc = f.doc.clone();
+        nf::set_protocol(&mut doc, kind, &t.doc.path, protocol).map_err(|e| bad(e.to_string()))?;
+        if doc == f.doc {
+            return Ok(None);
+        }
+        let change = match protocol.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => format!("{} {} → {} over {p}", kind.as_str(), f.doc.name, t.doc.name),
+            None => format!("{} {} → {}: protocol cleared", kind.as_str(), f.doc.name, t.doc.name),
+        };
+        self.commit_edit(from, doc, by, &change, true)?;
+        Ok(Some(from.to_string()))
+    }
+
     /// Remove one edge from every node that declares it. GlobOnly → 409.
     pub fn remove_edge(&mut self, from: &str, to: &str, kind: EdgeKind, by: &str, reason: &str) -> Result<Vec<String>, ApiError> {
         let (f, t) = (self.live_node(from)?.clone(), self.live_node(to)?.clone());
@@ -767,6 +802,20 @@ fn rewrite_refs(doc: &mut NodeDoc, old: &str, new: &str) -> bool {
     for k in ["drives", "touches", "actors", "calls", "pulls", "pushes"] {
         if let Some(v) = doc.front.get_mut(k) {
             hit |= fix_value(v);
+        }
+    }
+    // a calls / pulls / pushes edge's protocol is keyed by its target's path
+    if let Some(Value::Object(pm)) = doc.front.get_mut(nf::PROTOCOLS) {
+        for v in pm.values_mut() {
+            if let Value::Object(km) = v {
+                let keys: Vec<String> = km.keys().filter(|k| nf::expand_entry(k, &this, None).trim_end_matches('/') == old).cloned().collect();
+                for k in keys {
+                    if let Some(p) = km.remove(&k) {
+                        km.insert(new.to_string(), p);
+                        hit = true;
+                    }
+                }
+            }
         }
     }
     if let Some(Value::Object(c)) = doc.front.get_mut("connects") {

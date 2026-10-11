@@ -393,6 +393,7 @@ Live smoke: `e2e.sh --live` queues one tiny item to a real `claude` account (ski
 | POST | `graph/edges` | `{from, to, kind}` → updates the owning node (see §2.4: for supplies/connects the connection node owns it) |
 | DELETE | `graph/edges` | `{from, to, kind, reason}` |
 | POST | `graph/edges/move` | `{from, to, kind, new_from?, new_to?}` (drag an endpoint) |
+| POST | `graph/edges/protocol` | `{from, to, kind, protocol}` — a calls / pulls / pushes edge's protocol (TCP, UDP, HTTP(S), gRPC, WebSocket, GraphQL, SQL, Kafka, AMQP, MQTT, Redis, SSH, File, In-process, or any short name; null clears). Stored in the source node's `protocols: {<kind>: {<target path>: <protocol>}}`; `graph` lists it as `protocol` on the edge; `POST graph/edges` takes `protocol` too (2026-10-11) |
 | POST | `graph/nodes/{id}/testresult` | standard result JSON |
 | GET | `testlogs?node=&limit=` | test log rows |
 | POST | `files/sync`, GET `files/pending`, POST `files/ack` | §3 |

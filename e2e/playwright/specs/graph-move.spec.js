@@ -32,7 +32,7 @@ test.describe('project graph: calls edges and moving parts', () => {
     await page.keyboard.press('c');
     await expect(page.locator('#g-banner')).toContainText('Connecting from');
     // tap the target through Cytoscape: a click at its centre can land on another box while the layout settles
-    await page.evaluate((id) => IterGraph.api.cy.getElementById(id).emit('tap'), ids.gateway);
+    await page.evaluate((id) => { IterGraph.api.cy.getElementById(id).emit('tap'); }, ids.gateway);
     await expect(dialog(page)).toBeVisible();
     const first = dialog(page).locator('.kit-radio').first();
     await expect(first).toContainText('Web app calls API gateway');
@@ -40,6 +40,9 @@ test.describe('project graph: calls edges and moving parts', () => {
     await expect(dialog(page)).toContainText('pushes data to');
     await expect(dialog(page)).toContainText('owns');
     await shot(page, 'graph-edge-calls');
+    await dialog(page).locator('.kit-primary').click();
+    // then: over what? (left unset here)
+    await expect(dialog(page)).toContainText('over what?');
     await dialog(page).locator('.kit-primary').click();
     await expect.poll(async () => hasEdge(await admin.graph(PROJ), ids.webapp, 'calls', ids.gateway)).toBe(true);
     const wa = await admin.get(`/api/projects/${PROJ}/graph/nodes/${ids.webapp}`);

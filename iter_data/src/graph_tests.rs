@@ -1302,3 +1302,39 @@ async fn rename_moves_the_folder_made_from_the_name() {
     assert_eq!(plan, json!({}));
     t.done().await;
 }
+
+/// A calls / pulls / pushes edge carries a protocol: set as it is drawn or
+/// later, listed on the edge, kept through a target move and an end move,
+/// cleared on request, and refused on other kinds (2026-10-11).
+#[tokio::test]
+async fn dataflow_edges_carry_a_protocol() {
+    let t = T::new().await;
+    t.project("p").await;
+    let ctx = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "Shop"})).await);
+    let a = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Web", "attach_to": ctx})).await);
+    let b = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Orders", "attach_to": ctx})).await);
+    let c = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Billing", "attach_to": ctx})).await);
+    let proto = |g: &Value, f: &str, k: &str, to: &str| -> Value {
+        g["edges"].as_array().unwrap().iter().find(|e| e["from"] == f && e["kind"] == k && e["to"] == to).map(|e| e["protocol"].clone()).unwrap_or(Value::Null)
+    };
+    t.ok("adm", "POST", "/api/projects/p/graph/edges", Some(json!({"from": a, "kind": "calls", "to": b, "protocol": "gRPC"}))).await;
+    assert_eq!(proto(&t.graph("p").await, &a, "calls", &b), json!("gRPC"));
+    assert_eq!(t.node("p", &a).await["front"]["protocols"], json!({"calls": {"{topdir}/src/shop/orders/orders.code.iter.md": "gRPC"}}));
+    t.ok("adm", "POST", "/api/projects/p/graph/edges", Some(json!({"from": a, "kind": "pushes", "to": b}))).await;
+    assert_eq!(proto(&t.graph("p").await, &a, "pushes", &b), Value::Null, "no protocol until one is set");
+    t.ok("adm", "POST", "/api/projects/p/graph/edges/protocol", Some(json!({"from": a, "kind": "pushes", "to": b, "protocol": "UDP"}))).await;
+    assert_eq!(proto(&t.graph("p").await, &a, "pushes", &b), json!("UDP"));
+    // the target's file moves: the protocol follows its path
+    t.ok("adm", "POST", &format!("/api/projects/p/graph/nodes/{b}/move"), Some(json!({"path": "{topdir}/src/shop/order_book/order_book.code.iter.md"}))).await;
+    assert_eq!(proto(&t.graph("p").await, &a, "calls", &b), json!("gRPC"));
+    // the edge's end moves to another node: the protocol goes with it
+    t.ok("adm", "POST", "/api/projects/p/graph/edges/move", Some(json!({"from": a, "kind": "calls", "to": b, "new_to": c}))).await;
+    let g = t.graph("p").await;
+    assert_eq!(proto(&g, &a, "calls", &c), json!("gRPC"));
+    // cleared, and refused on a kind that has none or an edge that does not exist
+    t.ok("adm", "POST", "/api/projects/p/graph/edges/protocol", Some(json!({"from": a, "kind": "calls", "to": c, "protocol": null}))).await;
+    assert_eq!(proto(&t.graph("p").await, &a, "calls", &c), Value::Null);
+    assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges/protocol", Some(json!({"from": ctx, "kind": "codenodes", "to": a, "protocol": "TCP"}))).await.0, 400);
+    assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges/protocol", Some(json!({"from": c, "kind": "calls", "to": a, "protocol": "TCP"}))).await.0, 404);
+    t.done().await;
+}

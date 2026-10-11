@@ -1077,6 +1077,28 @@ fn edges_code_calls_pulls_pushes() {
     assert_eq!(EdgeKind::from_name("pushes"), Some(EdgeKind::Pushes));
 }
 
+/// A calls / pulls / pushes edge can carry a protocol, kept in `protocols`
+/// beside the edge; removing the edge drops it, and only those kinds take one.
+#[test]
+fn dataflow_edges_carry_a_protocol() {
+    let mut w = doc(NodeType::Code, "{topdir}/src/webui/webui.code.iter.md", "Webui");
+    add_child(&mut w, EdgeKind::Calls, DATA).unwrap();
+    add_child(&mut w, EdgeKind::Pushes, DATA).unwrap();
+    assert_eq!(protocol_of(&w, EdgeKind::Calls, DATA), None);
+    set_protocol(&mut w, EdgeKind::Calls, DATA, Some("gRPC")).unwrap();
+    set_protocol(&mut w, EdgeKind::Pushes, DATA, Some("UDP")).unwrap();
+    assert_eq!(w.front["protocols"], json!({"calls": {DATA: "gRPC"}, "pushes": {DATA: "UDP"}}));
+    assert_eq!(protocol_of(&w, EdgeKind::Calls, DATA).as_deref(), Some("gRPC"));
+    set_protocol(&mut w, EdgeKind::Calls, DATA, Some("HTTPS")).unwrap();
+    assert_eq!(protocol_of(&w, EdgeKind::Calls, DATA).as_deref(), Some("HTTPS"), "a new protocol replaces the old");
+    remove_child(&mut w, EdgeKind::Calls, DATA).unwrap();
+    assert_eq!(w.front["protocols"], json!({"pushes": {DATA: "UDP"}}), "removing the edge drops its protocol");
+    set_protocol(&mut w, EdgeKind::Pushes, DATA, None).unwrap();
+    assert!(w.front.get("protocols").is_none(), "an empty map is dropped");
+    assert!(matches!(set_protocol(&mut w, EdgeKind::Codenodes, DATA, Some("TCP")), Err(NodeErr::WrongKind { .. })));
+    assert!(KNOWN_PROTOCOLS.contains(&"WebSocket"));
+}
+
 #[test]
 fn edges_actor_drives_touches() {
     let np = node_paths();

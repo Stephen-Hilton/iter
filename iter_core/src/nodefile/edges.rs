@@ -283,5 +283,59 @@ pub fn remove_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str) -> Res
         return Err(NodeErr::NoSuchChild(target));
     }
     write_slot(doc, &slot, rest);
+    if DATAFLOW.contains(&kind) {
+        let _ = set_protocol(doc, kind, &target, None);
+    }
+    Ok(())
+}
+
+/// The front-matter key holding the protocol of a code node's direct edges:
+/// `protocols: {calls: {"<target path>": "gRPC"}, pushes: {…}}` (2026-10-11).
+pub const PROTOCOLS: &str = "protocols";
+
+/// The protocols the webui offers for a calls / pulls / pushes edge; any other
+/// short name is accepted too.
+pub const KNOWN_PROTOCOLS: &[&str] =
+    &["TCP", "UDP", "HTTP", "HTTPS", "gRPC", "WebSocket", "GraphQL", "SQL", "Kafka", "AMQP", "MQTT", "Redis", "SSH", "File", "In-process"];
+
+/// The protocol recorded for this node's `kind` edge to `target_path`, if any.
+pub fn protocol_of(doc: &NodeDoc, kind: EdgeKind, target_path: &str) -> Option<String> {
+    let target = expand_entry(target_path, &doc.path, None).trim_end_matches('/').to_string();
+    let m = doc.front.get(PROTOCOLS)?.get(kind.as_str())?.as_object()?;
+    m.iter()
+        .find(|(k, _)| expand_entry(k, &doc.path, None).trim_end_matches('/') == target)
+        .and_then(|(_, v)| v.as_str())
+        .map(str::to_string)
+        .filter(|p| !p.trim().is_empty())
+}
+
+/// Record (Some) or clear (None) the protocol of this node's `kind` edge to
+/// `target_path`; only calls / pulls / pushes carry one. Empty maps are dropped.
+pub fn set_protocol(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str, protocol: Option<&str>) -> Result<(), NodeErr> {
+    if !DATAFLOW.contains(&kind) || doc.nodetype != NodeType::Code || doc.is_connection() {
+        return Err(NodeErr::WrongKind { kind, nodetype: doc.nodetype });
+    }
+    let target = expand_entry(target_path, &doc.path, None).trim_end_matches('/').to_string();
+    let this = doc.path.clone();
+    let root = doc.front.entry(PROTOCOLS).or_insert_with(|| Value::Object(Map::new()));
+    if !root.is_object() {
+        *root = Value::Object(Map::new());
+    }
+    let rm = root.as_object_mut().unwrap();
+    let km = rm.entry(kind.as_str()).or_insert_with(|| Value::Object(Map::new()));
+    if !km.is_object() {
+        *km = Value::Object(Map::new());
+    }
+    let km = km.as_object_mut().unwrap();
+    km.retain(|k, _| expand_entry(k, &this, None).trim_end_matches('/') != target);
+    if let Some(p) = protocol.map(str::trim).filter(|p| !p.is_empty()) {
+        km.insert(target, Value::String(p.to_string()));
+    }
+    if km.is_empty() {
+        rm.remove(kind.as_str());
+    }
+    if rm.is_empty() {
+        doc.front.remove(PROTOCOLS);
+    }
     Ok(())
 }

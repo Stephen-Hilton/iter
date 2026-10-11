@@ -38,6 +38,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/graph/nodes/{id}/rename_plan", get(node_rename_plan))
         .route("/api/projects/{name}/graph/edges", post(edge_add).delete(edge_remove))
         .route("/api/projects/{name}/graph/edges/move", post(edge_move))
+        .route("/api/projects/{name}/graph/edges/protocol", post(edge_protocol))
         .merge(crate::testlogs::routes())
         .merge(crate::reqs::routes())
         .merge(crate::filesync::routes())
@@ -84,7 +85,16 @@ pub(crate) async fn load_ensured(st: &AppState, project: &str) -> Result<Graph, 
 }
 
 fn edges_json(g: &Graph) -> Vec<Value> {
-    g.all_edges().into_iter().map(|(f, k, t)| json!({"from": f, "kind": k, "to": t})).collect()
+    g.all_edges()
+        .into_iter()
+        .map(|(f, k, t)| {
+            let mut e = json!({"from": f, "kind": k, "to": t});
+            if let Some(p) = EdgeKind::from_name(&k).and_then(|kind| g.edge_protocol(&f, &t, kind)) {
+                e["protocol"] = json!(p);
+            }
+            e
+        })
+        .collect()
 }
 
 fn stats_of(g: &Graph) -> Value {
@@ -663,9 +673,28 @@ async fn edge_add(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Json
     let (f, t, k) = edge_req(&req)?;
     let _g = nodes::lock(&name).await;
     let mut g = Graph::load(st.store.as_ref(), &name).await?;
-    let touched: Vec<String> = g.add_edge(&f, &t, k, &user.sub)?.into_iter().collect();
+    let mut touched: Vec<String> = g.add_edge(&f, &t, k, &user.sub)?.into_iter().collect();
+    // a calls / pulls / pushes edge may name its protocol as it is drawn
+    let protocol = req.get("protocol").and_then(|p| p.as_str()).map(str::trim).filter(|p| !p.is_empty());
+    if let Some(p) = protocol {
+        touched.extend(g.set_edge_protocol(&f, &t, k, Some(p), &user.sub)?);
+        touched.dedup();
+    }
     g.save(st.store.as_ref()).await?;
-    Ok(Json(json!({"edge": {"from": f, "kind": k.as_str(), "to": t}, "touched": touched, "nodes": touched_nodes(&g, &touched)})))
+    Ok(Json(json!({"edge": {"from": f, "kind": k.as_str(), "to": t, "protocol": protocol}, "touched": touched, "nodes": touched_nodes(&g, &touched)})))
+}
+
+/// `POST …/graph/edges/protocol` `{from, to, kind, protocol}`: set (or, with
+/// an empty/null protocol, clear) a calls / pulls / pushes edge's protocol.
+async fn edge_protocol(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(req): Json<Value>) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let (f, t, k) = edge_req(&req)?;
+    let protocol = req.get("protocol").and_then(|p| p.as_str()).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string);
+    let _g = nodes::lock(&name).await;
+    let mut g = Graph::load(st.store.as_ref(), &name).await?;
+    let touched: Vec<String> = g.set_edge_protocol(&f, &t, k, protocol.as_deref(), &user.sub)?.into_iter().collect();
+    g.save(st.store.as_ref()).await?;
+    Ok(Json(json!({"edge": {"from": f, "kind": k.as_str(), "to": t, "protocol": protocol}, "touched": touched, "nodes": touched_nodes(&g, &touched)})))
 }
 
 async fn edge_remove(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Query(q): Query<ReasonQ>, body: Bytes) -> Result<Json<Value>, ApiError> {
@@ -695,9 +724,14 @@ async fn edge_move(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
     }
     let _g = nodes::lock(&name).await;
     let mut g = Graph::load(st.store.as_ref(), &name).await?;
+    let protocol = g.edge_protocol(&f, &t, k);
     let mut touched = g.remove_edge(&f, &t, k, &user.sub, "moved to another node")?;
     if let Some(o) = g.add_edge(&nf_, &nt, k, &user.sub)? {
         touched.push(o);
+    }
+    // the protocol goes with the edge
+    if let Some(p) = protocol.as_deref() {
+        touched.extend(g.set_edge_protocol(&nf_, &nt, k, Some(p), &user.sub)?);
     }
     touched.sort();
     touched.dedup();

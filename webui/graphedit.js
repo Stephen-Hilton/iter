@@ -493,10 +493,12 @@
       return;
     }
     const items = S.canEdit ? [
-      { key: 'configure', label: 'Configure…', kbd: 'E' }, { key: 'copy', label: 'Copy edge', kbd: K().MOD + 'C', hint: 'then select a node and paste' },
+      { key: 'configure', label: 'Configure…', kbd: 'E' },
+      ...(DATAFLOW_KINDS.includes(r.kind) ? [{ key: 'protocol', label: `Protocol… (${r.protocol || 'not set'})`, hint: 'TCP, UDP, gRPC, WebSocket… — drawn as "calls (gRPC)"' }] : []),
+      { key: 'copy', label: 'Copy edge', kbd: K().MOD + 'C', hint: 'then select a node and paste' },
       { sep: true }, { key: 'remove', label: 'Remove edge…', kbd: 'Del', danger: true },
     ] : [{ key: 'configure', label: 'View…' }, { key: 'copy', label: 'Copy edge' }];
-    K().menu(host, pos, `${r.kind} · ${nameOf(r.from)} → ${nameOf(r.to)}`, items, (k) => ({ configure: () => configureEdge(r), copy: () => copyEdge(r), remove: () => removeEdge(r) })[k]());
+    K().menu(host, pos, `${r.kind} · ${nameOf(r.from)} → ${nameOf(r.to)}`, items, (k) => ({ configure: () => configureEdge(r), protocol: () => editProtocol(r), copy: () => copyEdge(r), remove: () => removeEdge(r) })[k]());
   }
   function canvasMenu(pos) {
     if (!S.canEdit) return;
@@ -867,19 +869,27 @@
         { key: 'kind', value: r.kind, type: 'select', options: kinds.map((k) => ({ value: k, label: `${k} — ${VERB[k]}` })) },
         { key: 'from', value: r.from, type: 'select', options: nodes.map(opt) },
         { key: 'to', value: r.to, type: 'select', options: nodes.map(opt) },
+        ...(DATAFLOW_KINDS.includes(r.kind) ? [{ key: 'protocol', value: r.protocol || '', type: 'text', help: 'TCP, UDP, HTTP(S), gRPC, WebSocket, GraphQL, SQL, Kafka, AMQP, MQTT, Redis, SSH, File, In-process — or any short name; empty = not set' }] : []),
       ],
       onSave: async ({ changed }) => {
         if (!Object.keys(changed).length) return true;
         const nk = changed.kind || r.kind; const nf = changed.from || r.from; const nt = changed.to || r.to;
+        const onlyProtocol = Object.keys(changed).every((k) => k === 'protocol');
         const F = node(nf); const T = node(nt);
         if (nf === nt) throw new Error('An edge cannot join a node to itself.');
         if (!RULES[nk] || !RULES[nk](F, T)) throw new Error(`A "${nk}" edge cannot join a ${typeLabel(F).toLowerCase()} to a ${typeLabel(T).toLowerCase()}.`);
-        if (changed.kind) {
+        if (onlyProtocol) {
+          // nothing to move
+        } else if (changed.kind) {
           await api('/graph/edges', { method: 'DELETE', body: JSON.stringify({ from: r.from, to: r.to, kind: r.kind, reason: `kind changed to ${nk} in the graph` }) });
-          await api('/graph/edges', { method: 'POST', body: JSON.stringify({ from: nf, to: nt, kind: nk }) });
+          const add = { from: nf, to: nt, kind: nk }; if (DATAFLOW_KINDS.includes(nk) && (changed.protocol ?? r.protocol)) add.protocol = changed.protocol ?? r.protocol;
+          await api('/graph/edges', { method: 'POST', body: JSON.stringify(add) });
         } else {
           const body = { from: r.from, to: r.to, kind: r.kind }; if (nf !== r.from) body.new_from = nf; if (nt !== r.to) body.new_to = nt;
           await api('/graph/edges/move', { method: 'POST', body: JSON.stringify(body) });
+        }
+        if ('protocol' in changed && !changed.kind && DATAFLOW_KINDS.includes(nk)) {
+          await api('/graph/edges/protocol', { method: 'POST', body: JSON.stringify({ from: nf, to: nt, kind: nk, protocol: String(changed.protocol || '').trim() || null }) });
         }
         toast('Edge saved', { kind: 'ok' });
         await refresh();
@@ -905,10 +915,11 @@
     if (!pick) return;
     await addEdge(pick.from, pick.to, c.kind);
   }
-  async function addEdge(from, to, kind) {
-    try { await api('/graph/edges', { method: 'POST', body: JSON.stringify({ from, to, kind }) }); }
+  async function addEdge(from, to, kind, protocol) {
+    const body = { from, to, kind }; if (protocol) body.protocol = protocol;
+    try { await api('/graph/edges', { method: 'POST', body: JSON.stringify(body) }); }
     catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return false; }
-    toast(`${nameOf(from)} ${VERB[kind] || kind} ${nameOf(to)}`, { kind: 'ok' });
+    toast(`${nameOf(from)} ${VERB[kind] || kind} ${nameOf(to)}${protocol ? ` over ${protocol}` : ''}`, { kind: 'ok' });
     [from, to].forEach((x) => { const nn = node(x); if (nn) G().showType(nn.level); });
     await refresh();
     G().focusEdgeId(`e:${from}|${kind}|${to}`);
@@ -962,6 +973,8 @@
     const move = (e) => { const c = cy.getElementById('__draw_cursor'); if (c.nonempty()) c.position(e.position); };
     cy.on('mousemove', move);
     DRAW = { from: n, move };
+    // while picking the other end, nothing is faded: every node, nested or not, must be seen to be picked
+    cy.elements('.selfade, .faded, .hl').removeClass('selfade faded hl');
     S.root.querySelector('#g-cywrap').classList.add('g-drawing');
     G().banner(`Connecting from <b>${esc(n.name)}</b>: click the node it should reach. <kbd>Esc</kbd> cancels.`);
   }
@@ -984,7 +997,36 @@
     const fresh = opts.filter((o) => !exists(o.value));
     if (!fresh.length) { toast('That edge is already there.', { kind: 'warn' }); return; }
     const pick = fresh.length === 1 ? fresh[0].value : await K().choose({ title: 'Connect', text: 'What does this edge mean?', options: fresh, okLabel: 'Add edge' });
-    if (pick) await addEdge(pick.from, pick.to, pick.kind);
+    if (!pick) return;
+    let protocol = '';
+    if (DATAFLOW_KINDS.includes(pick.kind)) {
+      const p = await pickProtocol(`${nameOf(pick.from)} ${pick.kind} ${nameOf(pick.to)}: over what?`, '', 'Add edge');
+      if (p === null) return;
+      protocol = p;
+    }
+    await addEdge(pick.from, pick.to, pick.kind, protocol);
+  }
+  /** The protocol of a calls / pulls / pushes edge: a list (any other short name via "Other…"); '' = not set, null = cancelled */
+  function pickProtocol(title, current, okLabel) {
+    const list = (window.IterGraph && IterGraph.PROTOCOLS) || ['TCP', 'UDP', 'HTTP', 'HTTPS', 'gRPC', 'WebSocket'];
+    const other = current && !list.includes(current);
+    const body = `<p class="kit-text">The protocol is drawn on the line, e.g. <b>calls (gRPC)</b>.</p>
+      <select id="pp-sel" style="width:100%"><option value="">(not set)</option>${list.map((p) => `<option value="${esc(p)}" ${p === current ? 'selected' : ''}>${esc(p)}</option>`).join('')}<option value="__other" ${other ? 'selected' : ''}>Other…</option></select>
+      <input type="text" id="pp-other" placeholder="e.g. NATS, SFTP, Thrift" value="${other ? esc(current) : ''}" style="width:100%;margin-top:6px;${other ? '' : 'display:none'}">`;
+    return K().modal({ title, body, confirmDiscard: false,
+      buttons: [{ label: 'Cancel', value: null }, { label: okLabel || 'Save', value: 'ok', primary: true }],
+      onOpen: (d) => { const sel = d.querySelector('#pp-sel'); const o = d.querySelector('#pp-other'); sel.addEventListener('change', () => { o.style.display = sel.value === '__other' ? '' : 'none'; if (sel.value === '__other') o.focus(); }); },
+      onButton: (v, d) => { const sel = d.querySelector('#pp-sel').value; const p = sel === '__other' ? d.querySelector('#pp-other').value.trim() : sel; if (sel === '__other' && !p) { d.setError('Name the protocol, or pick one from the list'); return false; } return { p }; } })
+      .then((r) => (r ? r.p : null));
+  }
+  async function editProtocol(r) {
+    const p = await pickProtocol(`${nameOf(r.from)} ${r.kind} ${nameOf(r.to)}: over what?`, r.protocol || '', 'Save');
+    if (p === null || p === (r.protocol || '')) return;
+    try { await api('/graph/edges/protocol', { method: 'POST', body: JSON.stringify({ from: r.from, to: r.to, kind: r.kind, protocol: p || null }) }); }
+    catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return; }
+    toast(p ? `${nameOf(r.from)} ${r.kind} ${nameOf(r.to)} over ${p}` : 'Protocol cleared', { kind: 'ok' });
+    await refresh();
+    G().focusEdgeId(`e:${r.from}|${r.kind}|${r.to}`);
   }
 
   // ------------------------------------------------------------------ node actions

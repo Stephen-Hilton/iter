@@ -48,6 +48,11 @@
   };
   const REQ_STATUS = ['draft', 'agreed', 'done'];
   const isReqFile = (n) => !!n && (n.nodetype === 'bizreq' || n.nodetype === 'techreq');
+  const DATAFLOW_KINDS = ['calls', 'pulls', 'pushes'];
+  /** the protocols offered for a calls / pulls / pushes edge (any other short name is accepted too) */
+  const PROTOCOLS = ['TCP', 'UDP', 'HTTP', 'HTTPS', 'gRPC', 'WebSocket', 'GraphQL', 'SQL', 'Kafka', 'AMQP', 'MQTT', 'Redis', 'SSH', 'File', 'In-process'];
+  /** how edges are drawn: straight (parallel ones bow apart), curved, or elbow (right angles) */
+  const LINE_MODES = { straight: 'straight', curved: 'curved', elbow: 'elbow' };
   const EDGE_KINDS = {
     codenodes: { label: 'owns (child code node)', verb: 'owns', color: '#8b95a7', line: 'dotted', width: 1.7 },
     tests: { label: 'tested by', verb: 'is tested by', color: '#22c55e', line: 'dashed', width: 1.3 },
@@ -118,7 +123,7 @@
       const id = `${from}|${kind}|${to}`;
       if (eseen.has(id)) continue;
       eseen.add(id);
-      edges.push({ id, from, kind, to });
+      edges.push({ id, from, kind, to, protocol: e.protocol ? String(e.protocol) : '' });
     }
     // a req node always hangs off its file, whether or not the server listed the edge
     for (const n of nodes) {
@@ -248,6 +253,7 @@
     <div class="g-group g-tools">
       <button class="g-btn" id="g-fit" title="Fit the whole drawing on screen (F)">Fit</button>
       <button class="g-btn" id="g-relayout" title="Run the current layout again (R)">Re-layout</button>
+      <label class="g-chk" title="How edges are drawn. Two edges between the same nodes never lie on top of each other: they bow apart (straight, curved) or turn at different points (elbow)">lines <select id="g-lines"><option value="straight">straight</option><option value="curved">curved</option><option value="elbow">elbow</option></select></label>
       <button class="g-btn hidden" id="g-showhidden" title="Put back every node you hid with Hide this node">Show hidden</button>
       <button class="g-btn g-icon" id="g-help" title="Keyboard shortcuts and how to edit (?)" aria-label="Help">?</button>
     </div>
@@ -306,7 +312,7 @@
     update(raw) { if (current && current.api) current.api.update(normalize(raw)); },
     get current() { return current; },
     get api() { return current && current.api; },
-    registerLayouts, normalize, LEVELS, LEVEL_ORDER, EDGE_KINDS, FILE_STATES, CODE_LEVELS,
+    registerLayouts, normalize, LEVELS, LEVEL_ORDER, EDGE_KINDS, PROTOCOLS, DATAFLOW_KINDS, FILE_STATES, CODE_LEVELS,
   };
 
   function start(ROOT, G0, CTX, SIGNAL) {
@@ -409,6 +415,8 @@
     let PINS = null; // IterKit.pins, once the drawing exists
     // "auto-fit nodes" (2026-10-11): off = Cluster never moves a node by itself; positions are kept in this browser
     let AUTOFIT = true;
+    let LINE_MODE = 'straight';
+    try { LINE_MODE = LINE_MODES[localStorage.getItem('iter5.graph.lines')] || 'straight'; } catch (e) { /* storage blocked */ }
     try { AUTOFIT = localStorage.getItem('iter5.graph.autofit') !== '0'; } catch (e) { /* storage blocked */ }
     const POS_KEY = () => 'iter5.graph.pos.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '');
     function savePositions() {
@@ -540,6 +548,8 @@
       let color = '#94a3b8'; let line = 'solid'; let width = 1.3; let arrow = 'triangle'; let label = ''; const cls = [m.type];
       if (m.type === 'link') {
         const k = EDGE_KINDS[m.kind] || {}; color = k.color || color; line = k.line || line; width = k.width || width; cls.push('k-' + m.kind);
+        // a part's direct edge names what it does, and over what: "calls (gRPC)" (2026-10-11)
+        if (DATAFLOW_KINDS.includes(m.kind)) label = m.kind + (m.link && m.link.protocol ? ` (${m.link.protocol})` : '');
       } else if (m.type === 'flow') {
         color = m.kind === 'process' ? '#3b82f6' : '#f97316'; width = 3; label = stepName(m);
         if (m.branch) { label += '*'; cls.push('branch'); }
@@ -752,8 +762,14 @@
         { selector: 'edge', style: {
           width: 'data(width)', 'line-color': 'data(color)', 'line-style': 'data(line)', 'target-arrow-color': 'data(color)', 'target-arrow-shape': 'data(arrow)',
           'arrow-scale': 0.85, 'curve-style': 'straight', opacity: 0.7 } },
-        // every edge is a straight line (2026-10-08); a self-loop has no straight form
+        // line shapes (2026-10-11): straight (two edges between the same nodes bow apart so neither hides
+        // the other), curved, or elbow; a self-loop has no straight form
+        { selector: 'edge.lm-straight.curved', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': 'data(cpd)', 'control-point-weights': 0.5 } },
+        { selector: 'edge.lm-curved', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': 'data(cpd2)', 'control-point-weights': 0.5 } },
+        { selector: 'edge.lm-elbow', style: { 'curve-style': 'taxi', 'taxi-direction': 'auto', 'taxi-turn': 'data(turn)', 'taxi-turn-min-distance': 12 } },
+        { selector: 'edge.lm-elbow.curved', style: { 'source-endpoint': 'data(se)', 'target-endpoint': 'data(se)' } },
         { selector: 'edge:loop', style: { 'curve-style': 'bezier' } },
+        { selector: 'edge.k-calls, edge.k-pulls, edge.k-pushes', style: { label: 'data(label)', 'font-size': 11, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.85, 'text-background-padding': '1px', 'text-rotation': 'autorotate', opacity: 0.95 } },
         { selector: 'edge.k-codenodes', style: { opacity: 0.55, 'arrow-scale': 0.6 } },
         { selector: 'edge.k-reqs, edge.k-tests', style: { opacity: 0.55 } },
         { selector: 'edge.k-supplies, edge.k-connects', style: { opacity: 0.9, 'arrow-scale': 1 } },
@@ -772,7 +788,10 @@
         { selector: '.dim', style: { opacity: 0.12 } },
         { selector: 'node.dim', style: { 'text-opacity': 0.35 } },
         { selector: '.faded', style: { opacity: 0.1 } },
-        { selector: '.selfade', style: { opacity: 0.16 } },
+        { selector: '.selfade', style: { opacity: 0.2 } },
+        // a box's opacity multiplies into everything drawn inside it, so a faded box dims only its own fill,
+        // border and name: a node inside a faded box stays visible (2026-10-11: a nested target vanished)
+        { selector: 'node:parent.selfade, node:parent.faded, node:parent.dim', style: { opacity: 1, 'background-opacity': 0.04, 'border-opacity': 0.3, 'text-opacity': 0.35 } },
         { selector: 'edge.hl', style: { opacity: 1, width: 3, 'z-index': 20 } },
         { selector: 'node.hl', style: { 'z-index': 20 } },
         { selector: 'node.match', style: { 'overlay-color': '#facc15', 'overlay-opacity': 0.45, 'overlay-padding': 7 } },
@@ -895,10 +914,18 @@
         const classes = [vis.cls];
         if (v.uc && state.dim && m.type !== 'flow' && m.type !== 'start') classes.push('dim');
         if (cpds[i] !== null) classes.push('curved');
-        els.push({ group: 'edges', classes: classes.join(' '), data: { id: eid, source: m.source, target: m.target, cpd: cpds[i] || 0, color: vis.color, line: vis.line, width: vis.width, arrow: vis.arrow, label: vis.label,
+        classes.push('lm-' + LINE_MODE);
+        // curved: every line bows (parallel ones by their spread); elbow: parallel ones turn at different points
+        const cpd = cpds[i] || 0; const cpd2 = cpds[i] !== null ? cpd : 28;
+        const turn = cpds[i] !== null ? `${Math.max(12, Math.min(88, Math.round(50 + cpd / 3)))}%` : '50%';
+        // elbow: parallel lines also leave and reach their nodes a few px apart, so no leg is shared
+        const off = Math.max(-12, Math.min(12, Math.round(cpd / 6))); const se = `${off}px ${off}px`;
+        els.push({ group: 'edges', classes: classes.join(' '), data: { id: eid, source: m.source, target: m.target, cpd, cpd2, turn, se, color: vis.color, line: vis.line, width: vis.width, arrow: vis.arrow, label: vis.label,
           kind: m.kind || '', from: m.type === 'link' ? m.link.from : '', to: m.type === 'link' ? m.link.to : '' } });
       });
       cy.batch(() => { cy.elements().remove(); cy.add(els); cy.nodes(':parent').forEach((p) => { p.toggleClass('nest', p.children(':parent').nonempty()); }); });
+      // a line between a box and something inside it has overlapping ends: only the plain straight style can draw it
+      cy.edges().forEach((e) => { const sn = e.source(); const tn = e.target(); if (sn.ancestors().contains(tn) || tn.ancestors().contains(sn)) Object.keys(LINE_MODES).forEach((k) => e.removeClass('lm-' + k)); });
       $('empty').classList.toggle('hidden', cy.nodes().nonempty());
       $('empty').innerHTML = HIDE_TYPES.size && G.nodes.length ? 'Nothing to show: every node type on this project is switched off above. <a href="#" id="g-showall">Show all types</a>' : 'Nothing to show with these settings.';
       const sa = $('showall'); if (sa) sa.onclick = (e) => { e.preventDefault(); HIDE_TYPES.clear(); render(); };
@@ -1368,6 +1395,7 @@
       return `<h2><span class="g-eswatch big" style="background:${k.color}"></span>${esc(k.label)}</h2>
         <div class="g-edgeends"><div>${nodeLink(m.source)}<span class="muted">${esc((LEVELS[from && from.level] || {}).label || '')}</span></div><div class="g-edgearrow">${esc(VERB_OUT[m.kind] || m.kind)} →</div><div>${nodeLink(m.target)}<span class="muted">${esc((LEVELS[to && to.level] || {}).label || '')}</span></div></div>
         <div class="g-actions-slot"></div>
+        ${DATAFLOW_KINDS.includes(m.kind) ? `<p>Protocol: <b>${esc((m.link && m.link.protocol) || 'not set')}</b> <span class="muted">(right-click the edge: Protocol…)</span></p>` : ''}
         <p class="muted">Recorded in <b>${esc(owner ? owner.name : '')}</b>'s file, under <code>${esc(where)}</code>. Drag either end of the selected edge onto another node to move it.</p>`;
     }
 
@@ -1542,7 +1570,7 @@
       const uc = state.uc ? ucById.get(state.uc) : null;
       ROOT.querySelectorAll('.ucopt').forEach((el) => el.classList.toggle('hidden', !uc));
       ROOT.querySelectorAll('.wholeopt').forEach((el) => el.classList.toggle('hidden', !!uc || state.layout !== 'cluster'));
-      $('dim').checked = state.dim; $('own').checked = state.own; $('autofit').checked = AUTOFIT;
+      $('dim').checked = state.dim; $('own').checked = state.own; $('autofit').checked = AUTOFIT; $('lines').value = LINE_MODE;
       ROOT.querySelectorAll('.clusteropt').forEach((el) => el.classList.toggle('hidden', state.layout !== 'cluster'));
       ROOT.querySelectorAll('#g-layouts button').forEach((b) => {
         b.classList.toggle('on', b.dataset.layout === state.layout);
@@ -1567,6 +1595,11 @@
     });
     $('dim').addEventListener('change', (ev) => { state.dim = ev.target.checked; if (state.dim && state.layout === 'sequence') state.layout = 'tiered'; render(); });
     $('own').addEventListener('change', (ev) => { state.own = ev.target.checked; render({ keep: snapshot() }); });
+    $('lines').addEventListener('change', (ev) => {
+      LINE_MODE = LINE_MODES[ev.target.value] || 'straight';
+      try { localStorage.setItem('iter5.graph.lines', LINE_MODE); } catch (e) { /* storage blocked */ }
+      cy.edges().forEach((e) => { if (e.classes().some((c) => c.startsWith('lm-'))) { Object.keys(LINE_MODES).forEach((k) => e.removeClass('lm-' + k)); e.addClass('lm-' + LINE_MODE); } });
+    });
     $('autofit').addEventListener('change', (ev) => {
       AUTOFIT = ev.target.checked;
       try { localStorage.setItem('iter5.graph.autofit', AUTOFIT ? '1' : '0'); } catch (e) { /* storage blocked */ }
