@@ -1232,3 +1232,45 @@ async fn mcp_req_tools() {
     }
     t.done().await;
 }
+
+/// A container moves into another context, a component out of its container
+/// to the top level, and back in; a move into its own descendant is refused
+/// (2026-10-10: the owner could only be set when a node was created).
+#[tokio::test]
+async fn parts_move_between_owners() {
+    let t = T::new().await;
+    t.project("p").await;
+    let a = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "Shop"})).await);
+    let b = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "Back office"})).await);
+    let x = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Orders", "attach_to": a})).await);
+    let y = id(&t.create("p", json!({"nodetype": "code", "level": "component", "name": "Ledger", "attach_to": x})).await);
+    let pid = id(find(&t.graph("p").await, "p"));
+    let mv = |n: &str, p: Value| (format!("/api/projects/p/graph/nodes/{n}/parent"), json!({"parent": p}));
+    // container: Shop -> Back office
+    let (u, b1) = mv(&x, json!(b));
+    let r = t.ok("adm", "POST", &u, Some(b1)).await;
+    assert_eq!(r["touched"].as_array().unwrap().len(), 2, "old and new owner files change: {r}");
+    let g = t.graph("p").await;
+    assert!(has_edge(&g, &b, "codenodes", &x) && !has_edge(&g, &a, "codenodes", &x));
+    assert!(has_edge(&g, &x, "codenodes", &y), "its own parts move with it");
+    // component out of its container to the top level, then into Shop
+    let (u, b1) = mv(&y, Value::Null);
+    t.ok("adm", "POST", &u, Some(b1)).await;
+    let g = t.graph("p").await;
+    assert!(has_edge(&g, &pid, "codenodes", &y) && !has_edge(&g, &x, "codenodes", &y));
+    let (u, b1) = mv(&y, json!(a));
+    t.ok("adm", "POST", &u, Some(b1)).await;
+    let g = t.graph("p").await;
+    assert!(has_edge(&g, &a, "codenodes", &y) && !has_edge(&g, &pid, "codenodes", &y));
+    // the file itself stays put; only the owners' children.codenodes change
+    assert_eq!(t.node("p", &y).await["path"], json!("{topdir}/src/shop/orders/ledger/ledger.code.iter.md"));
+    // refusals: into itself, into its own part, a non-code parent
+    let (u, b1) = mv(&a, json!(y));
+    assert_eq!(t.call("adm", "POST", &u, Some(b1)).await.0, 400, "Ledger is inside Shop");
+    let (u, b1) = mv(&a, json!(a));
+    assert_eq!(t.call("adm", "POST", &u, Some(b1)).await.0, 400);
+    let uc = id(&t.create("p", json!({"nodetype": "usecase", "name": "Checkout"})).await);
+    let (u, b1) = mv(&x, json!(uc));
+    assert_eq!(t.call("adm", "POST", &u, Some(b1)).await.0, 400);
+    t.done().await;
+}

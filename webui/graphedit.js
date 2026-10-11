@@ -43,6 +43,7 @@
     { key: 'actor', nodetype: 'actor', label: 'Actor', hint: 'who drives use cases, where people touch the app' },
   ];
   // calls / pulls / pushes first: between two parts they are far likelier than ownership (2026-10-10)
+  const DATAFLOW_KINDS = ['calls', 'pulls', 'pushes'];
   const KIND_ORDER = ['calls', 'pulls', 'pushes', 'codenodes', 'tests', 'reqs', 'uses', 'drives', 'touches', 'supplies', 'connects'];
   const isConn = (n) => n && n.nodetype === 'code' && n.level === 'connection';
   const isReqFile = (n) => !!n && (n.nodetype === 'bizreq' || n.nodetype === 'techreq');
@@ -387,6 +388,24 @@
     const isHelper = (el) => el.hasClass('kit-ep') || el.hasClass('anchor') || el.id().startsWith('__');
     cy.on('cxttap', 'node', (e) => { if (!isHelper(e.target)) { const n = node(e.target.id()); if (n) { G().select({ kind: 'node', id: n.id }); nodeMenu(n, at(e)); } } });
     cy.on('taphold', 'node', (e) => { if (!isHelper(e.target)) { const n = node(e.target.id()); if (n) nodeMenu(n, at(e)); } });
+    // Cluster: a part dropped on another part's box moves inside it (Cytoscape stretches the old owner's box with the drag, so "out" is the menu's)
+    // a click fires grab/free too: only a real drag (moved > 8 px) counts, and never while an edge is being drawn
+    let grabAt = null;
+    cy.on('grab', 'node', (e) => { grabAt = Object.assign({ id: e.target.id() }, e.target.position()); });
+    cy.on('free', 'node', (e) => {
+      const g0 = grabAt; grabAt = null;
+      if (!S.canEdit || DRAW || G().layout !== 'cluster' || isHelper(e.target)) return;
+      const at = e.target.position();
+      if (!g0 || g0.id !== e.target.id() || Math.hypot(at.x - g0.x, at.y - g0.y) < 8) return;
+      const n = node(e.target.id()); if (!canReparent(n)) return; const skip = insideOf(n.id); const own = new Set(ownersOf(n.id).map((o) => o.id));
+      let best = null; let area = Infinity;
+      cy.nodes().forEach((b) => {
+        const bn = node(b.id()); if (!bn || bn.id === n.id || skip.has(bn.id) || own.has(bn.id) || !canReparent(bn) || isHelper(b)) return;
+        const bb = b.boundingBox(); if (at.x < bb.x1 || at.x > bb.x2 || at.y < bb.y1 || at.y > bb.y2) return;
+        const a = bb.w * bb.h; if (a < area) { area = a; best = bn; }
+      });
+      if (best) dropped(n, best);
+    });
     cy.on('cxttap', 'edge', (e) => { if (!isHelper(e.target)) { G().select({ kind: 'edge', id: e.target.id() }); edgeMenu(e.target, at(e)); } });
     cy.on('taphold', 'edge', (e) => { if (!isHelper(e.target)) edgeMenu(e.target, at(e)); });
     cy.on('cxttap', (e) => { if (e.target === cy) canvasMenu(at(e)); });
@@ -446,6 +465,10 @@
       { key: 'connect', label: 'Connect from here', kbd: 'C', hint: 'draw an edge to another node' },
       { key: 'paste', label: clip ? `Paste "${clip.kind}" edge here` : 'Paste edge here', kbd: K().MOD + 'V', disabled: !clip },
       { key: 'tests', label: 'Run tests', kbd: 'T', disabled: !canTest(n), hint: 'queue a test work item for this node' },
+      ...(canReparent(n) ? [
+        { key: 'into', label: 'Move into…', hint: 'put it inside another context, container or component (or drop it on one in Cluster)' },
+        { key: 'out', label: 'Move out', hint: 'to the level above its owner', disabled: !ownersOf(n.id).some((o) => o.nodetype === 'code') },
+      ] : []),
       { key: 'move', label: 'Move file…', hint: 'a new path for its *.iter.md file' },
       { key: 'hide', label: 'Hide from the drawing' },
       { sep: true },
@@ -457,7 +480,7 @@
     if (k === 'pin') { G().togglePin(n.id); return; }
     if (isReq(n)) { reqAction({ configure: 'edit', new: 'add' }[k] || k, n); return; }
     ({ configure: () => configureNode(n), new: () => newNode(n), connect: () => startDraw(n), paste: () => pasteEdge(n), tests: () => runTests(n),
-      move: () => moveFile(n), hide: () => G().hide(n.id), delete: () => deleteNode(n) })[k]();
+      into: () => moveInto(n), out: () => moveOut(n), move: () => moveFile(n), hide: () => G().hide(n.id), delete: () => deleteNode(n) })[k]();
   }
   function edgeMenu(edge, pos) {
     const r = linkOf(edge); if (!r) return;
@@ -679,7 +702,8 @@
     if (!parent) return [];
     const fake = { id: '__new', nodetype: t.nodetype, level: t.level || t.nodetype, name: 'the new node' };
     const out = [];
-    KIND_ORDER.forEach((k) => {
+    // a new node hangs from its parent: ownership first; calls / pulls / pushes join parts that already exist
+    KIND_ORDER.filter((k) => !DATAFLOW_KINDS.includes(k)).forEach((k) => {
       if (RULES[k](parent, fake)) out.push({ kind: k, label: `${parent.name} ${VERB[k]} it` });
       else if (RULES[k](fake, parent)) out.push({ kind: k, label: `it ${VERB[k]} ${parent.name}` });
     });
@@ -965,6 +989,65 @@
     toast(`${n.name} deleted — the engine removes the file`, { kind: 'ok' });
     refresh();
   }
+  // ---- moving a part between owners (2026-10-10): its owner was fixed once created
+  const canReparent = (n) => !!n && n.nodetype === 'code' && !isConn(n);
+  /** the code or project nodes that hold n in children.codenodes */
+  const ownersOf = (id) => S.data.edges.filter((e) => e.kind === 'codenodes' && e.to === id)
+    .map((e) => node(e.from)).filter((o) => o && (o.nodetype === 'code' || o.nodetype === 'project'));
+  /** every part inside n, at any depth */
+  function insideOf(id) {
+    const seen = new Set(); const stack = [id];
+    while (stack.length) { const x = stack.pop(); S.data.edges.forEach((e) => { if (e.kind === 'codenodes' && e.from === x && !seen.has(e.to)) { seen.add(e.to); stack.push(e.to); } }); }
+    return seen;
+  }
+  async function reparent(n, parentId) {
+    try { await api('/graph/nodes/' + enc(n.id) + '/parent', { method: 'POST', body: JSON.stringify({ parent: parentId || null }) }); }
+    catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return false; }
+    toast(parentId ? `Moved ${n.name} into ${nameOf(parentId)}` : `Moved ${n.name} to the top level`, { kind: 'ok' });
+    refresh(n.id); return true;
+  }
+  /** "Move out": to the owner's owner, or the top level */
+  async function moveOut(n) {
+    const own = ownersOf(n.id).find((o) => o.nodetype === 'code');
+    if (!own) { toast(`${n.name} is already at the top level`, { kind: 'info' }); return; }
+    const up = ownersOf(own.id).find((o) => o.nodetype === 'code');
+    await reparent(n, up ? up.id : null);
+  }
+  const LEVEL_RANK = { context: 0, container: 1, component: 2 };
+  /** "Move into…": pick the new owner from a filterable list (a big project has hundreds of parts) */
+  async function moveInto(n) {
+    const inside = insideOf(n.id); const cur = new Set(ownersOf(n.id).map((o) => o.id));
+    const cands = S.data.nodes.filter((x) => canReparent(x) && x.id !== n.id && !inside.has(x.id) && !cur.has(x.id))
+      .sort((a, b) => ((LEVEL_RANK[a.level] ?? 3) - (LEVEL_RANK[b.level] ?? 3)) || String(a.name).localeCompare(String(b.name)));
+    const top = ownersOf(n.id).some((o) => o.nodetype === 'code');
+    const opt = (x) => `<option value="${esc(x.id)}">${esc(x.name)} — ${esc(x.level || 'code')}</option>`;
+    const body = `<p class="kit-text">Pick the context, container or component <b>${esc(n.name)}</b> should sit inside. Its own parts move with it; its file stays where it is.</p>
+      <input type="text" id="mv-filter" placeholder="Filter by name…" autofocus>
+      <select id="mv-list" size="12" style="width:100%;margin-top:6px">${top ? '<option value="">(top level — no owner)</option>' : ''}${cands.map(opt).join('')}</select>`;
+    const pick = await K().modal({ title: `Move ${n.name} into…`, body, confirmDiscard: false,
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Move', value: 'ok', primary: true }],
+      onOpen: (d) => {
+        const f = d.querySelector('#mv-filter'); const l = d.querySelector('#mv-list');
+        f.addEventListener('input', () => { const q = f.value.trim().toLowerCase(); [...l.options].forEach((o) => { o.hidden = !!q && !o.text.toLowerCase().includes(q); }); const first = [...l.options].find((o) => !o.hidden); if (first) l.value = first.value; });
+        l.addEventListener('dblclick', () => { const p = d.querySelector('.kit-foot .kit-primary'); if (p) p.click(); });
+        if (l.options.length) l.selectedIndex = 0;
+      },
+      onButton: (v, d) => { const l = d.querySelector('#mv-list'); if (l.selectedIndex < 0) { d.setError('Pick where it goes'); return false; } return { parent: l.value }; } });
+    if (!pick) return;
+    await reparent(n, pick.parent);
+  }
+  /** Cluster layout: a part dropped onto another part's box moves inside it; dropped clear of its own box, it moves out */
+  async function dropped(n, onto) {
+    if (!S.canEdit || !canReparent(n)) return;
+    const own = ownersOf(n.id).find((o) => o.nodetype === 'code');
+    if (onto && (onto.id === n.id || (own && onto.id === own.id) || insideOf(n.id).has(onto.id) || !canReparent(onto))) return;
+    if (!onto && !own) return;
+    const to = onto ? onto.name : (() => { const up = own && ownersOf(own.id).find((o) => o.nodetype === 'code'); return up ? up.name : 'the top level'; })();
+    const ok = await K().confirm({ title: `Move ${n.name}?`, text: onto ? `Put <b>${esc(n.name)}</b> inside <b>${esc(onto.name)}</b>?` : `Take <b>${esc(n.name)}</b> out of <b>${esc(own.name)}</b>, to ${esc(to)}?`, okLabel: 'Move' });
+    if (!ok) { refresh(n.id); return; }
+    if (onto) await reparent(n, onto.id); else await moveOut(n);
+  }
+
   async function moveFile(n) {
     const path = await K().ask({ title: `Move ${n.name}'s file`, text: 'The node keeps its id; only its file moves (git mv on the engine).', label: 'New path', value: n.path, help: 'Starts with <code>{topdir}/</code> and ends with <code>.' + esc(n.nodetype) + '.iter.md</code>.', required: true, okLabel: 'Move' });
     if (path == null || path === n.path) return;

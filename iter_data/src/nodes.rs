@@ -413,6 +413,63 @@ impl Graph {
         Ok(Some(oid))
     }
 
+    /// Hang a code node under another owner (2026-10-10: a container could be
+    /// put inside a context, or a component inside a container, only when it
+    /// was created). `parent` is a code node (not a connection) or None for the
+    /// top level (the project node). Every `codenodes` edge into the node from
+    /// a code or project owner is dropped and one from the new owner added;
+    /// the node's own file stays where it is (its folder is the code it covers).
+    /// Refuses a parent inside the node itself.
+    pub fn reparent(&mut self, id: &str, parent: Option<&str>, by: &str) -> Result<Vec<String>, ApiError> {
+        let n = self.live_node(id)?.clone();
+        if n.doc.nodetype != NodeType::Code || n.doc.is_connection() {
+            return Err(bad("only a context, container or component moves between owners"));
+        }
+        let new_owner = match parent.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                let o = self.live_node(p)?;
+                if o.doc.nodetype != NodeType::Code || o.doc.is_connection() {
+                    return Err(bad(format!("{} is not a code node that can hold another part", o.doc.name)));
+                }
+                p.to_string()
+            }
+            None => self.project_node().map(|p| p.doc.id.clone()).ok_or_else(|| bad("the project has no project node to hang a top-level part from"))?,
+        };
+        if new_owner == id {
+            return Err(bad("a node cannot hold itself"));
+        }
+        let edges = self.edges();
+        // the new owner must not sit inside the node (that would make a loop)
+        let mut stack = vec![id.to_string()];
+        let mut inside: HashSet<String> = HashSet::new();
+        while let Some(x) = stack.pop() {
+            for e in edges.iter().filter(|e| e.from == x && e.kind == EdgeKind::Codenodes) {
+                if inside.insert(e.to.clone()) {
+                    stack.push(e.to.clone());
+                }
+            }
+        }
+        if inside.contains(&new_owner) {
+            return Err(bad(format!("{} is inside {}: move it out first", self.live_node(&new_owner)?.doc.name, n.doc.name)));
+        }
+        let owners: Vec<String> = edges
+            .iter()
+            .filter(|e| e.to == id && e.kind == EdgeKind::Codenodes)
+            .filter(|e| self.get(&e.from).is_some_and(|o| matches!(o.doc.nodetype, NodeType::Code | NodeType::Project)))
+            .map(|e| e.from.clone())
+            .collect();
+        let mut touched = Vec::new();
+        for o in owners.iter().filter(|o| **o != new_owner) {
+            touched.extend(self.remove_edge(o, id, EdgeKind::Codenodes, by, "moved to another owner")?);
+        }
+        if let Some(t) = self.add_edge(&new_owner, id, EdgeKind::Codenodes, by)? {
+            touched.push(t);
+        }
+        touched.sort();
+        touched.dedup();
+        Ok(touched)
+    }
+
     /// Remove one edge from every node that declares it. GlobOnly → 409.
     pub fn remove_edge(&mut self, from: &str, to: &str, kind: EdgeKind, by: &str, reason: &str) -> Result<Vec<String>, ApiError> {
         let (f, t) = (self.live_node(from)?.clone(), self.live_node(to)?.clone());

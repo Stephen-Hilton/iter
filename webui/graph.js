@@ -1656,6 +1656,7 @@
       cy, root: ROOT, update, render: (o) => render(o), snapshot,
       get model() { return { G, nodesById, outE, inE, usecases: USECASES }; },
       get selected() { return SELECTED ? Object.assign({}, SELECTED) : null; },
+      get layout() { return state.layout; },
       edgeRecord: (eid) => EDGES.get(eid) || null,
       select, focusNode, focusEdgeId, hide: hideNode, togglePin, isPinned: (id) => cy.getElementById(id).hasClass('kit-pinned'), banner: (h, ms) => {
         const b = $('banner'); b.innerHTML = h; b.classList.toggle('hidden', !h);

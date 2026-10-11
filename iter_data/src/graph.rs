@@ -34,6 +34,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/graph/nodes/{id}", get(node_get).patch(node_patch).delete(node_delete))
         .route("/api/projects/{name}/graph/nodes/{id}/neighbors", get(node_neighbors))
         .route("/api/projects/{name}/graph/nodes/{id}/move", post(node_move))
+        .route("/api/projects/{name}/graph/nodes/{id}/parent", post(node_parent))
         .route("/api/projects/{name}/graph/edges", post(edge_add).delete(edge_remove))
         .route("/api/projects/{name}/graph/edges/move", post(edge_move))
         .merge(crate::testlogs::routes())
@@ -595,6 +596,18 @@ async fn node_move(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Strin
     let touched = g.move_node(&id, s(&req, "path"), &user.sub)?;
     g.save(st.store.as_ref()).await?;
     Ok(Json(json!({"node": g.get(&id).unwrap().json(), "touched": touched})))
+}
+
+/// `POST …/graph/nodes/{id}/parent` `{"parent": "<code node id>"}` hangs a part
+/// under another owner; `{"parent": null}` (or "") moves it to the top level.
+async fn node_parent(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>, Json(req): Json<Value>) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let parent = req.get("parent").and_then(|p| p.as_str()).map(str::to_string);
+    let _g = nodes::lock(&name).await;
+    let mut g = Graph::load(st.store.as_ref(), &name).await?;
+    let touched = g.reparent(&id, parent.as_deref(), &user.sub)?;
+    g.save(st.store.as_ref()).await?;
+    Ok(Json(json!({"node": g.get(&id).unwrap().json(), "touched": touched, "nodes": touched_nodes(&g, &touched)})))
 }
 
 // ---------- edge edits ----------
