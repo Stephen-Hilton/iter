@@ -21,8 +21,10 @@ running at the limit is killed and counts as "could not run".
   anything. Run it freely while iterating.
 - **`--broken`** — claims "the defect is still present". If the node is actually green
   the claim is false: the command parks your item at once as stale (the reason is recorded
-  on it), no matter what you do next. Touch no code and stop. "Could not run" parks it
-  too: it is not "the defect reproduces".
+  on it), no matter what you do next. Touch no code and stop. A node that is red OR erroring
+  (scripts that exit 2+, "could not run") upholds the claim: the problem is still there, so
+  find out why and fix it (Stephen, 2026-10-11). Something switched off on purpose (the EKS
+  cluster) is reported NOT RUN, never "fixed".
 - **`--fixed`** — claims "the defect is resolved", and is the completion gate. Any red
   check or script error means the claim is false (recorded as not upheld), and the close
   gate will not complete the item until a later `--fixed` claim on the node is upheld.

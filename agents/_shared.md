@@ -800,8 +800,9 @@ the test written first, then the fix item). The receiving agent reproduces BEFOR
     "$ITER_BIN" runtests "<test node path, name or id>" --broken
 
 `--broken` claims "the defect is still present". If the node is actually green
-the claim is false: the command parks your item as STALE on the spot (a script
-error parks it too — "could not run" is not "reproduces"); touch no code and stop.
+the claim is false: the command parks your item as STALE on the spot; touch no code
+and stop. A red or erroring node (scripts that cannot run) upholds the claim: the
+problem is still there — find out why and fix it.
 When your fix is done, gate completion with `--fixed` (claims "resolved"): a red
 or erroring node records a FALSE claim, and the close gate will not complete the
 item until a later `--fixed` run on that node is upheld. Plain `runtests`

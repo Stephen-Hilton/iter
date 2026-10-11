@@ -255,6 +255,15 @@ enum Verb {
         /// file at most this many coverage top-up `test` items per sweep (0 = skip)
         #[arg(long, default_value_t = 5)]
         coverage_max: usize,
+        /// run every eligible test node, not one use case's (the old sweep)
+        #[arg(long)]
+        all: bool,
+        /// sweep this use case (name, id or file stem); default: the one tested longest ago
+        #[arg(long)]
+        usecase: Option<String>,
+        /// start no new test node after this many minutes; the rest wait for the next sweep
+        #[arg(long, default_value_t = 30)]
+        budget_min: u64,
         #[arg(long)]
         data_url: Option<String>,
     },
@@ -470,7 +479,7 @@ pub fn run(args: CliArgs) {
                 std::process::exit(2)
             }
         },
-        Verb::Sweep { ref node, dry_run, no_file, timeout_min, install_schedule, ref every, text_max, tests_max, coverage_max, ref data_url } => {
+        Verb::Sweep { ref node, dry_run, no_file, timeout_min, install_schedule, ref every, text_max, tests_max, coverage_max, all, ref usecase, budget_min, ref data_url } => {
             let c = conn_of(data_url.as_deref());
             if install_schedule {
                 std::process::exit(crate::sweep::install_schedule(&c, every));
@@ -479,6 +488,7 @@ pub fn run(args: CliArgs) {
             let o = crate::sweep::SweepOpts {
                 node: node.clone(), dry_run, file_items: !no_file, timeout_min,
                 text_max: if quiet { 0 } else { text_max }, tests_max: if quiet { 0 } else { tests_max }, coverage_max: if quiet { 0 } else { coverage_max },
+                all, usecase: usecase.clone(), budget_min,
             };
             std::process::exit(crate::sweep::sweep_verb(&c, &o))
         }
@@ -809,11 +819,13 @@ mod local {
                         println!("CLAIM FALSE (--broken): test node \"{}\" is fully green — this work item is STALE and has been parked. STOP NOW: touch no code and end your work immediately.", run.name);
                         3
                     }
+                    // a node that is not green still has the problem (Stephen, 2026-10-11:
+                    // "common sense"): erroring scripts are usually the very defect a fix
+                    // item was filed for, and parking them stranded the item
                     Outcome::CouldNotRun => {
-                        let reason = format!("--broken claim aborted: test node \"{}\" could not run — \"couldn't run\" must not pass for \"defect reproduces\"", run.name);
-                        record_claim("broken", &run, false, Some(&reason));
-                        println!("CLAIM ABORTED (--broken): test node \"{}\" could not run, which is not the same as the defect reproducing. STOP NOW: the item has been parked.", run.name);
-                        3
+                        record_claim("broken", &run, true, None);
+                        println!("CLAIM UPHELD (--broken): test node \"{}\" is not green (scripts errored) — the problem is still there; find out why they error and fix it. (A tool or service that is switched off on purpose, such as the EKS cluster, is reported NOT RUN, not fixed.)", run.name);
+                        0
                     }
                 };
             }
