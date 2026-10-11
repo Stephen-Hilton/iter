@@ -1077,6 +1077,28 @@ fn edges_code_calls_pulls_pushes() {
     assert_eq!(EdgeKind::from_name("pushes"), Some(EdgeKind::Pushes));
 }
 
+/// `same_as` joins two parts (contexts, containers, components; not
+/// connections) that are copies of one object; it serializes as "same_as".
+#[test]
+fn same_as_joins_copies_of_one_object() {
+    let np = node_paths();
+    let by_id = ids_for(&np);
+    let p = "{topdir}/src/webui/webui.code.iter.md";
+    let mut w = doc(NodeType::Code, p, "Webui");
+    w.id = id_of(&by_id, p);
+    w.front.insert("same_as".into(), json!("{topdir}/src/data/data.code.iter.md"));
+    let e = edges_of(&w, &by_id);
+    assert_eq!(e, vec![Edge { from: w.id.clone(), kind: EdgeKind::SameAs, to: id_of(&by_id, DATA) }]);
+    assert_eq!(serde_json::to_value(EdgeKind::SameAs).unwrap(), json!("same_as"));
+    assert_eq!(EdgeKind::from_name("same_as"), Some(EdgeKind::SameAs));
+    let mut conn = doc(NodeType::Code, "{topdir}/global/connections/api.code.iter.md", "API");
+    conn.level = Some("connection".into());
+    assert!(matches!(add_child(&mut conn, EdgeKind::SameAs, DATA), Err(NodeErr::WrongKind { .. })), "a connection is a kind of link, not an object");
+    let mut actor = doc(NodeType::Actor, "{topdir}/global/usecases/a.actor.iter.md", "A");
+    assert!(matches!(add_child(&mut actor, EdgeKind::SameAs, DATA), Err(NodeErr::WrongKind { .. })));
+    assert!(matches!(set_protocol(&mut w, EdgeKind::SameAs, DATA, Some("TCP")), Err(NodeErr::WrongKind { .. })), "no protocol on same_as");
+}
+
 /// A calls / pulls / pushes edge can carry a protocol, kept in `protocols`
 /// beside the edge; removing the edge drops it, and only those kinds take one.
 #[test]

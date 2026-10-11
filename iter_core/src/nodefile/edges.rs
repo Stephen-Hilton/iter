@@ -25,10 +25,15 @@ pub enum EdgeKind {
     Pulls,
     /// code → code: the source pushes data to the target
     Pushes,
+    /// code → code: the source is a copy of the target, the same object placed
+    /// somewhere else (2026-10-11: one component that must be the same code in
+    /// several containers — the copies point at the master); recorded on the copy
+    #[serde(rename = "same_as")]
+    SameAs,
 }
 
 impl EdgeKind {
-    pub const ALL: [EdgeKind; 11] = [
+    pub const ALL: [EdgeKind; 12] = [
         EdgeKind::Codenodes,
         EdgeKind::Tests,
         EdgeKind::Reqs,
@@ -40,6 +45,7 @@ impl EdgeKind {
         EdgeKind::Calls,
         EdgeKind::Pulls,
         EdgeKind::Pushes,
+        EdgeKind::SameAs,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -55,6 +61,7 @@ impl EdgeKind {
             EdgeKind::Calls => "calls",
             EdgeKind::Pulls => "pulls",
             EdgeKind::Pushes => "pushes",
+            EdgeKind::SameAs => "same_as",
         }
     }
 
@@ -93,7 +100,8 @@ fn target_ok(kind: EdgeKind, t: NodeType) -> bool {
         | EdgeKind::Uses
         | EdgeKind::Calls
         | EdgeKind::Pulls
-        | EdgeKind::Pushes => {
+        | EdgeKind::Pushes
+        | EdgeKind::SameAs => {
             t == NodeType::Code
         }
         EdgeKind::Tests => t == NodeType::Test,
@@ -177,6 +185,9 @@ pub fn edges_of(doc: &NodeDoc, node_paths_by_id: &[(String, String)]) -> Vec<Edg
             add(&front_list(&doc.front, kind.as_str()), kind, true);
         }
     }
+    if t == NodeType::Code && !doc.is_connection() {
+        add(&front_list(&doc.front, "same_as"), EdgeKind::SameAs, true);
+    }
     out.sort();
     out.dedup();
     out
@@ -208,6 +219,7 @@ fn slot_for(doc: &NodeDoc, kind: EdgeKind) -> Result<Slot, NodeErr> {
         EdgeKind::Calls if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("calls")),
         EdgeKind::Pulls if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("pulls")),
         EdgeKind::Pushes if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("pushes")),
+        EdgeKind::SameAs if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("same_as")),
         _ => wrong,
     }
 }
@@ -249,7 +261,7 @@ fn write_slot(doc: &mut NodeDoc, slot: &Slot, list: Vec<String>) {
 /// `children.codenodes|tests|reqs` (usecase `uses` → `children.codenodes`),
 /// connection `supplies` → `connects.from`, `connects` → `connects.to`,
 /// actor `drives` / `touches`, usecase `drives` (target = actor) → `actors`,
-/// code `calls` / `pulls` / `pushes` → the same-named front-matter list.
+/// code `calls` / `pulls` / `pushes` / `same_as` → the same-named front-matter list.
 /// A target already covered by an existing entry (exact, glob or directory)
 /// is a no-op. Err(WrongKind) when this node type cannot hold `kind`.
 pub fn add_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str) -> Result<(), NodeErr> {

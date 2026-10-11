@@ -92,7 +92,9 @@ agent's use case only through `iter usecase` (capability `_usecase_links`).
 A code node (not a connection) may say what it does to other parts directly:
 `calls: [code node paths]` (it calls their API), `pulls: [code node paths]` (it reads data from
 them), `pushes: [code node paths]` (it sends data to them). Use a connection node instead when
-the channel itself has requirements of its own (a protocol, an interface contract).
+the channel itself has requirements of its own (a protocol, an interface contract). A part that
+is a copy of another part placed elsewhere (one component that must be the same code in several
+containers) says `same_as: [path of the master]`: change the master, and every copy follows it.
 
 ## Project node and philosophy
 

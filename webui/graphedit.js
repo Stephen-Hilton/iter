@@ -44,7 +44,7 @@
   ];
   // calls / pulls / pushes first: between two parts they are far likelier than ownership (2026-10-10)
   const DATAFLOW_KINDS = ['calls', 'pulls', 'pushes'];
-  const KIND_ORDER = ['calls', 'pulls', 'pushes', 'codenodes', 'tests', 'reqs', 'uses', 'drives', 'touches', 'supplies', 'connects'];
+  const KIND_ORDER = ['calls', 'pulls', 'pushes', 'codenodes', 'same_as', 'tests', 'reqs', 'uses', 'drives', 'touches', 'supplies', 'connects'];
   const isConn = (n) => n && n.nodetype === 'code' && n.level === 'connection';
   const isReqFile = (n) => !!n && (n.nodetype === 'bizreq' || n.nodetype === 'techreq');
   const isReq = (n) => !!n && n.nodetype === 'req';
@@ -61,9 +61,10 @@
     calls: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
     pulls: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
     pushes: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
+    same_as: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
     contains: (f, t) => isReqFile(f) && isReq(t),
   };
-  const VERB = { codenodes: 'owns', tests: 'is tested by', reqs: 'must meet', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls data from', pushes: 'pushes data to', contains: 'holds' };
+  const VERB = { codenodes: 'owns', tests: 'is tested by', reqs: 'must meet', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls data from', pushes: 'pushes data to', same_as: 'is a copy of (same as)', contains: 'holds' };
   const LV = () => (window.IterGraph && IterGraph.LEVELS) || {};
 
   window.IterGraphEdit = {
@@ -724,7 +725,7 @@
     const fake = { id: '__new', nodetype: t.nodetype, level: t.level || t.nodetype, name: 'the new node' };
     const out = [];
     // a new node hangs from its parent: ownership first; calls / pulls / pushes join parts that already exist
-    KIND_ORDER.filter((k) => !DATAFLOW_KINDS.includes(k)).forEach((k) => {
+    KIND_ORDER.filter((k) => !DATAFLOW_KINDS.includes(k) && k !== 'same_as').forEach((k) => {
       if (RULES[k](parent, fake)) out.push({ kind: k, label: `${parent.name} ${VERB[k]} it` });
       else if (RULES[k](fake, parent)) out.push({ kind: k, label: `it ${VERB[k]} ${parent.name}` });
     });

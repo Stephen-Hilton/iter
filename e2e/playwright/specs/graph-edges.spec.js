@@ -82,6 +82,23 @@ test.describe('project graph: edge protocols, parallel edges and line shapes', (
     await page.keyboard.press('Escape');
   });
 
+  test('same_as: a copy points at its master', async ({ page, admin }) => {
+    await openTab(page, 'graph', PROJ);
+    await select(page, { kind: 'node', id: ids.checkout });
+    await page.keyboard.press('c');
+    await expect(page.locator('#g-banner')).toContainText('Connecting from');
+    await page.evaluate((id) => { IterGraph.api.cy.getElementById(id).emit('tap'); }, ids.settle);
+    await expect(dialog(page)).toContainText('What does this edge mean?');
+    // both directions are offered: the user picks which end is the master
+    await expect(dialog(page).locator('.kit-radio', { hasText: 'is a copy of (same as)' })).toHaveCount(2);
+    const same = dialog(page).locator('.kit-radio', { hasText: 'Checkout form is a copy of (same as) Settlement job' });
+    await expect(same).toHaveCount(1);
+    await same.locator('input').check();
+    await dialog(page).locator('.kit-primary').click();
+    await expect.poll(async () => !!edgeOf(await admin.graph(PROJ), ids.checkout, 'same_as', ids.settle)).toBe(true);
+    await expect.poll(() => page.evaluate((id) => { const e = IterGraph.api.cy.getElementById(id); return e.nonempty() ? [e.data('label'), e.style('target-arrow-shape')] : null; }, `e:${ids.checkout}|same_as|${ids.settle}`)).toEqual(['same as', 'triangle']);
+  });
+
   test('the edge menu changes the protocol', async ({ page, admin }) => {
     await openTab(page, 'graph', PROJ);
     await page.evaluate((id) => IterGraph.api.focusEdgeId(id), `e:${ids.webapp}|calls|${ids.gateway}`);

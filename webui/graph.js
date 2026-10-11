@@ -65,6 +65,7 @@
     calls: { label: 'calls (part → part)', verb: 'calls', color: '#60a5fa', line: 'solid', width: 2 },
     pulls: { label: 'pulls data from', verb: 'pulls from', color: '#a78bfa', line: 'solid', width: 2 },
     pushes: { label: 'pushes data to', verb: 'pushes to', color: '#34d399', line: 'solid', width: 2 },
+    same_as: { label: 'same as (a copy of its master)', verb: 'same as', color: '#e879f9', line: 'dashed', width: 1.8 },
     contains: { label: 'file holds requirement', verb: 'contains', color: '#b49a5a', line: 'solid', width: 0.8 },
   };
   const FILE_STATES = {
@@ -550,6 +551,8 @@
         const k = EDGE_KINDS[m.kind] || {}; color = k.color || color; line = k.line || line; width = k.width || width; cls.push('k-' + m.kind);
         // a part's direct edge names what it does, and over what: "calls (gRPC)" (2026-10-11)
         if (DATAFLOW_KINDS.includes(m.kind)) label = m.kind + (m.link && m.link.protocol ? ` (${m.link.protocol})` : '');
+        // a copy points at its master: "Ledger (in Billing) same as Ledger (master)" (2026-10-11)
+        if (m.kind === 'same_as') label = 'same as';
       } else if (m.type === 'flow') {
         color = m.kind === 'process' ? '#3b82f6' : '#f97316'; width = 3; label = stepName(m);
         if (m.branch) { label += '*'; cls.push('branch'); }
@@ -768,8 +771,10 @@
         { selector: 'edge.lm-curved', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': 'data(cpd2)', 'control-point-weights': 0.5 } },
         { selector: 'edge.lm-elbow', style: { 'curve-style': 'taxi', 'taxi-direction': 'auto', 'taxi-turn': 'data(turn)', 'taxi-turn-min-distance': 12 } },
         { selector: 'edge.lm-elbow.curved', style: { 'source-endpoint': 'data(se)', 'target-endpoint': 'data(se)' } },
+        // ends that overlap (one node on top of another): only a straight line can be drawn
+        { selector: 'edge.lm-off', style: { 'curve-style': 'straight' } },
         { selector: 'edge:loop', style: { 'curve-style': 'bezier' } },
-        { selector: 'edge.k-calls, edge.k-pulls, edge.k-pushes', style: { label: 'data(label)', 'font-size': 11, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.85, 'text-background-padding': '1px', 'text-rotation': 'autorotate', opacity: 0.95 } },
+        { selector: 'edge.k-calls, edge.k-pulls, edge.k-pushes, edge.k-same_as', style: { label: 'data(label)', 'font-size': 11, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.85, 'text-background-padding': '1px', 'text-rotation': 'autorotate', opacity: 0.95 } },
         { selector: 'edge.k-codenodes', style: { opacity: 0.55, 'arrow-scale': 0.6 } },
         { selector: 'edge.k-reqs, edge.k-tests', style: { opacity: 0.55 } },
         { selector: 'edge.k-supplies, edge.k-connects', style: { opacity: 0.9, 'arrow-scale': 1 } },
@@ -958,10 +963,23 @@
         runLayout(layout, v, ub);
       }
       LAST_LAYOUT = layout;
+      fixOverlaps();
       savePositions();
       applySearch(false);
       if (SELECTED) reselect();
     }
+
+    /** curved / elbow lines need their two ends apart: a line whose nodes overlap is drawn straight for now */
+    function fixOverlaps() {
+      if (!cy) return;
+      cy.batch(() => cy.edges().forEach((e) => {
+        if (e.isLoop()) return;
+        const a = e.source().boundingBox({ includeLabels: false }); const b = e.target().boundingBox({ includeLabels: false });
+        const touch = a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2;
+        if (touch !== e.hasClass('lm-off')) e.toggleClass('lm-off', touch);
+      }));
+    }
+    cy.on('free layoutstop', () => setTimeout(fixOverlaps, 0));
 
     function runLayout(layout, v, ub) {
       const bands = ub ? ub.bands : null;
@@ -1241,8 +1259,8 @@
       });
       return h;
     }
-    const VERB_OUT = { codenodes: 'owns', tests: 'tested by', reqs: 'requirements', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls from', pushes: 'pushes to', contains: 'holds' };
-    const VERB_IN = { codenodes: 'owned by', tests: 'tests', reqs: 'required by', supplies: 'supplied by', connects: 'reached through', drives: 'driven by', touches: 'touched by', uses: 'used by', calls: 'called by', pulls: 'pulled from by', pushes: 'pushed to by', contains: 'in file' };
+    const VERB_OUT = { codenodes: 'owns', tests: 'tested by', reqs: 'requirements', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls from', pushes: 'pushes to', same_as: 'same as', contains: 'holds' };
+    const VERB_IN = { codenodes: 'owned by', tests: 'tests', reqs: 'required by', supplies: 'supplied by', connects: 'reached through', drives: 'driven by', touches: 'touched by', uses: 'used by', calls: 'called by', pulls: 'pulled from by', pushes: 'pushed to by', same_as: 'same as', contains: 'in file' };
     function nodeDetail(id) {
       const n = nodesById.get(id); if (!n) return '';
       if (n.nodetype === 'req') return reqDetail(n);
@@ -1283,7 +1301,7 @@
       const ch = n.children || {};
       const refs = ['codedirs'].concat(Object.keys(ch).filter((k) => !['codedirs', 'codenodes', 'tests', 'reqs'].includes(k))).filter((k) => Array.isArray(ch[k]) && ch[k].length);
       if (refs.length) h += `<h4>Children (paths and globs)</h4>${refs.map((k) => `<div class="muted">${esc(k)}</div><ul class="codefiles">${ch[k].map((x) => `<li><span class="path">${esc(x)}</span></li>`).join('')}</ul>`).join('')}`;
-      const extra = Object.keys(n.front || {}).filter((k) => !['flowmap', 'last_result', 'status', 'owner', 'level', 'connects', 'drives', 'touches', 'actors', 'calls', 'pulls', 'pushes'].includes(k));
+      const extra = Object.keys(n.front || {}).filter((k) => !['flowmap', 'last_result', 'status', 'owner', 'level', 'connects', 'drives', 'touches', 'actors', 'calls', 'pulls', 'pushes', 'same_as', 'protocols'].includes(k));
       if (extra.length) h += `<details><summary>More fields (${extra.length})</summary><dl class="g-facts">${extra.map((k) => `<dt>${esc(k)}</dt><dd>${esc(typeof n.front[k] === 'object' ? JSON.stringify(n.front[k]) : n.front[k])}</dd>`).join('')}</dl></details>`;
       return h;
     }
@@ -1385,7 +1403,7 @@
       const k = EDGE_KINDS[m.kind] || { label: m.kind, color: '#888' };
       const from = nodesById.get(m.source); const to = nodesById.get(m.target);
       const owner = (m.kind === 'supplies') ? to : from;
-      const where = { codenodes: 'children.codenodes', tests: 'children.tests', reqs: 'children.reqs', supplies: 'connects.from', connects: 'connects.to', drives: 'drives (or the use case\'s actors)', touches: 'touches', calls: 'calls', pulls: 'pulls', pushes: 'pushes', uses: 'children.codenodes (of the use case)', contains: 'its body, as a ## section' }[m.kind] || '';
+      const where = { codenodes: 'children.codenodes', tests: 'children.tests', reqs: 'children.reqs', supplies: 'connects.from', connects: 'connects.to', drives: 'drives (or the use case\'s actors)', touches: 'touches', calls: 'calls', pulls: 'pulls', pushes: 'pushes', same_as: 'same_as', uses: 'children.codenodes (of the use case)', contains: 'its body, as a ## section' }[m.kind] || '';
       if (m.kind === 'contains') {
         return `<h2><span class="g-eswatch big" style="background:${k.color}"></span>${esc(k.label)}</h2>
           <div class="g-edgeends"><div>${nodeLink(m.source)}<span class="muted">${esc((LEVELS[from && from.level] || {}).label || '')} file</span></div><div class="g-edgearrow">holds →</div><div>${nodeLink(m.target)}<span class="muted">requirement</span></div></div>
@@ -1598,7 +1616,8 @@
     $('lines').addEventListener('change', (ev) => {
       LINE_MODE = LINE_MODES[ev.target.value] || 'straight';
       try { localStorage.setItem('iter5.graph.lines', LINE_MODE); } catch (e) { /* storage blocked */ }
-      cy.edges().forEach((e) => { if (e.classes().some((c) => c.startsWith('lm-'))) { Object.keys(LINE_MODES).forEach((k) => e.removeClass('lm-' + k)); e.addClass('lm-' + LINE_MODE); } });
+      cy.edges().forEach((e) => { if (e.classes().some((c) => c.startsWith('lm-') && c !== 'lm-off')) { Object.keys(LINE_MODES).forEach((k) => e.removeClass('lm-' + k)); e.addClass('lm-' + LINE_MODE); } });
+      fixOverlaps();
     });
     $('autofit').addEventListener('change', (ev) => {
       AUTOFIT = ev.target.checked;

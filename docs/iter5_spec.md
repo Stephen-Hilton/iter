@@ -99,6 +99,7 @@ Only `*.iter.md` matches become graph edges; other matches are kept as plain ref
 | `supplies` | code (supplier) | connection | connection's `connects.from` (edge stored *from supplier to connection*) |
 | `connects` | connection | code | `connects.to` |
 | `calls` / `pulls` / `pushes` | code (not a connection) | code | the same-named front-matter list |
+| `same_as` | code (not a connection) | code (not a connection) | `same_as: [paths]` on the copy: it is the same object as the target (its master), placed elsewhere — e.g. one component that must be the same code in several containers (2026-10-11) |
 | `drives` | actor | usecase | `drives` (+ usecase `actors` → also `drives` actor→usecase) |
 | `touches` | actor | code | `touches` |
 | `uses` | usecase | code | usecase `children.codenodes` (kind `uses`, not `codenodes`) |

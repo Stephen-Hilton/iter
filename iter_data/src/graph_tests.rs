@@ -1372,3 +1372,21 @@ async fn paused_sync_holds_graph_edits_until_resumed() {
     assert_eq!(t.ok("adm", "GET", "/api/projects/p/graph", None).await["sync_paused"], json!(false));
     t.done().await;
 }
+
+/// `same_as` (2026-10-11): two code nodes in different places are copies of
+/// one object; any two code nodes, recorded on the source as `same_as`.
+#[tokio::test]
+async fn same_as_marks_copies_of_one_object() {
+    let t = T::new().await;
+    t.project("p").await;
+    let a = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "East"})).await);
+    let b = id(&t.create("p", json!({"nodetype": "code", "level": "context", "name": "West"})).await);
+    let x = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Cache", "attach_to": a})).await);
+    let y = id(&t.create("p", json!({"nodetype": "code", "level": "container", "name": "Cache copy", "attach_to": b})).await);
+    t.ok("adm", "POST", "/api/projects/p/graph/edges", Some(json!({"from": x, "kind": "same_as", "to": y}))).await;
+    assert!(has_edge(&t.graph("p").await, &x, "same_as", &y));
+    assert_eq!(t.node("p", &x).await["front"]["same_as"], json!(["{topdir}/src/west/cache_copy/cache_copy.code.iter.md"]));
+    let uc = id(&t.create("p", json!({"nodetype": "usecase", "name": "Checkout"})).await);
+    assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(json!({"from": uc, "kind": "same_as", "to": x}))).await.0, 400, "code nodes only");
+    t.done().await;
+}
