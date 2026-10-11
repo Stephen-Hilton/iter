@@ -443,46 +443,65 @@
    * A pinned node stays where it is: it cannot be dragged, never follows a dragged neighbour, and every
    * layout and settle leaves it in place. Pins are remembered per key (the graph and its layout) as
    * {id: {x, y}} in this browser. P toggles the selection (the hosts bind the key).
+   * A wrapper (a compound node: Cytoscape derives its box from what is inside it) pins its UPPER-LEFT
+   * CORNER, stored as {id: {x1, y1}} (2026-10-11): the nodes inside stay free and the box grows right and
+   * down as they need; after every layout, settle or drop inside it, its contents shift back so the box
+   * starts at the pinned corner. Pinning a wrapper releases the pins of the nodes inside it.
    */
   function pins(cy, opts) {
     const o = opts || {};
     cy.style().selector('node.kit-pinned').style({ 'border-width': 3, 'border-style': 'double', 'border-color': '#facc15' }).update();
     const read = () => { const k = o.key && o.key(); if (!k) return {}; try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch (e) { return {}; } };
     const write = (m) => { const k = o.key && o.key(); if (!k) return; try { localStorage.setItem(k, JSON.stringify(m)); } catch (e) { /* storage blocked */ } };
-    // a compound node (a wrapper with nodes inside it) has no position of its own: Cytoscape derives it from
-    // its children, so pinning one pins every leaf inside it (2026-10-10: P on a wrapper did nothing)
-    const leaves = (nodes) => nodes.union(nodes.filter((n) => n.isParent()).descendants()).filter((n) => !n.isParent() && !n.id().startsWith('__'));
-    // a wrapper reads as pinned (and stops being draggable) once every leaf inside it is pinned
-    const markParents = () => cy.nodes().filter((n) => n.isParent()).forEach((p) => {
-      const inner = leaves(p);
-      const all = inner.nonempty() && inner.every((n) => n.hasClass('kit-pinned'));
-      if (all && !p.hasClass('kit-pinned')) { p.addClass('kit-pinned'); p.ungrabify(); } else if (!all && p.hasClass('kit-pinned')) { p.removeClass('kit-pinned'); p.grabify(); }
-    });
+    const corner = (w) => { const bb = w.boundingBox({ includeLabels: false, includeOverlays: false }); return { x1: bb.x1, y1: bb.y1 }; };
+    /** shift each pinned wrapper's contents so its box starts at its pinned corner (outer wrappers first) */
+    function anchor(m) {
+      const ws = Object.entries(m).filter(([, p]) => p && p.x1 != null).map(([id, p]) => [cy.getElementById(id), p])
+        .filter(([w]) => w.nonempty() && w.isParent()).sort((a, b) => a[0].ancestors().length - b[0].ancestors().length);
+      ws.forEach(([w, p]) => {
+        const c = corner(w); const dx = p.x1 - c.x1; const dy = p.y1 - c.y1;
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+        cy.batch(() => w.descendants().filter((d) => !d.isParent() && !(m[d.id()] && m[d.id()].x != null))
+          .forEach((d) => { const q = d.position(); d.position({ x: q.x + dx, y: q.y + dy }); }));
+      });
+    }
+    // a drop inside a pinned wrapper keeps its corner where it was pinned
+    cy.on('free', 'node', (ev) => { if (ev.target.ancestors('.kit-pinned').nonempty()) anchor(read()); });
+    const mark = (n, on) => { if (on) { n.addClass('kit-pinned'); n.ungrabify(); } else { n.removeClass('kit-pinned'); n.grabify(); } };
     const api = {
       /** ids pinned under the current key */
       ids: () => new Set(Object.keys(read())),
       has: (n) => n.hasClass('kit-pinned'),
-      /** put every pinned node of the current key back where it was pinned, and mark it */
+      /** put every pinned node of the current key back where it was pinned, every pinned wrapper back on its corner, and mark them */
       apply() {
         const m = read();
         cy.batch(() => {
-          cy.nodes('.kit-pinned').forEach((n) => { if (!n.isParent() && !m[n.id()]) { n.removeClass('kit-pinned'); n.grabify(); } });
-          Object.entries(m).forEach(([id, p]) => { const n = cy.getElementById(id); if (n.empty() || n.isParent()) return; n.position(p); n.addClass('kit-pinned'); n.ungrabify(); });
-          markParents();
+          cy.nodes('.kit-pinned').forEach((n) => { if (!m[n.id()]) mark(n, false); });
+          Object.entries(m).forEach(([id, p]) => {
+            const n = cy.getElementById(id); if (n.empty() || !p) return;
+            if (n.isParent()) { if (p.x1 != null) mark(n, true); return; }
+            if (p.x == null) return;
+            n.position({ x: p.x, y: p.y }); mark(n, true);
+          });
         });
+        anchor(m);
       },
-      /** fcose fixedNodeConstraint entries for the pinned nodes in view */
-      constraints() { return Object.entries(read()).filter(([id]) => cy.getElementById(id).nonempty()).map(([id, p]) => ({ nodeId: id, position: { x: p.x, y: p.y } })); },
-      /** pin or unpin: any of `nodes` unpinned -> pin them where they are, else unpin them; a wrapper stands for
-       *  every leaf inside it. Returns 'pinned' | 'unpinned' | null. */
+      /** fcose fixedNodeConstraint entries for the pinned (non-wrapper) nodes in view */
+      constraints() { return Object.entries(read()).filter(([id, p]) => p && p.x != null && cy.getElementById(id).nonempty()).map(([id, p]) => ({ nodeId: id, position: { x: p.x, y: p.y } })); },
+      /** pin or unpin: any of `nodes` unpinned -> pin them (a wrapper by its upper-left corner), else unpin them.
+       *  Returns 'pinned' | 'unpinned' | null. */
       toggle(nodes) {
-        const list = leaves(nodes);
+        const list = nodes.filter((n) => !n.id().startsWith('__'));
         if (list.empty() || !(o.key && o.key())) return null;
         const m = read(); const pin = list.some((n) => !m[n.id()]);
-        cy.batch(() => {
-          list.forEach((n) => { if (pin) { m[n.id()] = Object.assign({}, n.position()); n.addClass('kit-pinned'); n.ungrabify(); } else { delete m[n.id()]; n.removeClass('kit-pinned'); n.grabify(); } });
-          markParents();
-        });
+        cy.batch(() => list.forEach((n) => {
+          if (!pin) { delete m[n.id()]; mark(n, false); return; }
+          if (n.isParent()) {
+            m[n.id()] = corner(n);
+            n.descendants().forEach((d) => { if (m[d.id()]) { delete m[d.id()]; mark(d, false); } });
+          } else m[n.id()] = { x: n.position('x'), y: n.position('y') };
+          mark(n, true);
+        }));
         write(m);
         return pin ? 'pinned' : 'unpinned';
       },

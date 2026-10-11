@@ -259,6 +259,7 @@
     <div class="g-presets" id="g-presets"></div>
     <label class="g-chk reqsecopt" title="Draw every requirement (each ## section of a bizreq/techreq file) as a small node beside its file — the Req chip"><input type="checkbox" id="g-reqsec"> requirement sections</label>
     <label class="g-chk wholeopt" title="Draw the dotted 'owns' lines even where Cluster already shows ownership as boxes"><input type="checkbox" id="g-own"> ownership lines</label>
+    <label class="g-chk clusteropt" title="On: Cluster re-arranges the drawing for you (a dragged node pulls its neighbours and the graph settles; a redraw re-runs the layout). Off: nodes stay exactly where you put them, across redraws and reloads; Re-layout (R) still re-runs it on request."><input type="checkbox" id="g-autofit"> auto-fit nodes</label>
   </div>
   <div class="g-row g-editrow"><span id="g-summary" class="g-summary"></span><span class="g-edit" id="g-editbar"></span></div>
 </div>
@@ -406,6 +407,20 @@
     const DEFAULTS = { uc: '', layout: 'cluster', flow: 'process', branch: '', dim: false, own: false, hide: null };
     const state = Object.assign({}, DEFAULTS);
     let PINS = null; // IterKit.pins, once the drawing exists
+    // "auto-fit nodes" (2026-10-11): off = Cluster never moves a node by itself; positions are kept in this browser
+    let AUTOFIT = true;
+    try { AUTOFIT = localStorage.getItem('iter5.graph.autofit') !== '0'; } catch (e) { /* storage blocked */ }
+    const POS_KEY = () => 'iter5.graph.pos.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '');
+    function savePositions() {
+      if (AUTOFIT || state.layout !== 'cluster' || !cy || cy.nodes().empty()) return;
+      const s = snapshot(); const pos = {}; s.pos.forEach((p, id) => { pos[id] = { x: Math.round(p.x), y: Math.round(p.y) }; });
+      try { localStorage.setItem(POS_KEY(), JSON.stringify({ pos, zoom: s.zoom, pan: s.pan })); } catch (e) { /* storage blocked */ }
+    }
+    function savedPositions() {
+      let j = null; try { j = JSON.parse(localStorage.getItem(POS_KEY()) || 'null'); } catch (e) { j = null; }
+      if (!j || !j.pos) return null;
+      return { pos: new Map(Object.entries(j.pos)), zoom: j.zoom || 1, pan: j.pan || { x: 0, y: 0 }, layout: 'cluster', uc: state.uc };
+    }
     const BOOLS = ['dim', 'own'];
     const HIDE_KEY = () => 'iter5.graph.hide2.' + (CTX.project || ''); // hide2: since req nodes (2026-10-02), so an older saved choice cannot unhide them
     /** The default node types to hide: requirement sections always; tests and requirement files too on a big project. */
@@ -806,7 +821,11 @@
     }
 
     function render(opts) {
-      const o = opts || {};
+      const o = Object.assign({}, opts || {});
+      // auto-fit off: Cluster keeps every node where it is (this drawing's, else the saved one) unless Re-layout asked
+      if (!AUTOFIT && state.layout === 'cluster' && !o.relayout && !o.keep) {
+        o.keep = (LAST_LAYOUT === 'cluster' && cy.nodes().nonempty()) ? snapshot() : savedPositions();
+      }
       writeHash(); syncControls();
       $('showhidden').classList.toggle('hidden', !HIDDEN.size);
       $('showhidden').textContent = HIDDEN.size ? `Show hidden (${HIDDEN.size})` : 'Show hidden';
@@ -892,7 +911,7 @@
         total = leaf.length;
         leaf.forEach((n) => { const p = keep.pos.get(n.id()); if (p) { n.position(p); placed++; } });
       }
-      if (keep && placed && placed >= total * 0.6) {
+      if (keep && placed && (placed >= total * 0.6 || !AUTOFIT)) {
         // a new node goes beside a neighbour that kept its place, in the first free spot on a spiral around it
         const taken = []; cy.nodes().filter((n) => !n.isParent() && keep.pos.has(n.id())).forEach((n) => taken.push(n.position()));
         const free = (p) => taken.every((q) => Math.abs(q.x - p.x) > 90 || Math.abs(q.y - p.y) > 60);
@@ -912,6 +931,7 @@
         runLayout(layout, v, ub);
       }
       LAST_LAYOUT = layout;
+      savePositions();
       applySearch(false);
       if (SELECTED) reselect();
     }
@@ -1005,12 +1025,14 @@
       else if (state.layout === 'sequence') IterKit.toast('The Sequence view places every node itself: pin in another layout.', { kind: 'info' });
     }
     IterKit.springDrag(cy, {
-      enabled: () => state.layout === 'cluster' && !(window.IterGraphEdit && IterGraphEdit.drawing),
+      enabled: () => AUTOFIT && state.layout === 'cluster' && !(window.IterGraphEdit && IterGraphEdit.drawing),
       skip: (n) => n.hasClass('req') || isHelper(n),
       layout: clusterForces,
       onMove: (moved) => { const files = moved.filter('.bizreq, .techreq'); if (files.nonempty()) placeReqs(reqsOfFiles(files)); },
-      onSettled: () => { if (cy.nodes('.req').nonempty()) placeReqs(null); },
+      onSettled: () => { if (PINS) PINS.apply(); if (cy.nodes('.req').nonempty()) placeReqs(null); },
     });
+    // auto-fit off: a drop is final, and remembered
+    cy.on('free', 'node', () => { if (!AUTOFIT) setTimeout(savePositions, 0); });
 
     function renderUcSummary(v) {
       const box = $('ucsummary');
@@ -1488,7 +1510,7 @@
       if (typing || ev.metaKey || ev.ctrlKey || ev.altKey) return;
       if (ev.key === 'Escape' && SELECTED && !(window.IterGraphEdit && IterGraphEdit.drawing)) { select(null); return; }
       if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); fit(); }
-      else if (ev.key === 'r' || ev.key === 'R') { ev.preventDefault(); render(); }
+      else if (ev.key === 'r' || ev.key === 'R') { ev.preventDefault(); render({ relayout: true }); }
       else if ((ev.key === 'p' || ev.key === 'P') && SELECTED && SELECTED.kind === 'node') { ev.preventDefault(); togglePin(SELECTED.id); }
       else if (ev.key === '?') { ev.preventDefault(); openHelp(); }
     });
@@ -1520,7 +1542,8 @@
       const uc = state.uc ? ucById.get(state.uc) : null;
       ROOT.querySelectorAll('.ucopt').forEach((el) => el.classList.toggle('hidden', !uc));
       ROOT.querySelectorAll('.wholeopt').forEach((el) => el.classList.toggle('hidden', !!uc || state.layout !== 'cluster'));
-      $('dim').checked = state.dim; $('own').checked = state.own;
+      $('dim').checked = state.dim; $('own').checked = state.own; $('autofit').checked = AUTOFIT;
+      ROOT.querySelectorAll('.clusteropt').forEach((el) => el.classList.toggle('hidden', state.layout !== 'cluster'));
       ROOT.querySelectorAll('#g-layouts button').forEach((b) => {
         b.classList.toggle('on', b.dataset.layout === state.layout);
         if (b.dataset.layout === 'sequence') { b.disabled = !uc || state.dim; b.classList.toggle('hidden', !uc); }
@@ -1544,6 +1567,11 @@
     });
     $('dim').addEventListener('change', (ev) => { state.dim = ev.target.checked; if (state.dim && state.layout === 'sequence') state.layout = 'tiered'; render(); });
     $('own').addEventListener('change', (ev) => { state.own = ev.target.checked; render({ keep: snapshot() }); });
+    $('autofit').addEventListener('change', (ev) => {
+      AUTOFIT = ev.target.checked;
+      try { localStorage.setItem('iter5.graph.autofit', AUTOFIT ? '1' : '0'); } catch (e) { /* storage blocked */ }
+      if (AUTOFIT) render({ relayout: true }); else savePositions();
+    });
     ROOT.querySelector('#g-layouts').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-layout]'); if (b && !b.disabled) { state.layout = b.dataset.layout; render(); } });
     ROOT.querySelector('#g-flowkind').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-flow]'); if (b) { state.flow = b.dataset.flow; render(); } });
     $('branch').addEventListener('change', (ev) => { state.branch = ev.target.value; render(); });
@@ -1582,7 +1610,7 @@
     $('cy').addEventListener('gestureend', (ev) => { ev.preventDefault(); inGesture = false; });
     const fit = () => cy.animate({ fit: { eles: cy.elements().not('.kit-ep'), padding: 30 } }, { duration: 250 });
     $('fit').addEventListener('click', fit);
-    $('relayout').addEventListener('click', () => render());
+    $('relayout').addEventListener('click', () => render({ relayout: true }));
     $('showhidden').addEventListener('click', () => showAllHidden());
     $('help').addEventListener('click', () => openHelp());
     $('detail').addEventListener('click', (ev) => {

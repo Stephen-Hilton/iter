@@ -33,7 +33,7 @@ One global, `IterKit`, with no dependencies; every class is prefixed `kit-` and 
 - `springDrag`: in a force layout, a dragged node pulls its neighbours part of the way (half for a neighbour, a quarter two hops out, at most the 40 nearest), and on release fcose re-settles the graph from where things are, with the dropped node pinned.
 - `separate`: pushes apart any node boxes a force layout left overlapping.
 - `forceLayout`: one fcose run with given nodes held in place (label-box corrected), then `separate`.
-- `pins`: P pins a node where it is: not draggable, never pulled along, kept by every layout and settle; remembered per graph and layout in the browser. A wrapper (a compound node with nodes inside it) has no position of its own, so P on it pins every node inside it, and it shows as pinned, and stops being draggable, once all of them are; P again unpins them all.
+- `pins`: P pins a node where it is: not draggable, never pulled along, kept by every layout and settle; remembered per graph and layout in the browser. A wrapper (a compound node with nodes inside it) pins its upper-left corner (2026-10-11): the nodes inside stay draggable and the box grows right and down as they need; after every layout, settle or drop inside it, its contents shift back so the box starts at that corner. Pinning a wrapper releases the pins of the nodes inside it.
 - `clip`: the copied edge (⌘C / ⌘V), one per graph scope.
 
 ## What goes in and out
