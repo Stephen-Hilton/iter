@@ -298,6 +298,20 @@ async fn edges_add_remove_move_and_glob_refusal() {
     assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(add(&a, "reqs", &b))).await.0, 400, "reqs must point at a requirement");
     assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(add(&a, "connects", &b))).await.0, 400, "only a connection connects");
     assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(add(&a, "bogus", &b))).await.0, 400);
+    // direct code → code dataflow edges live in the source node's front matter (2026-10-10)
+    for k in ["calls", "pulls", "pushes"] {
+        let r = t.ok("adm", "POST", "/api/projects/p/graph/edges", Some(add(&a, k, &c))).await;
+        assert_eq!(r["touched"], json!([a]), "{k}");
+    }
+    let g = t.graph("p").await;
+    for k in ["calls", "pulls", "pushes"] {
+        assert!(has_edge(&g, &a, k, &c), "{k}");
+    }
+    let an = t.node("p", &a).await;
+    assert_eq!(an["front"]["calls"], json!(["{topdir}/src/shop/billing/billing.code.iter.md"]));
+    assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(add(&actor, "calls", &a))).await.0, 400, "only a code node calls");
+    t.ok("adm", "DELETE", "/api/projects/p/graph/edges", Some(json!({"from": &a, "kind": "pulls", "to": &c, "reason": "it only calls"}))).await;
+    assert!(!has_edge(&t.graph("p").await, &a, "pulls", &c));
     // drives written on the use case side (actors) is the same edge; removing clears both sides
     t.ok("adm", "PATCH", &format!("/api/projects/p/graph/nodes/{uc}"), Some(json!({"front": {"actors": ["{topdir}/global/usecases/buyer.actor.iter.md"]}}))).await;
     let rm = |f: &str, k: &str, to: &str, reason: &str| json!({"from": f, "kind": k, "to": to, "reason": reason});

@@ -89,6 +89,11 @@ requirement:
 agent's use case only through `iter usecase` (capability `_usecase_links`).
 `<slug>.actor.iter.md`: `drives: [use case paths]`, `touches: [code node paths]`.
 
+A code node (not a connection) may say what it does to other parts directly:
+`calls: [code node paths]` (it calls their API), `pulls: [code node paths]` (it reads data from
+them), `pushes: [code node paths]` (it sends data to them). Use a connection node instead when
+the channel itself has requirements of its own (a protocol, an interface contract).
+
 ## Project node and philosophy
 
 The project node is `global/<slug>.project.iter.md` (keys `scandirs`, `file_naming`,

@@ -57,6 +57,9 @@
     drives: { label: 'actor drives use case', verb: 'drives', color: '#f59e0b', line: 'solid', width: 1.6 },
     touches: { label: 'actor touches part', verb: 'touches', color: '#fbbf24', line: 'dashed', width: 1.4 },
     uses: { label: 'use case uses part', verb: 'uses', color: '#f472b6', line: 'solid', width: 1.3 },
+    calls: { label: 'calls (part → part)', verb: 'calls', color: '#60a5fa', line: 'solid', width: 2 },
+    pulls: { label: 'pulls data from', verb: 'pulls from', color: '#a78bfa', line: 'solid', width: 2 },
+    pushes: { label: 'pushes data to', verb: 'pushes to', color: '#34d399', line: 'solid', width: 2 },
     contains: { label: 'file holds requirement', verb: 'contains', color: '#b49a5a', line: 'solid', width: 0.8 },
   };
   const FILE_STATES = {
@@ -1189,8 +1192,8 @@
       });
       return h;
     }
-    const VERB_OUT = { codenodes: 'owns', tests: 'tested by', reqs: 'requirements', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', contains: 'holds' };
-    const VERB_IN = { codenodes: 'owned by', tests: 'tests', reqs: 'required by', supplies: 'supplied by', connects: 'reached through', drives: 'driven by', touches: 'touched by', uses: 'used by', contains: 'in file' };
+    const VERB_OUT = { codenodes: 'owns', tests: 'tested by', reqs: 'requirements', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls from', pushes: 'pushes to', contains: 'holds' };
+    const VERB_IN = { codenodes: 'owned by', tests: 'tests', reqs: 'required by', supplies: 'supplied by', connects: 'reached through', drives: 'driven by', touches: 'touched by', uses: 'used by', calls: 'called by', pulls: 'pulled from by', pushes: 'pushed to by', contains: 'in file' };
     function nodeDetail(id) {
       const n = nodesById.get(id); if (!n) return '';
       if (n.nodetype === 'req') return reqDetail(n);
@@ -1231,7 +1234,7 @@
       const ch = n.children || {};
       const refs = ['codedirs'].concat(Object.keys(ch).filter((k) => !['codedirs', 'codenodes', 'tests', 'reqs'].includes(k))).filter((k) => Array.isArray(ch[k]) && ch[k].length);
       if (refs.length) h += `<h4>Children (paths and globs)</h4>${refs.map((k) => `<div class="muted">${esc(k)}</div><ul class="codefiles">${ch[k].map((x) => `<li><span class="path">${esc(x)}</span></li>`).join('')}</ul>`).join('')}`;
-      const extra = Object.keys(n.front || {}).filter((k) => !['flowmap', 'last_result', 'status', 'owner', 'level', 'connects', 'drives', 'touches', 'actors'].includes(k));
+      const extra = Object.keys(n.front || {}).filter((k) => !['flowmap', 'last_result', 'status', 'owner', 'level', 'connects', 'drives', 'touches', 'actors', 'calls', 'pulls', 'pushes'].includes(k));
       if (extra.length) h += `<details><summary>More fields (${extra.length})</summary><dl class="g-facts">${extra.map((k) => `<dt>${esc(k)}</dt><dd>${esc(typeof n.front[k] === 'object' ? JSON.stringify(n.front[k]) : n.front[k])}</dd>`).join('')}</dl></details>`;
       return h;
     }
@@ -1333,7 +1336,7 @@
       const k = EDGE_KINDS[m.kind] || { label: m.kind, color: '#888' };
       const from = nodesById.get(m.source); const to = nodesById.get(m.target);
       const owner = (m.kind === 'supplies') ? to : from;
-      const where = { codenodes: 'children.codenodes', tests: 'children.tests', reqs: 'children.reqs', supplies: 'connects.from', connects: 'connects.to', drives: 'drives (or the use case\'s actors)', touches: 'touches', uses: 'children.codenodes (of the use case)', contains: 'its body, as a ## section' }[m.kind] || '';
+      const where = { codenodes: 'children.codenodes', tests: 'children.tests', reqs: 'children.reqs', supplies: 'connects.from', connects: 'connects.to', drives: 'drives (or the use case\'s actors)', touches: 'touches', calls: 'calls', pulls: 'pulls', pushes: 'pushes', uses: 'children.codenodes (of the use case)', contains: 'its body, as a ## section' }[m.kind] || '';
       if (m.kind === 'contains') {
         return `<h2><span class="g-eswatch big" style="background:${k.color}"></span>${esc(k.label)}</h2>
           <div class="g-edgeends"><div>${nodeLink(m.source)}<span class="muted">${esc((LEVELS[from && from.level] || {}).label || '')} file</span></div><div class="g-edgearrow">holds →</div><div>${nodeLink(m.target)}<span class="muted">requirement</span></div></div>

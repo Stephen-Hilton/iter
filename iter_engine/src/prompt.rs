@@ -159,7 +159,8 @@ pub struct CtxEntry {
     /// node type ("code", "test", "bizreq", …; "doc" for a non-node file)
     pub nodetype: String,
     /// how it relates to the item's node: an edge kind for children
-    /// (codenodes, tests, reqs, uses, supplies, connects, drives, touches),
+    /// (codenodes, tests, reqs, uses, supplies, connects, drives, touches,
+    /// calls, pulls, pushes),
     /// "global" / "local" for requirements
     pub kind: String,
 }

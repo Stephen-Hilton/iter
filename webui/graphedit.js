@@ -42,7 +42,8 @@
     { key: 'usecase', nodetype: 'usecase', label: 'Use case', hint: 'one journey through the product' },
     { key: 'actor', nodetype: 'actor', label: 'Actor', hint: 'who drives use cases, where people touch the app' },
   ];
-  const KIND_ORDER = ['codenodes', 'tests', 'reqs', 'uses', 'drives', 'touches', 'supplies', 'connects'];
+  // calls / pulls / pushes first: between two parts they are far likelier than ownership (2026-10-10)
+  const KIND_ORDER = ['calls', 'pulls', 'pushes', 'codenodes', 'tests', 'reqs', 'uses', 'drives', 'touches', 'supplies', 'connects'];
   const isConn = (n) => n && n.nodetype === 'code' && n.level === 'connection';
   const isReqFile = (n) => !!n && (n.nodetype === 'bizreq' || n.nodetype === 'techreq');
   const isReq = (n) => !!n && n.nodetype === 'req';
@@ -56,9 +57,12 @@
     drives: (f, t) => f.nodetype === 'actor' && t.nodetype === 'usecase',
     touches: (f, t) => f.nodetype === 'actor' && t.nodetype === 'code',
     uses: (f, t) => f.nodetype === 'usecase' && t.nodetype === 'code',
+    calls: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
+    pulls: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
+    pushes: (f, t) => f.nodetype === 'code' && t.nodetype === 'code' && !isConn(f) && !isConn(t) && f !== t,
     contains: (f, t) => isReqFile(f) && isReq(t),
   };
-  const VERB = { codenodes: 'owns', tests: 'is tested by', reqs: 'must meet', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', contains: 'holds' };
+  const VERB = { codenodes: 'owns', tests: 'is tested by', reqs: 'must meet', supplies: 'supplies', connects: 'connects to', drives: 'drives', touches: 'touches', uses: 'uses', calls: 'calls', pulls: 'pulls data from', pushes: 'pushes data to', contains: 'holds' };
   const LV = () => (window.IterGraph && IterGraph.LEVELS) || {};
 
   window.IterGraphEdit = {

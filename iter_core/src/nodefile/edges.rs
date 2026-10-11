@@ -19,10 +19,16 @@ pub enum EdgeKind {
     Drives,
     Touches,
     Uses,
+    /// code → code: the source calls the target's API (2026-10-10)
+    Calls,
+    /// code → code: the source pulls data from the target
+    Pulls,
+    /// code → code: the source pushes data to the target
+    Pushes,
 }
 
 impl EdgeKind {
-    pub const ALL: [EdgeKind; 8] = [
+    pub const ALL: [EdgeKind; 11] = [
         EdgeKind::Codenodes,
         EdgeKind::Tests,
         EdgeKind::Reqs,
@@ -31,6 +37,9 @@ impl EdgeKind {
         EdgeKind::Drives,
         EdgeKind::Touches,
         EdgeKind::Uses,
+        EdgeKind::Calls,
+        EdgeKind::Pulls,
+        EdgeKind::Pushes,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -43,6 +52,9 @@ impl EdgeKind {
             EdgeKind::Drives => "drives",
             EdgeKind::Touches => "touches",
             EdgeKind::Uses => "uses",
+            EdgeKind::Calls => "calls",
+            EdgeKind::Pulls => "pulls",
+            EdgeKind::Pushes => "pushes",
         }
     }
 
@@ -59,6 +71,11 @@ pub struct Edge {
     pub to: String,
 }
 
+/// The direct code → code edges a code node's file declares in its front
+/// matter (`calls:`, `pulls:`, `pushes:`, lists of node paths): what one part
+/// does to another, without drawing a connection node between them.
+pub const DATAFLOW: [EdgeKind; 3] = [EdgeKind::Calls, EdgeKind::Pulls, EdgeKind::Pushes];
+
 /// Which endpoint's file holds an edge: `true` when the TARGET (`to`) node
 /// owns it — `supplies` (the connection's `connects.from`). Every other kind
 /// is owned by `from`. (`drives` may also be written on the usecase side as
@@ -69,7 +86,14 @@ pub fn owner_is_target(kind: EdgeKind) -> bool {
 
 fn target_ok(kind: EdgeKind, t: NodeType) -> bool {
     match kind {
-        EdgeKind::Codenodes | EdgeKind::Supplies | EdgeKind::Connects | EdgeKind::Touches | EdgeKind::Uses => {
+        EdgeKind::Codenodes
+        | EdgeKind::Supplies
+        | EdgeKind::Connects
+        | EdgeKind::Touches
+        | EdgeKind::Uses
+        | EdgeKind::Calls
+        | EdgeKind::Pulls
+        | EdgeKind::Pushes => {
             t == NodeType::Code
         }
         EdgeKind::Tests => t == NodeType::Test,
@@ -148,6 +172,11 @@ pub fn edges_of(doc: &NodeDoc, node_paths_by_id: &[(String, String)]) -> Vec<Edg
     if t == NodeType::Usecase {
         add(&front_list(&doc.front, "actors"), EdgeKind::Drives, false);
     }
+    if t == NodeType::Code && !doc.is_connection() {
+        for kind in DATAFLOW {
+            add(&front_list(&doc.front, kind.as_str()), kind, true);
+        }
+    }
     out.sort();
     out.dedup();
     out
@@ -176,6 +205,9 @@ fn slot_for(doc: &NodeDoc, kind: EdgeKind) -> Result<Slot, NodeErr> {
         EdgeKind::Drives if t == NodeType::Actor => Ok(Slot::Front("drives")),
         EdgeKind::Drives if t == NodeType::Usecase => Ok(Slot::Front("actors")),
         EdgeKind::Touches if t == NodeType::Actor => Ok(Slot::Front("touches")),
+        EdgeKind::Calls if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("calls")),
+        EdgeKind::Pulls if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("pulls")),
+        EdgeKind::Pushes if t == NodeType::Code && !doc.is_connection() => Ok(Slot::Front("pushes")),
         _ => wrong,
     }
 }
@@ -216,7 +248,8 @@ fn write_slot(doc: &mut NodeDoc, slot: &Slot, list: Vec<String>) {
 /// Add an edge to the node that owns it, writing the right key:
 /// `children.codenodes|tests|reqs` (usecase `uses` → `children.codenodes`),
 /// connection `supplies` → `connects.from`, `connects` → `connects.to`,
-/// actor `drives` / `touches`, usecase `drives` (target = actor) → `actors`.
+/// actor `drives` / `touches`, usecase `drives` (target = actor) → `actors`,
+/// code `calls` / `pulls` / `pushes` → the same-named front-matter list.
 /// A target already covered by an existing entry (exact, glob or directory)
 /// is a no-op. Err(WrongKind) when this node type cannot hold `kind`.
 pub fn add_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str) -> Result<(), NodeErr> {

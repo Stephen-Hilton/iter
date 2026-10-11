@@ -658,7 +658,7 @@ fn rewrite_refs(doc: &mut NodeDoc, old: &str, new: &str) -> bool {
         }
         hit
     };
-    for k in ["drives", "touches", "actors"] {
+    for k in ["drives", "touches", "actors", "calls", "pulls", "pushes"] {
         if let Some(v) = doc.front.get_mut(k) {
             hit |= fix_value(v);
         }

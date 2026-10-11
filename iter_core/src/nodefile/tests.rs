@@ -1038,6 +1038,45 @@ fn edges_connection_supplies_and_connects() {
     assert!(edges_of(&c, &by_id).is_empty());
 }
 
+/// A code node's `calls` / `pulls` / `pushes` lists are direct code → code
+/// edges; a connection node's lists of those names make none, and
+/// add_child writes each to its own front-matter list.
+#[test]
+fn edges_code_calls_pulls_pushes() {
+    let np = node_paths();
+    let by_id = ids_for(&np);
+    let p = "{topdir}/src/webui/webui.code.iter.md";
+    let mut w = doc(NodeType::Code, p, "Webui");
+    w.id = id_of(&by_id, p);
+    w.level = Some("container".into());
+    w.front.insert("calls".into(), json!(["{topdir}/src/data/data.code.iter.md"]));
+    w.front.insert("pulls".into(), json!("{topdir}/src/data/postgres/postgres.code.iter.md"));
+    w.front.insert("pushes".into(), json!(["{topdir}/src/data/data.code.iter.md", "{topdir}/no/such.code.iter.md"]));
+    let data = id_of(&by_id, DATA);
+    let pg = id_of(&by_id, "{topdir}/src/data/postgres/postgres.code.iter.md");
+    let mut want = vec![
+        Edge { from: w.id.clone(), kind: EdgeKind::Calls, to: data.clone() },
+        Edge { from: w.id.clone(), kind: EdgeKind::Pulls, to: pg },
+        Edge { from: w.id.clone(), kind: EdgeKind::Pushes, to: data },
+    ];
+    want.sort();
+    assert_eq!(edges_of(&w, &by_id), want);
+    w.level = Some("connection".into());
+    assert!(edges_of(&w, &by_id).is_empty(), "a connection node declares no direct dataflow edges");
+
+    let mut code = doc(NodeType::Code, "{topdir}/src/webui/webui.code.iter.md", "Webui");
+    for (k, key) in [(EdgeKind::Calls, "calls"), (EdgeKind::Pulls, "pulls"), (EdgeKind::Pushes, "pushes")] {
+        add_child(&mut code, k, DATA).unwrap();
+        add_child(&mut code, k, DATA).unwrap(); // already there: no-op
+        assert_eq!(code.front[key], json!([DATA]));
+        remove_child(&mut code, k, DATA).unwrap();
+        assert_eq!(code.front[key], json!([]));
+    }
+    let mut actor = doc(NodeType::Actor, "{topdir}/global/usecases/a.actor.iter.md", "A");
+    assert!(matches!(add_child(&mut actor, EdgeKind::Calls, DATA), Err(NodeErr::WrongKind { .. })));
+    assert_eq!(EdgeKind::from_name("pushes"), Some(EdgeKind::Pushes));
+}
+
 #[test]
 fn edges_actor_drives_touches() {
     let np = node_paths();

@@ -171,7 +171,7 @@ fn check_enum(front: &Map<String, Value>, key: &str, allowed: &[&str], findings:
 /// Type-specific defaults and checks (§2.3). Used by conform and NodeDoc::new.
 pub(crate) fn apply_type_defaults(doc: &mut NodeDoc, findings: &mut Vec<Finding>) {
     let empty_list = || Value::Array(Vec::new());
-    for key in ["scandirs", "actors", "drives", "touches"] {
+    for key in ["scandirs", "actors", "drives", "touches", "calls", "pulls", "pushes"] {
         coerce_list(&mut doc.front, key, key, findings);
     }
     if let Some(Value::Object(cm)) = doc.front.get_mut("connects") {

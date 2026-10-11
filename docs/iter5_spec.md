@@ -83,7 +83,7 @@ Only `*.iter.md` matches become graph edges; other matches are kept as plain ref
 | type | keys |
 |---|---|
 | project | `scandirs: ["{topdir}/"]` (where marker files are looked for), `file_naming: sequence\|uuid12` (default sequence), `gitrepo: ""` (optional remote). `children.codenodes` = the root context nodes; `children.reqs` = **global** requirements (always given to every agent). |
-| code | `level` (required), `owner: bespoke\|oss\|3rdparty` (optional). **level=connection** also has `connects: {from: [paths], to: [paths]}` — the code nodes that *supply* this connection type and the ones it *connects to* (directional: from → connection → to). |
+| code | `level` (required), `owner: bespoke\|oss\|3rdparty` (optional). **level=connection** also has `connects: {from: [paths], to: [paths]}` — the code nodes that *supply* this connection type and the ones it *connects to* (directional: from → connection → to). Any other code node may list `calls: [paths]`, `pulls: [paths]`, `pushes: [paths]`: other code nodes it calls the API of, pulls data from, or pushes data to, drawn as direct edges without a connection node (added 2026-10-10). |
 | test | `children.tests` = the scripts (`["{thisfiledir}/tests/{thisfilestem}*.sh"]`). `last_result:` the last standardized result JSON (§5). |
 | usecase | `children.codenodes` = the parts it uses (required, may be empty), `actors: [paths to actor files]`, `flowmap: {summary, sequence, process_flow, data_flow}` (iter4 shape). |
 | actor | `drives: [usecase paths]`, `touches: [code node paths]` (where people interact). |
@@ -98,6 +98,7 @@ Only `*.iter.md` matches become graph edges; other matches are kept as plain ref
 | `reqs` | any | bizreq/techreq/philosophy | `children.reqs` |
 | `supplies` | code (supplier) | connection | connection's `connects.from` (edge stored *from supplier to connection*) |
 | `connects` | connection | code | `connects.to` |
+| `calls` / `pulls` / `pushes` | code (not a connection) | code | the same-named front-matter list |
 | `drives` | actor | usecase | `drives` (+ usecase `actors` → also `drives` actor→usecase) |
 | `touches` | actor | code | `touches` |
 | `uses` | usecase | code | usecase `children.codenodes` (kind `uses`, not `codenodes`) |
@@ -168,7 +169,7 @@ pub fn slug(name: &str) -> String;
 pub fn plan_path(doc: &NodeDoc, parent: Option<&NodeDoc>, attach: Attach, existing_paths: &HashSet<String>, naming: Naming) -> String;
 pub fn resolve(entry: &str, this_path: &str, node_paths: &[String]) -> Vec<String>;  // glob/path → node paths
 pub fn edges_of(doc: &NodeDoc, node_paths_by_id: &[(String,String)]) -> Vec<Edge>;   // Edge{from,kind,to}
-pub fn add_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str);   // writes the right key (children.x / connects.from|to / drives / touches / actors)
+pub fn add_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str);   // writes the right key (children.x / connects.from|to / drives / touches / actors / calls / pulls / pushes)
 pub fn remove_child(doc: &mut NodeDoc, kind: EdgeKind, target_path: &str) -> Result<(), NodeErr>; // refuses when only a glob matches
 pub fn now_ts() -> String;
 ```
