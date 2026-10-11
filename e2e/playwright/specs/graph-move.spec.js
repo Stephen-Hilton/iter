@@ -66,21 +66,43 @@ test.describe('project graph: calls edges and moving parts', () => {
     await expect.poll(async () => { const g = await admin.graph(PROJ); return [hasEdge(g, ids.payments, 'codenodes', ids.settle), hasEdge(g, ids.ledger, 'codenodes', ids.settle)]; }).toEqual([true, false]);
   });
 
-  test("Cluster: dragging a part onto another part's box moves it inside, after a confirm", async ({ page, admin }) => {
+  test('Cluster: a plain drag only moves a part on screen; Shift+drag onto a box moves it inside, no dialog', async ({ page, admin }) => {
     await openTab(page, 'graph', PROJ);
     const btn = page.locator('[data-layout=cluster]');
     if (await btn.count()) { await btn.first().click(); await still(page); }
     expect(await page.evaluate(() => IterGraph.api.layout)).toBe('cluster');
-    const a = await posOf(page, 'graph', ids.gateway);
-    const b = await posOf(page, 'graph', ids.postgres);
-    await page.mouse.move(a.x, a.y);
-    await page.mouse.down();
-    await page.mouse.move(b.x, b.y, { steps: 12 });
-    await page.mouse.up();
-    await expect(dialog(page)).toContainText('inside');
+    const drag = async (from, to, shift) => {
+      const a = await posOf(page, 'graph', from); const b = await posOf(page, 'graph', to);
+      if (shift) await page.keyboard.down('Shift');
+      await page.mouse.move(a.x, a.y); await page.mouse.down();
+      await page.mouse.move(b.x, b.y, { steps: 12 }); await page.mouse.up();
+      if (shift) await page.keyboard.up('Shift');
+    };
+    // plain: nothing asked, nothing moved on the server
+    await drag(ids.gateway, ids.postgres, false);
+    await page.waitForTimeout(800);
+    await expect(dialog(page)).toHaveCount(0);
+    expect(hasEdge(await admin.graph(PROJ), ids.storefront, 'codenodes', ids.gateway)).toBe(true);
+    // Shift: straight in, no dialog
+    await openTab(page, 'graph', PROJ);
+    await drag(ids.gateway, ids.postgres, true);
+    await expect(dialog(page)).toHaveCount(0);
     await shot(page, 'graph-drop-into');
-    await dialog(page).locator('.kit-primary').click();
     await expect.poll(async () => { const g = await admin.graph(PROJ); return [hasEdge(g, ids.postgres, 'codenodes', ids.gateway), hasEdge(g, ids.storefront, 'codenodes', ids.gateway)]; }).toEqual([true, false]);
+  });
+
+  test('Cluster: Shift+drag a part clear of its box moves it out, one level up', async ({ page, admin }) => {
+    await openTab(page, 'graph', PROJ);
+    await page.evaluate(() => { IterGraph.api.cy.fit(); });
+    await still(page);
+    const a = await posOf(page, 'graph', ids.gateway);   // inside Postgres, inside Payments
+    const box = await page.evaluate((i) => { const cy = IterGraph.api.cy; const p = cy.getElementById(i).parent(); const r = cy.container().getBoundingClientRect(); const bb = p.renderedBoundingBox(); return { x2: r.left + bb.x2, y1: r.top + bb.y1, y2: r.top + bb.y2 }; }, ids.gateway);
+    await page.keyboard.down('Shift');
+    await page.mouse.move(a.x, a.y); await page.mouse.down();
+    await page.mouse.move(box.x2 + 60, (box.y1 + box.y2) / 2, { steps: 12 }); await page.mouse.up();
+    await page.keyboard.up('Shift');
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(async () => { const g = await admin.graph(PROJ); return [hasEdge(g, ids.payments, 'codenodes', ids.gateway), hasEdge(g, ids.postgres, 'codenodes', ids.gateway)]; }).toEqual([true, false]);
   });
 
   test('a click on a part (no drag) never asks to move it', async ({ page }) => {

@@ -28,6 +28,20 @@ test.describe('project graph: pause file sync', () => {
     await page.reload(); await openTab(page, 'graph', PROJ);
     await expect(page.locator('#g-sync')).toContainText('held');
     await expect(page.locator('#g-syncpause')).toHaveText(/Resume sync/);
+    // paused: removals ask no "why?" — an edge goes at once, a node after a plain yes/no
+    await page.evaluate((id) => IterGraph.api.focusEdgeId(id), `e:${ids.uc_pay}|uses|${ids.webapp}`);
+    await still(page);
+    await page.keyboard.press('Delete');
+    await expect.poll(async () => (await admin.graph(PROJ)).edges.some((e) => e.from === ids.uc_pay && e.kind === 'uses' && e.to === ids.webapp)).toBe(false);
+    const draft = (await admin.graph(PROJ)).nodes.find((n) => n.name === 'Draft service');
+    await page.evaluate((id) => IterGraph.api.select({ kind: 'node', id }), draft.id);
+    await still(page);
+    await page.keyboard.press('Delete');
+    await expect(dialog(page)).toContainText('Delete Draft service?');
+    await expect(dialog(page).locator('textarea')).toHaveCount(0);
+    await dialog(page).locator('.kit-danger, .kit-primary').first().click();
+    // never written to the repo: it is simply gone
+    await expect.poll(async () => (await admin.graph(PROJ)).nodes.some((n) => n.id === draft.id)).toBe(false);
     await shot(page, 'graph-sync-paused');
     // resume: asks first, then everything held is offered again
     await page.locator('#g-syncpause').click();

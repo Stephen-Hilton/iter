@@ -27,6 +27,10 @@
   const enc = encodeURIComponent;
   let S = null; // {root, ctx, data (normalized), canEdit}
   let DRAW = null; let keyWired = false;
+  // Shift held right now (a drop's mouseup does not always carry it)
+  let SHIFT = false;
+  ['keydown', 'keyup'].forEach((t) => document.addEventListener(t, (ev) => { SHIFT = ev.shiftKey; }));
+  window.addEventListener('blur', () => { SHIFT = false; });
   const LISTEN = { root: null, detail: (ev) => decorate(ev.detail), sel: () => { if (S) renderBar(true); } }; let pollTimer = null; let buildTimer = null; let BUILD = null;
   let CONFLICTS = []; // GET graph/conflicts rows (newest first), refreshed with the graph
   const REQ_TYPES = ['bizreq', 'techreq', 'philosophy'];
@@ -411,12 +415,16 @@
     // Cluster: a part dropped on another part's box moves inside it (Cytoscape stretches the old owner's box with the drag, so "out" is the menu's)
     // a click fires grab/free too: only a real drag (moved > 8 px) counts, and never while an edge is being drawn
     let grabAt = null;
-    cy.on('grab', 'node', (e) => { grabAt = Object.assign({ id: e.target.id() }, e.target.position()); });
+    // the box it sits in, as it was before the drag (Cytoscape stretches it to follow the dragged node)
+    cy.on('grab', 'node', (e) => { const p = e.target.parent(); grabAt = Object.assign({ id: e.target.id(), box: p.nonempty() ? Object.assign({}, p.boundingBox()) : null }, e.target.position()); });
     cy.on('free', 'node', (e) => {
       const g0 = grabAt; grabAt = null;
       if (!S.canEdit || DRAW || G().layout !== 'cluster' || isHelper(e.target)) return;
       const at = e.target.position();
       if (!g0 || g0.id !== e.target.id() || Math.hypot(at.x - g0.x, at.y - g0.y) < 8) return;
+      // a plain drag only moves the node on screen; Shift+drag moves it into another part or out of its own (2026-10-11)
+      const oe = e.originalEvent || {};
+      if (!(oe.shiftKey || SHIFT)) return;
       const n = node(e.target.id()); if (!canReparent(n)) return; const skip = insideOf(n.id); const own = new Set(ownersOf(n.id).map((o) => o.id));
       let best = null; let area = Infinity;
       cy.nodes().forEach((b) => {
@@ -424,7 +432,9 @@
         const bb = b.boundingBox(); if (at.x < bb.x1 || at.x > bb.x2 || at.y < bb.y1 || at.y > bb.y2) return;
         const a = bb.w * bb.h; if (a < area) { area = a; best = bn; }
       });
-      if (best) dropped(n, best);
+      if (best) { dropped(n, best); return; }
+      const bx = g0.box;
+      if (bx && (at.x < bx.x1 || at.x > bx.x2 || at.y < bx.y1 || at.y > bx.y2)) dropped(n, null);
     });
     cy.on('cxttap', 'edge', (e) => { if (!isHelper(e.target)) { G().select({ kind: 'edge', id: e.target.id() }); edgeMenu(e.target, at(e)); } });
     cy.on('taphold', 'edge', (e) => { if (!isHelper(e.target)) edgeMenu(e.target, at(e)); });
@@ -486,8 +496,8 @@
       { key: 'paste', label: clip ? `Paste "${clip.kind}" edge here` : 'Paste edge here', kbd: K().MOD + 'V', disabled: !clip },
       { key: 'tests', label: 'Run tests', kbd: 'T', disabled: !canTest(n), hint: 'queue a test work item for this node' },
       ...(canReparent(n) ? [
-        { key: 'into', label: 'Move into…', hint: 'put it inside another context, container or component (or drop it on one in Cluster)' },
-        { key: 'out', label: 'Move out', hint: 'to the level above its owner', disabled: !ownersOf(n.id).some((o) => o.nodetype === 'code') },
+        { key: 'into', label: 'Move into…', hint: 'put it inside another context, container or component (or Shift+drag it onto one in Cluster)' },
+        { key: 'out', label: 'Move out', hint: 'to the level above its owner (or Shift+drag it out of its box in Cluster)', disabled: !ownersOf(n.id).some((o) => o.nodetype === 'code') },
       ] : []),
       { key: 'move', label: 'Move file…', hint: 'a new path for its *.iter.md file' },
       { key: 'hide', label: 'Hide from the drawing' },
@@ -710,9 +720,14 @@
   }
   async function deleteReq(q) {
     if (!S.canEdit) return;
-    const reason = await K().ask({ title: `Delete ${q.key || 'requirement'}?`, text: `<b>${esc(reqName(q))}</b> — its <code>##</code> section comes out of <code>${esc((node(q.file) || {}).path || 'its file')}</code>; the rest of the file stays.`,
-      label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Delete requirement', danger: true });
-    if (reason == null) return;
+    const what = `<b>${esc(reqName(q))}</b> — its <code>##</code> section comes out of <code>${esc((node(q.file) || {}).path || 'its file')}</code>; the rest of the file stays.`;
+    let reason = '';
+    if (draftMode()) { if (!(await K().confirm({ title: `Delete ${q.key || 'requirement'}?`, text: what, okLabel: 'Delete requirement', danger: true }))) return; }
+    else {
+      reason = await K().ask({ title: `Delete ${q.key || 'requirement'}?`, text: what,
+        label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Delete requirement', danger: true });
+      if (reason == null) return;
+    }
     try { await api('/graph/reqs/' + enc(q.id), { method: 'DELETE', body: JSON.stringify({ reason }) }); }
     catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return; }
     const sel = G().selected; if (sel && sel.id === q.id) G().select(null);
@@ -968,9 +983,12 @@
   }
   async function removeEdge(r) {
     if (!S.canEdit) return;
-    const reason = await K().ask({ title: 'Remove edge', text: `<b>${esc(nameOf(r.from))}</b> ${esc(VERB[r.kind] || r.kind)} <b>${esc(nameOf(r.to))}</b> — the line comes out of ${esc(nameOf(r.kind === 'supplies' ? r.to : r.from))}'s file.`,
-      label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Remove edge', danger: true });
-    if (reason == null) return;
+    let reason = '';
+    if (!draftMode()) {
+      reason = await K().ask({ title: 'Remove edge', text: `<b>${esc(nameOf(r.from))}</b> ${esc(VERB[r.kind] || r.kind)} <b>${esc(nameOf(r.to))}</b> — the line comes out of ${esc(nameOf(r.kind === 'supplies' ? r.to : r.from))}'s file.`,
+        label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Remove edge', danger: true });
+      if (reason == null) return;
+    }
     try { await api('/graph/edges', { method: 'DELETE', body: JSON.stringify({ from: r.from, to: r.to, kind: r.kind, reason }) }); }
     catch (e) {
       const b = e && e.body; const t = toast('Refused: ' + errMsg(e), { kind: 'err', ms: 9000 });
@@ -1050,13 +1068,20 @@
   }
 
   // ------------------------------------------------------------------ node actions
+  /** while file sync is paused the graph is a draft: removals need no reason (2026-10-11) */
+  const draftMode = () => !!(S && S.data && S.data.syncPaused);
   async function deleteNode(n) {
     if (isReq(n)) return deleteReq(n);
     if (!S.canEdit || n.nodetype === 'project') return;
     const kids = S.data.edges.filter((e) => e.from === n.id).length; const parents = S.data.edges.filter((e) => e.to === n.id).length;
-    const reason = await K().ask({ title: `Delete ${n.name}?`, text: `The ${esc(typeLabel(n).toLowerCase())} node and its file <code>${esc(n.path || '')}</code> go; ${parents ? `${parents} node(s) that list it drop the line` : 'nothing lists it'}${kids ? `, and its ${kids} link(s) out go with it (the nodes they reach stay)` : ''}. Code folders are not touched.`,
-      label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Delete node', danger: true });
-    if (reason == null) return;
+    const what = `The ${esc(typeLabel(n).toLowerCase())} node and its file <code>${esc(n.path || '')}</code> go; ${parents ? `${parents} node(s) that list it drop the line` : 'nothing lists it'}${kids ? `, and its ${kids} link(s) out go with it (the nodes they reach stay)` : ''}. Code folders are not touched.`;
+    let reason = '';
+    if (draftMode()) { if (!(await K().confirm({ title: `Delete ${n.name}?`, text: what, okLabel: 'Delete node', danger: true }))) return; }
+    else {
+      reason = await K().ask({ title: `Delete ${n.name}?`, text: what,
+        label: 'Why?', help: 'Required — recorded with the change (and in the commit).', required: true, requiredMsg: 'Say why: it is recorded with the change.', multiline: true, rows: 2, okLabel: 'Delete node', danger: true });
+      if (reason == null) return;
+    }
     try { await api('/graph/nodes/' + enc(n.id), { method: 'DELETE', body: JSON.stringify({ reason }) }); }
     catch (e) { toast('Refused: ' + errMsg(e), { kind: 'err', ms: 6000 }); return; }
     G().select(null);
@@ -1116,9 +1141,7 @@
     const own = ownersOf(n.id).find((o) => o.nodetype === 'code');
     if (onto && (onto.id === n.id || (own && onto.id === own.id) || insideOf(n.id).has(onto.id) || !canReparent(onto))) return;
     if (!onto && !own) return;
-    const to = onto ? onto.name : (() => { const up = own && ownersOf(own.id).find((o) => o.nodetype === 'code'); return up ? up.name : 'the top level'; })();
-    const ok = await K().confirm({ title: `Move ${n.name}?`, text: onto ? `Put <b>${esc(n.name)}</b> inside <b>${esc(onto.name)}</b>?` : `Take <b>${esc(n.name)}</b> out of <b>${esc(own.name)}</b>, to ${esc(to)}?`, okLabel: 'Move' });
-    if (!ok) { refresh(n.id); return; }
+    // Shift is the intent: no dialog; the toast says what moved (the menu's Move out / Move into undo it)
     if (onto) await reparent(n, onto.id); else await moveOut(n);
   }
 

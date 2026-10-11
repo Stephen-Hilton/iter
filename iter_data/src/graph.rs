@@ -594,9 +594,13 @@ struct ReasonQ {
     reason: String,
 }
 
-fn reason_of(body: &Value, q: &ReasonQ) -> Result<String, ApiError> {
+fn reason_of(body: &Value, q: &ReasonQ, paused: bool) -> Result<String, ApiError> {
     let r = if s(body, "reason").trim().is_empty() { q.reason.trim() } else { s(body, "reason").trim() };
     if r.is_empty() {
+        // while file sync is paused the graph is a draft: a removal needs no reason (2026-10-11)
+        if paused {
+            return Ok(crate::filesync::PAUSED_REMOVAL.to_string());
+        }
         return Err(bad("a removal needs a reason (it is recorded in the commit)"));
     }
     Ok(r.to_string())
@@ -605,7 +609,7 @@ fn reason_of(body: &Value, q: &ReasonQ) -> Result<String, ApiError> {
 async fn node_delete(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>, Query(q): Query<ReasonQ>, body: Bytes) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
     let body = body_json(&body)?;
-    let reason = reason_of(&body, &q)?;
+    let reason = reason_of(&body, &q, crate::filesync::sync_paused(st.store.as_ref(), &name).await)?;
     let _g = nodes::lock(&name).await;
     let mut g = Graph::load(st.store.as_ref(), &name).await?;
     let (touched, kept) = g.delete_node(&id, &user.sub, &reason)?;
@@ -703,7 +707,7 @@ async fn edge_remove(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Q
     user.require_writer()?;
     let req = body_json(&body)?;
     let (f, t, k) = edge_req(&req)?;
-    let reason = reason_of(&req, &q)?;
+    let reason = reason_of(&req, &q, crate::filesync::sync_paused(st.store.as_ref(), &name).await)?;
     let _g = nodes::lock(&name).await;
     let mut g = Graph::load(st.store.as_ref(), &name).await?;
     let touched = g.remove_edge(&f, &t, k, &user.sub, &reason)?;

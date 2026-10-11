@@ -400,6 +400,9 @@ async fn files_pending(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -
     Ok(Json(json!({"project": name, "count": ops.len(), "pending": ops})))
 }
 
+/// The reason recorded for a removal made without one while file sync is paused.
+pub const PAUSED_REMOVAL: &str = "removed while file sync was paused";
+
 /// Whether the project's graph → file sync is paused (`sync_paused` on its record).
 pub async fn sync_paused(store: &dyn crate::storage::Storage, project: &str) -> bool {
     store.get("project", project, crate::api::NOSK).await.ok().flatten().is_some_and(|p| p.get("sync_paused").and_then(|v| v.as_bool()).unwrap_or(false))

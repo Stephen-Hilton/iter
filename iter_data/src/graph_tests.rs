@@ -1362,6 +1362,9 @@ async fn paused_sync_holds_graph_edits_until_resumed() {
     assert_eq!(t.node("p", &id(&a)).await["file_state"], json!("pending_write"), "the edit waits in the graph");
     // a bad body is refused
     assert_eq!(t.call("adm", "POST", "/api/projects/p/files/pause", Some(json!({"paused": "yes"}))).await.0, 400);
+    // while paused a removal needs no reason
+    let draft = t.create("p", json!({"nodetype": "code", "level": "container", "name": "Scratch", "attach_to": id(&a)})).await;
+    t.ok("adm", "DELETE", &format!("/api/projects/p/graph/nodes/{}", id(&draft)), Some(json!({}))).await;
     // resume: everything held goes out at once
     let r = t.ok("adm", "POST", "/api/projects/p/files/pause", Some(json!({"paused": false}))).await;
     assert_eq!(r["paused"], json!(false));
@@ -1370,6 +1373,9 @@ async fn paused_sync_holds_graph_edits_until_resumed() {
     let hb = t.ok("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({"state": "Running"}))).await;
     assert_eq!(hb["files_waiting"], json!(["p"]));
     assert_eq!(t.ok("adm", "GET", "/api/projects/p/graph", None).await["sync_paused"], json!(false));
+    // syncing again: a removal needs its reason
+    let api_node = t.graph("p").await["nodes"].as_array().unwrap().iter().find(|n| n["name"] == "Api").map(id).unwrap();
+    assert_eq!(t.call("adm", "DELETE", &format!("/api/projects/p/graph/nodes/{api_node}"), Some(json!({}))).await.0, 400);
     t.done().await;
 }
 

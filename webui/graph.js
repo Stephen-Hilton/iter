@@ -980,6 +980,9 @@
       }));
     }
     cy.on('free layoutstop', () => setTimeout(fixOverlaps, 0));
+    // Cytoscape logs a warning for every line it cannot draw while its two nodes overlap (mid-drag, mid-settle);
+    // that is expected (the line reappears once they part), so the console stays quiet
+    if (typeof cytoscape.warnings === "function") cytoscape.warnings(false);
 
     function runLayout(layout, v, ub) {
       const bands = ub ? ub.bands : null;

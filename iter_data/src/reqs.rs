@@ -474,7 +474,10 @@ struct ReasonQ {
 async fn req_delete(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>, Query(q): Query<ReasonQ>, body: Bytes) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
     let body = body_json(&body)?;
-    let reason = if s(&body, "reason").trim().is_empty() { q.reason.trim().to_string() } else { s(&body, "reason").trim().to_string() };
+    let mut reason = if s(&body, "reason").trim().is_empty() { q.reason.trim().to_string() } else { s(&body, "reason").trim().to_string() };
+    if reason.is_empty() && crate::filesync::sync_paused(st.store.as_ref(), &name).await {
+        reason = crate::filesync::PAUSED_REMOVAL.to_string();
+    }
     if reason.is_empty() {
         return Err(bad("a removal needs a reason (it is recorded in the commit)"));
     }
