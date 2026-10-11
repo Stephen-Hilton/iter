@@ -1396,3 +1396,55 @@ async fn same_as_marks_copies_of_one_object() {
     assert_eq!(t.call("adm", "POST", "/api/projects/p/graph/edges", Some(json!({"from": uc, "kind": "same_as", "to": x}))).await.0, 400, "code nodes only");
     t.done().await;
 }
+
+// ---------- the sync check (files/reconcile) ----------
+
+#[tokio::test]
+async fn files_reconcile_puts_drift_right_either_way() {
+    let t = T::new().await;
+    t.served("p").await;
+    let proj = file(NodeType::Project, "Shop", "{topdir}/global/shop.project.iter.md", |_| {});
+    let web = file(NodeType::Code, "Web", "{topdir}/src/web/web.code.iter.md", |d| d.level = Some("context".into()));
+    let db = file(NodeType::Code, "DB", "{topdir}/src/db/db.code.iter.md", |d| d.level = Some("context".into()));
+    t.sync("p", json!({"engine": "e1", "full": true, "files": [fjson(&proj, 0), fjson(&web, 0), fjson(&db, 0)]})).await;
+    let h = |d: &NodeDoc| nf::content_hash(&nf::render(d));
+    let rec = |files: Value| t.ok("eng1", "POST", "/api/projects/p/files/reconcile", Some(json!({"engine": "e1", "files": files})));
+
+    // in step: nothing to do
+    let r = rec(json!([
+        {"path": proj.path, "hash": h(&proj), "cached": h(&proj)},
+        {"path": web.path, "hash": h(&web), "cached": h(&web)},
+        {"path": db.path, "hash": h(&db), "cached": h(&db)},
+    ])).await;
+    assert_eq!((r["send"].as_array().unwrap().len(), r["queued"].as_array().unwrap().len(), r["orphans"].as_array().unwrap().len()), (0, 0, 0), "{r}");
+
+    // the web file is as the engine last synced it, but the graph's hash differs
+    // (a server-win rewrite that never landed): the graph's version is queued to be written
+    // the db file changed without the engine noticing: it is asked for again
+    // an unknown file: asked for; the project file not reported: an orphan
+    let r = rec(json!([
+        {"path": web.path, "hash": "stale", "cached": "stale"},
+        {"path": db.path, "hash": "edited", "cached": h(&db)},
+        {"path": "{topdir}/src/new/new.code.iter.md", "hash": "n", "cached": "n"},
+        {"path": "{topdir}/src/web/web.agentmem.iter.md", "hash": "m", "cached": "m"},
+    ])).await;
+    assert_eq!(r["queued"][0]["id"], json!(web.id), "{r}");
+    let send: Vec<&str> = r["send"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    assert_eq!(send, [db.path.as_str(), "{topdir}/src/new/new.code.iter.md"], "agent memory is never synced");
+    assert_eq!(r["orphans"][0]["path"], json!(proj.path));
+    assert_eq!(r["may_delete"], true, "one engine serves p");
+    let n = t.node("p", &web.id).await;
+    assert_eq!((n["file_state"].as_str(), n["node_version"].as_u64()), (Some("pending_write"), Some(2)), "{n}");
+    let pending = t.pending("p").await;
+    assert!(pending.iter().any(|op| op["id"] == json!(web.id) && op["text"] == json!(nf::render(&web))), "{pending:?}");
+    // queued once: a pending node is the normal path's, not the check's
+    let r = rec(json!([{"path": web.path, "hash": "stale", "cached": "stale"}])).await;
+    assert!(r["queued"].as_array().unwrap().is_empty());
+
+    // with a second engine serving p, orphans are reported but not to be deleted
+    t.ok("adm", "PUT", "/api/engines/e2", Some(json!({"state": "Running"}))).await;
+    t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "iter_engine:e2", "to": "project:p", "settings": {"topdir": "/w2/p"}}))).await;
+    let r = rec(json!([{"path": web.path, "hash": h(&web), "cached": h(&web)}])).await;
+    assert_eq!(r["may_delete"], false, "{r}");
+    t.done().await;
+}

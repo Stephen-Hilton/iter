@@ -28,6 +28,6 @@ services:
       # cgroup limit above; leave headroom for iter_data in the same container
       ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY: ${ITER_ARANGO_MEMORY:-5G}
     # everything that persists (database, Arango apps, iter_data's files) in
-    # one host folder, e.g. ~/.iter5/iter_data (deploy.ps1 / deploy.sh set it)
+    # one host folder, e.g. ~/.iter/iter_data (deploy.ps1 / deploy.sh set it)
     volumes:
       - ${ITER_DATA_DIR:?set ITER_DATA_DIR to the host folder for iter_data}:/var/lib/iter_data

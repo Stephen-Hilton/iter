@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Download the GraphRAG embedding model (sentence-transformers/all-MiniLM-L6-v2,
-# Apache-2.0) into iter4/models/all-MiniLM-L6-v2/ — iter_data loads it from
-# there (or from --embed-model / $ITER_EMBED_MODEL). ~91 MB; kept out of git.
-# Idempotent: files already present with the expected checksum are kept.
+# Apache-2.0) into models/all-MiniLM-L6-v2/ in this repo, or into the directory
+# given as the first argument — iter_data and iter_engine look there (and in
+# models/ beside their binary, or --embed-model / $ITER_EMBED_MODEL). ~91 MB;
+# kept out of git. Idempotent: files already present with the expected
+# checksum are kept.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIR="$ROOT/models/all-MiniLM-L6-v2"
+DIR="${1:-$ROOT/models/all-MiniLM-L6-v2}"
 BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
 # the weights this build was verified with (2026-09-29)
 SHA_MODEL="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"

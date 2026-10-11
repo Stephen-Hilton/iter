@@ -178,6 +178,20 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .sf h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:18px 0 6px;border-top:1px solid var(--line);padding-top:12px}
 .sf .list button{margin:2px 4px 2px 0}
 .sf .fieldbad{border-color:var(--bad) !important}
+/* engine keys (admins) */
+.keys code{background:#23272e;padding:1px 5px;border-radius:4px;font-size:12px}
+.keys .kadd{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.keys .kadd input[name=tok]{flex:1 1 320px;min-width:0;font-family:ui-monospace,monospace;font-size:12px}
+.keys .kadd input[name=eng],.keys .kadd input[name=label]{flex:0 1 150px;min-width:0}
+.keys .ktable{width:100%;border-collapse:collapse;font-size:12.5px}
+.keys .ktable th{text-align:left;color:var(--dim);font-weight:normal;font-size:11px;padding:4px 6px;border-bottom:1px solid var(--line)}
+.keys .ktable td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.keys .ktable td.kid{font-family:ui-monospace,monospace}
+.keys .ktable td.kact{text-align:right;white-space:nowrap}
+.keys .ks-active{color:var(--ok)}.keys .ks-expiring{color:var(--warn)}.keys .ks-revoked{color:var(--dim)}
+.keys tr.krevoked td{color:var(--dim)}
+.keys .krot td{background:var(--panel)}
+.keys .kwrap{overflow-x:auto}
 @media (max-width:760px){.projrow .gear{padding:4px 8px}}
 
 /* ---- actions menu ---- */
@@ -360,6 +374,7 @@ body.tab-graph main,body.tab-intro main,body.tab-settings main,body.tab-rag main
       <span class="who" id="who"></span>
       <select id="tz" title="timezone for every timestamp shown (stored on your user record; the data itself is UTC)"></select>
       <button class="gear" id="helpbtn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+      <button class="gear" id="keys-btn" title="Engine keys: add, rotate and revoke the keys engines sign in with (admins)" aria-label="Engine keys" hidden>🔑</button>
       <button class="gear" id="user-gear" title="my settings">⚙</button>
       <button class="ghost" id="logout">logout</button>
     </span>
@@ -613,6 +628,7 @@ $("#refresh").onclick=()=>project&&loadItems(project);
 $("#sort").onchange=()=>{try{localStorage.setItem("iter5.sort",$("#sort").value);}catch(e){};renderItems();};
 $("#newitem").onclick=()=>openForm("create",null);
 $("#user-gear").onclick=()=>openSettings("user",me);
+$("#keys-btn").onclick=()=>openSettings("keys");
 $("#engine-add").onclick=async()=>{
   /* iter5: an engine registers itself on first start (iter_engine --data-url URL --env-file PATH);
      adding one by hand, and connecting it to projects and accounts, happens in the settings graph */
@@ -763,6 +779,7 @@ async function load(){
   };
   $("#who").textContent=((meRow&&rname(meRow))||me||"")+(myRole?" · "+myRole:"");
   document.body.classList.toggle("viewer",myRole==="viewer");
+  $("#keys-btn").hidden=myRole!=="admin";
   projects.sort((a,b)=>rname(a).localeCompare(rname(b),undefined,{sensitivity:"base"}));
   try{const lp=localStorage.getItem("iter5.project");if(lp&&!project&&projects.some(p=>rid(p)===lp))project=lp;}catch(e){}
   // each project: its switch, and what else keeps it from running (server, no engine, engines off)
@@ -1654,6 +1671,7 @@ async function openSettings(kind,name){
     if(kind==="user")return await userSettings(name);
     if(kind==="data")return dataSettings();
     if(kind==="tooling")return await toolingSettings(name);
+    if(kind==="keys")return await keysScreen();
   }catch(e){alert("could not open settings: "+e.message);}
 }
 async function projectSettings(name){
@@ -1749,6 +1767,76 @@ async function userSettings(name){
     try{await api("/api/users/"+encodeURIComponent(n),{method:"PUT",body:JSON.stringify({role:r,password:p,email:"",settings:{},authz:{}})});openSettings("user",n);}
     catch(e){sdlg.querySelector("#sf-err").textContent="add failed: "+e.message;}
   };
+}
+/* Engine keys (2026-10-11, admins): an engine machine makes its own key pair
+   (`iter_engine key new`); the private key stays on the machine and only its
+   public key is pasted here. Rotate takes a new public key from the same
+   machine (the engine switches to it by itself once it is accepted); Revoke
+   stops a key, and every session signed in with it, at once. */
+async function keysScreen(note){
+  const r=await api("/api/keys");
+  const keys=r.keys||[],older=r.older||[];
+  const STATUS={active:"active",expiring:"stops",revoked:"revoked"};
+  const row=t=>`<tr class="${t.status==="revoked"?"krevoked":""}">
+      <td>${esc(t.engine)}</td><td class="kid" title="${esc(t.public_key||"")}">${esc(t.id)}</td><td>${esc(t.label||"")}</td>
+      <td class="ks-${esc(t.status)}" title="${t.revoked?`stops working ${esc(fmtTs(t.revoked))} ${esc(tzAbbrev())}${t.revoked_by?` (by ${esc(t.revoked_by)})`:""}`:"no end date"}">${STATUS[t.status]||esc(t.status)}${t.status==="expiring"?` ${esc(fmtTs(t.revoked))}`:""}${t.replaced_by?` → ${esc(t.replaced_by)}`:""}</td>
+      <td title="by ${esc(t.created_by||"")}">${esc(fmtTs(t.created))}</td><td>${t.last_used?esc(fmtTs(t.last_used)):"never"}</td>
+      <td class="kact">${t.status==="revoked"?`<button class="ghost sm" data-kdel="${esc(t.id)}">delete</button>`
+        :`${t.status==="active"?`<button class="ghost sm" data-krot="${esc(t.id)}">rotate…</button> `:""}<button class="ghost sm" data-krev="${esc(t.id)}">revoke</button>`}</td></tr>`;
+  sdlg.innerHTML=`<div class="sf keys" style="padding:16px">
+    <div class="dlghead"><h2>Engine keys</h2><button class="ghost sm" id="sf-close">close</button></div>
+    <div class="kv" style="margin:6px 0 10px">An engine proves who it is with a key of its own. On the engine machine, <code>iter_engine key new</code> makes it and prints its public key (<code>iter_…</code>): paste that here. The private key never leaves the machine, so nothing secret is copied. <b>Rotate</b> swaps in a new key from the same machine (run <code>iter_engine key new</code> there again; the engine switches by itself once you save). <b>Revoke</b> stops a key at once, along with every session it signed in.</div>
+    <h3>Add a key</h3>
+    <div class="kadd"><input name="tok" id="k-pub" placeholder="iter_… public key from iter_engine key new" autocomplete="off" spellcheck="false">
+      <input name="eng" id="k-eng" placeholder="engine name" autocomplete="off"><input name="label" id="k-label" placeholder="note (optional)" autocomplete="off"><button class="sm" id="k-add">add</button></div>
+    <div class="help">The engine name is the one the engine runs as (<code>--name</code>, else its hostname); it need not be running yet: it registers itself with this key on its first start.</div>
+    <div class="err" id="sf-err"></div><div class="kv" id="k-note">${note?esc(note):""}</div>
+    <h3>Keys</h3>
+    ${keys.length?`<div class="kwrap"><table class="ktable"><thead><tr><th>engine</th><th>id</th><th>note</th><th>status</th><th>added</th><th>last used</th><th></th></tr></thead>
+      <tbody>${keys.map(row).join("")}</tbody></table></div>`:`<div class="kv">No engine keys yet.</div>`}
+${older.length?`<h3>Older engine logins</h3>
+    <div class="kv" style="margin-bottom:6px">Before engine keys, each engine signed in as a user of its own (role engine). Once that engine runs with a key from this screen, remove its user: the old login stops working and the user leaves the users list.</div>
+    <div class="list">${older.map(u=>`<span style="display:inline-flex;gap:6px;align-items:center;margin:2px 10px 2px 0">${esc(u.user)}${u.name&&u.name!==u.user?` <span class="kv">(shown as “${esc(u.name)}”)</span>`:""}<button class="ghost sm" data-ksig="${esc(u.user)}">remove</button></span>`).join("")}</div>`:""}
+  </div>`;
+  const err=m=>{sdlg.querySelector("#sf-err").textContent=m;};
+  const run=async(fn,done)=>{err("");try{await fn();await keysScreen(done);}catch(e){err(e.message);}};
+  sdlg.querySelector("#sf-close").onclick=()=>sdlg.close();
+  sdlg.querySelector("#k-add").onclick=()=>{
+    const public_key=sdlg.querySelector("#k-pub").value.trim(),engine=sdlg.querySelector("#k-eng").value.trim(),label=sdlg.querySelector("#k-label").value.trim();
+    if(!public_key||!engine)return err("paste a public key and name its engine");
+    run(()=>api("/api/keys",{method:"POST",body:JSON.stringify({public_key,engine,label})}),`added: ${engine} can sign in with it now`);
+  };
+  sdlg.querySelectorAll("[data-krev]").forEach(b=>b.onclick=()=>{
+    const t=keys.find(x=>x.id===b.dataset.krev);
+    if(!confirm(`Revoke key ${t.id} of ${t.engine}? It stops working now, with every session it signed in; the engine is refused until it has another key.`))return;
+    run(()=>api(`/api/keys/${encodeURIComponent(t.id)}/revoke`,{method:"POST"}),`revoked ${t.id}`);
+  });
+  sdlg.querySelectorAll("[data-kdel]").forEach(b=>b.onclick=()=>run(()=>api(`/api/keys/${encodeURIComponent(b.dataset.kdel)}`,{method:"DELETE"}),`deleted ${b.dataset.kdel}`));
+  sdlg.querySelectorAll("[data-krot]").forEach(b=>b.onclick=()=>{
+    const tr=b.closest("tr");
+    if(tr.nextElementSibling&&tr.nextElementSibling.classList.contains("krot"))return tr.nextElementSibling.querySelector("input").focus();
+    const t=keys.find(x=>x.id===b.dataset.krot);
+    tr.insertAdjacentHTML("afterend",`<tr class="krot"><td colspan="7"><div class="kadd">
+      <input name="tok" placeholder="new iter_… public key from iter_engine key new on ${esc(t.engine)}" autocomplete="off" spellcheck="false">
+      <select title="when the old key stops: agents already running hold sessions of it until they finish, so give them time unless the machine was lost">
+        <option value="0">old one stops now (machine lost)</option><option value="60">old one stops in 1 hour</option><option value="360" selected>old one stops in 6 hours</option><option value="1440">old one stops in 24 hours</option></select>
+      <button class="sm">rotate</button><button class="ghost sm">cancel</button></div></td></tr>`);
+    const box=tr.nextElementSibling,[go,cancel]=box.querySelectorAll("button");
+    box.querySelector("input").focus();
+    cancel.onclick=()=>box.remove();
+    go.onclick=()=>{
+      const public_key=box.querySelector("input").value.trim(),grace_minutes=+box.querySelector("select").value;
+      if(!public_key)return err("paste the new public key");
+      run(()=>api(`/api/keys/${encodeURIComponent(t.id)}/rotate`,{method:"POST",body:JSON.stringify({public_key,grace_minutes})}),`rotated: ${t.engine} switches to the new key within a minute`);
+    };
+  });
+  sdlg.querySelectorAll("[data-ksig]").forEach(b=>b.onclick=()=>{
+    const u=b.dataset.ksig;
+    const moved=keys.some(t=>t.engine===u&&t.status!=="revoked");
+    if(!confirm(`Remove the engine user ${u}? An engine still signing in as it is refused from now on.${moved?"":`\n\nEngine ${u} has no key on this screen yet: run iter_engine key new on it and add the key first, or it stops.`}`))return;
+    run(()=>api("/api/settings/nodes/"+encodeURIComponent("user:"+u),{method:"DELETE"}),`engine user ${u} removed`);
+  });
+  if(!sdlg.open)sdlg.showModal();
 }
 async function dataSettings(){
   const h=await fetch("/health").then(r=>r.json()).catch(()=>({}));
@@ -2080,7 +2168,7 @@ function introCtx(){return {api,project,isAdmin:isAdmin(),
   // the slides point at iter's own map: show that project (when this server has it), then the node
   openGraph:async(q,p)=>{const own=p||["iter5","iter"].find(n=>projectsCache.some(x=>rid(x)===n));if(own&&projectsCache.some(x=>rid(x)===own)&&project!==own)await loadItems(own);
     await setTab("graph");setTimeout(()=>{if(q&&window.IterGraph&&IterGraph.focus)IterGraph.focus(q);},700);},
-  openSettings:id=>openSettingsGraph(id||""),
+  openSettings:id=>openSettingsGraph(id||""),openKeys:()=>openSettings("keys"),
   openQueue:()=>setTab("queue"),reloadProjects:()=>load(),
   selectProject:async name=>{await load();if(projectsCache.some(x=>rid(x)===name)){await loadItems(name);graphDrawnFor=null;}}};}
 function showIntro(){

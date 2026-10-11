@@ -47,7 +47,7 @@ together.
 `${ITER_PORT:-8400}:8400` and the Arango console on
 `127.0.0.1:${ARANGO_HOST_PORT:-8630}:8529`, reads secrets from
 `run/docker.env`, and bind-mounts one host folder, `${ITER_DATA_DIR}`
-(`deploy.ps1` / `deploy.sh` default it to `~/.iter5/iter_data`), at
+(`deploy.ps1` / `deploy.sh` default it to `~/.iter/iter_data`), at
 `/var/lib/iter_data`: everything that persists, visible on the host. The health
 check calls `/health`.
 

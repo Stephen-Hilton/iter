@@ -1,5 +1,5 @@
 [Unit]
-Description=ArangoDB 3.12 for iter5
+Description=ArangoDB 3.12 for iter
 After=network.target
 
 [Service]

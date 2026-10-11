@@ -53,7 +53,7 @@ On Windows the server runs in a WSL2 distro, and each engine runs where its proj
 - Restart WSL only with `restart-wsl`, never a bare `wsl --shutdown` / `wsl --terminate <distro>`: under a running Docker Desktop that breaks its WSL integration ("WSL integration with distro ... unexpectedly stopped" every ~30 s), and it ends the logon task's keepalive, so the distro is no longer held. `restart-wsl` stops Docker Desktop first, restarts the distro and its keepalive, then starts Docker Desktop again.
 
 - Needs Rust (`winget install Rustlang.Rustup`, MSVC toolchain), Git for Windows and the `claude` CLI on PATH.
-- The engine uses `~\.iter5\.env`, registers under the hostname, and logs to `~\.iter5\engine.log` (`-EnvFile`, `-Name`, `-DataUrl` override).
+- The engine signs in with `~\.iter\engine.key`, reads account tokens from `~\.iter\.env`, registers under the hostname, and logs to `~\.iter\engine.log` (`-EnvFile`, `-Name`, `-DataUrl` override). A machine set up when this folder was `~\.iter5` is moved over the next time `deploy.ps1` runs with no engine running from it; `~\.iter5` then links to `~\.iter`.
 - Shell steps (exec items, git postwork, test scripts, the `iter` shim) run under Git for Windows' bash, never WSL's `bash.exe`; `ITER_BASH` overrides. The checkout also gets `.iter\bin\iter.cmd` for cmd and PowerShell.
 - Give a `serves` edge a Windows topdir with forward slashes: `C:/Users/me/dev/project`.
 - Windows Smart App Control can block cargo's unsigned debug build scripts (`os error 4551`); `cargo test --release` builds past it.
@@ -62,14 +62,30 @@ On Windows the server runs in a WSL2 distro, and each engine runs where its proj
 
 ## Start an engine (once per machine)
 
+An engine-only machine (iter_data runs elsewhere) is set up from the folder that holds your code projects:
+
 ```bash
-iter_engine --data-url http://127.0.0.1:8400 --env-file ~/.iter5/.env [--name Engine01]
+cd ~/dev && git clone https://github.com/Stephen-Hilton/iter.git && ./iter/install.sh   # Linux (Omarchy / Arch, Debian, Ubuntu)
+```
+```powershell
+cd ~\dev; git clone https://github.com/Stephen-Hilton/iter.git; .\iter\install.ps1     # Windows
 ```
 
-- The env file holds `ITER_ENGINE_TOKEN` (the engine's iter_data credential, minted by an admin with `POST /api/users/<user>/token`), plus each account's token under that account's `token_envar`. The engine re-reads the file while it runs.
+The script checks and installs the tools, asks for the iter_data URL and a name unique to the machine, builds `iter_engine`, and fetches the embedding model. It makes the engine token and waits while you register it in the Engine keys screen. On a laptop it offers to turn off sleep. It then starts the engine as a service (Linux: systemd `iter-engine`; Windows: a logon task). Projects go beside the repo: give the engine's `serves` edge the topdir `~/dev/<project>`, then run `./iter/install.sh projects` (`install.ps1 projects`) to clone them. The other verbs are `status`, `update` and `accounts` (Linux).
+
+By hand:
+
+```bash
+iter_engine key new [--name Engine01]                      # once: makes this machine's key; add its public key in Engine keys
+iter_engine --data-url http://127.0.0.1:8400 [--name Engine01]
+```
+
+- Everything a machine keeps for iter is in `~/.iter`: the engine key (`engine.key`), the env file with each account's token under that account's `token_envar` (`.env`, re-read while the engine runs), the binary, the embedding model and the logs. `--key-file` and `--env-file` point elsewhere.
+- **Several engines on one repository.** Each engine has its own clone, so a push can find the remote ahead of it. The engine merges the remote in and pushes again. When the merge conflicts, an agent session resolves it in the checkout: it is told the conflicted files, both sides' commits and the work items behind them. It edits the files, and the engine checks that no conflict marker is left before committing the merge. If the agent cannot combine the two sides, the merge is backed out, so a checkout is never left half-merged, and the work item moves to `question` with what conflicts and why. That engine starts nothing new in that project until you answer; other engines carry on. Your answer is the instruction for the next attempt. The same merge runs before every work item (the git prework).
+- **Omarchy laptops.** `install.sh` asks before each change. It turns off suspend and makes closing the lid do nothing. It turns off Omarchy's idle lock and screensaver (in `~/.config/omarchy/shell.json`) and the lock on lid close (in `~/.config/hypr/bindings.lua`). It also sets up `hypridle` to turn the screen off after 10 minutes. On older Omarchy, its `hypridle.conf` is kept as `hypridle.conf.before-iter`.
+- **Engine keys.** An engine proves who it is with a key pair it makes for itself: `iter_engine key new` writes the private key to `~/.iter/engine.key` (it never leaves the machine) and prints the public key (`iter_…`). An admin pastes the public key into **Engine keys** (the 🔑 button in the webui header), naming the engine. Nothing secret is copied. The engine signs a one-time login with its key and gets a session token, which it and the agents it starts send with each request. Every request re-checks the key, so **Revoke** stops the engine and its agents at once. **Rotate**: run `key new` again on the machine (it keeps the new key as `engine.key.next`) and paste its public key under the old row's *rotate…*. The running engine switches by itself within a minute, and the old key stops working at the time you pick, which gives agents already running time to finish. `iter_engine key status --data-url URL` shows whether iter_data accepts the keys. An engine is a machine, not a user: it signs in as the engine itself, never as a person. Engines set up before engine keys signed in as a user of their own (role engine) with `ITER_ENGINE_TOKEN`; once such an engine has a key, remove that user under *Older engine logins* in the same screen.
 - If you leave out `--data-url`, the engine uses `$ITER_DATA_URL`. If you leave out `--name`, it uses the short hostname. The name it registers with becomes the engine's id; renaming the engine in the Settings graph changes only its display name, and either one works as `--name` afterwards.
-- Or let the server walk you through it (checks tools, builds the binary if missing, writes the env file with mode 600, starts the engine and waits for its check-in; files live in `~/.iter5/`):
-  `curl -fsSL http://127.0.0.1:8400/iter_engine_setup.sh | bash -s -- --data-url http://127.0.0.1:8400 --engine Engine01 --token <token> --start` (`--status` / `--stop` later).
+- `/iter_engine_setup.sh`, the older setup script, is retired: it only points at `install.sh` / `install.ps1`.
 - Nothing else is read from disk. On its first heartbeat the engine registers itself, and it appears in the Settings graph.
 
 To give the engine work, connect it in the **Settings** tab (the settings graph):
@@ -183,7 +199,7 @@ Checkout verbs work from a shell in the checkout:
 | `usecase --file F [--add\|--remove <path>] [--list]` | edit a use case's parts |
 | `migrate5 --from <iter4 checkout> --to <dir> [--dry-run] [--json]` | convert iter4 → iter5 in a copy, never in place |
 
-`sync`, `sweep` and `rag sync` connect with `--data-url` / `$ITER_DATA_URL` and `$ITER_ENGINE_TOKEN` (or `$ITER_TOKEN`).
+`sync`, `sweep` and `rag sync` connect with `--data-url` / `$ITER_DATA_URL` and `$ITER_ENGINE_TOKEN` (or `$ITER_TOKEN`), else this machine's engine key (`~/.iter/engine.key`).
 
 ## MCP
 

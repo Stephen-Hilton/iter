@@ -384,9 +384,20 @@ pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
 
 // ---------- queries used by authz, assignments, get_next ----------
 
-/// Engines a token subject owns: engine records with `user == sub`, plus
-/// active `owns` edges from `user:<sub>`.
+/// The engine an engine token signs in as (keys.rs): its subject is
+/// `iter_engine:<id>`, the engine itself, with no user behind it. A user id
+/// never contains ':' (user_put), so no person can be mistaken for one.
+pub fn machine_engine(sub: &str) -> Option<&str> {
+    sub.strip_prefix("iter_engine:").filter(|e| !e.is_empty())
+}
+
+/// Engines a token subject owns: the engine itself for an engine token;
+/// for a person (or an older signed engine-user token), engine records with
+/// `user == sub`, plus active `owns` edges from `user:<sub>`.
 pub async fn engines_of_user(store: &dyn Storage, edges: &[SysEdge], sub: &str) -> Result<Vec<String>, StorageError> {
+    if let Some(engine) = machine_engine(sub) {
+        return Ok(vec![engine.to_string()]);
+    }
     let mut out: Vec<String> = store
         .scan("engine")
         .await?

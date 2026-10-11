@@ -501,9 +501,45 @@ fn run_all(
     let has_remote = is_repo
         && run_shell(topdir, "git remote", 15).map(|o| !o.trim().is_empty()).unwrap_or(false);
 
+    // the merge conflict resolver (merge.rs): one agent session in this
+    // checkout, on this item's account, editing the conflicted files only
+    let request = request_text(details, item);
+    let resolve_with = |prompt: &str| -> Result<String, String> {
+        let _mcp = mcp_config(api, project.key(), &item.id);
+        let ctx = crate::provider::AgentContext {
+            prompt: prompt.to_string(),
+            cwd: std::path::PathBuf::from(topdir),
+            mcp_config: _mcp.as_ref().map(|m| m.path()),
+            allowed_tools: Some(format!("Read,Glob,Grep,Edit,MultiEdit,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*){}",
+                if _mcp.is_some() { format!(",{MCP_READ_TOOLS}") } else { String::new() })),
+            role: crate::provider::Role::Explain,
+            ..Default::default()
+        };
+        let model = crate::provider::model_for(project.key(), account, "sonnet");
+        crate::provider::call(project, account, &model, &ctx, 900, Some(40)).map(|o| o.text)
+    };
+    let resolver = crate::merge::Resolver { api, project, item, request: &request, run: &resolve_with };
+    // a merge nobody could finish: shell items fail (and retry); agent items
+    // ask a human, and this engine holds the project until the answer
+    let conflict = |c: crate::merge::Conflict| -> Result<Option<RunOut>, String> {
+        if item.is_shell() {
+            return Err(crate::merge::MergeError::Conflict(c).to_string());
+        }
+        crate::merge::escalate(api, project, item, topdir, &c)?;
+        Ok(Some(RunOut::plain(format!("held: merge conflict in {} — a question asks a human how to combine them", c.files.join(", ")))))
+    };
+
     // git prework is engine-enforced (decided 2026-09-01), not optional
     if is_repo && has_remote {
-        run_shell(topdir, "git pull --no-rebase", 120)?;
+        match crate::merge::pull(topdir, Some(&resolver)) {
+            Ok(()) => {}
+            Err(crate::merge::MergeError::Conflict(c)) => {
+                if let Some(out) = conflict(c)? {
+                    return Ok(out);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     }
     // prose steps (agent_tooling kind prepost) run as agent turns inside
     // run_claude; only the rest are engine-run shell steps
@@ -543,7 +579,15 @@ fn run_all(
         }
         LAST_COMMIT.with(|c| *c.borrow_mut() = Some(outcome));
         if has_remote {
-            run_shell(topdir, "git push", 180)?;
+            match crate::merge::push(topdir, Some(&resolver)) {
+                Ok(()) => {}
+                // the work is done and committed here: the item keeps its
+                // output and waits on the human in `question`
+                Err(crate::merge::MergeError::Conflict(c)) => {
+                    conflict(c)?;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
         }
     }
     for extra in item.postwork.iter().filter(|p| !prose.contains(*p)) {
@@ -958,7 +1002,7 @@ fn run_claude(
         ("ITER_TEST_DIR".into(), "tests".into()),
         ("ITER_USECASE_DIR".into(), format!("{}/global/usecases", topdir.trim_end_matches('/'))),
         ("ITER_DATA_URL".into(), api.base.clone()),
-        ("ITER_ENGINE_TOKEN".into(), api.token.clone()),
+        ("ITER_ENGINE_TOKEN".into(), api.token()),
         // the critic (`iter critreview`) dispatches on the same provider/account
         ("ITER_PROVIDER".into(), crate::provider::provider_for(account)),
         ("ITER_ACCOUNT".into(), account.to_string()),
@@ -1124,14 +1168,14 @@ impl Drop for McpConfig {
 }
 
 pub(crate) fn mcp_config(api: &Api, project: &str, workid: &str) -> Option<McpConfig> {
-    if api.base.is_empty() || api.token.is_empty() {
+    if api.base.is_empty() || api.token().is_empty() {
         return None;
     }
     let dir = std::env::temp_dir().join("iter-mcp");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{}-{}.json", workid.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>(), uuid::Uuid::new_v4().simple()));
     let cfg = json!({"mcpServers": {"iter": {"type": "http", "url": format!("{}/mcp", api.base.trim_end_matches('/')),
-        "headers": {"Authorization": format!("Bearer {}", api.token), "X-Iter-Project": project, "X-Iter-Workid": workid}}}});
+        "headers": {"Authorization": format!("Bearer {}", api.token()), "X-Iter-Project": project, "X-Iter-Workid": workid}}}});
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -1293,7 +1337,7 @@ pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut,
 /// A git step that writes the index: a lock held by a git process outside
 /// this engine (an agent's own `git` in its session) is waited out for up to
 /// ~10 s instead of failing the commit.
-fn git_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
+pub(crate) fn git_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
     let mut attempt = 0;
     loop {
         match run_shell(cwd, script, timeout_sec) {
@@ -1306,7 +1350,7 @@ fn git_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String
     }
 }
 
-fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
+pub(crate) fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
     let mut cmd = iter_core::platform::bash();
     cmd.arg("-c")
         .arg(script)
@@ -1334,7 +1378,7 @@ fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout
         .env("ITER_SHELL", "1")
         .env("ITER_TOPDIR", topdir)
         .env("ITER_DATA_URL", &api.base)
-        .env("ITER_ENGINE_TOKEN", &api.token)
+        .env("ITER_ENGINE_TOKEN", api.token())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

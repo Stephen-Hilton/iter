@@ -1,7 +1,7 @@
 ---
 id: cac0e3d9-a824-491a-bd07-4cc292e2eb4d
 name: "linux — native systemd install (server, engine, backups)"
-desc: "install.sh installs iter5 natively on a systemd Linux, including a WSL2 distro on Windows: ArangoDB (the docker image's own static build), iter_data on :8400 and an online backup timer as systemd services in one 6 GB slice, and this machine's iter_engine as a service. Everything except the database lives in ~/.iter5. On Windows this replaces the docker container: deploy.ps1 startup/autostart bring the distro up at logon."
+desc: "install.sh installs iter5 natively on a systemd Linux, including a WSL2 distro on Windows: ArangoDB (the docker image's own static build), iter_data on :8400 and an online backup timer as systemd services in one 6 GB slice, and this machine's iter_engine as a service. Everything except the database lives in ~/.iter. On Windows this replaces the docker container: deploy.ps1 startup/autostart bring the distro up at logon."
 creator: "stephen"
 teststate: inherit
 level: container
@@ -35,14 +35,14 @@ Linux engine beside the Windows one.
   `arangodb:3.12.12`). Its binaries are static, so the server runs the exact
   build the container ran; the Debian package repository stops at an older
   3.12. Config `arangod.conf` (localhost only, `vector-index = true`), data in
-  `/var/lib/arangodb3` (linked as `~/.iter5/iter_data/arango`), first-start root
+  `/var/lib/arangodb3` (linked as `~/.iter/iter_data/arango`), first-start root
   password from `/etc/arangodb3/root.env`.
-- **iter_data**, built from this workspace into `~/.iter5/bin`, with the
-  embedding model in `~/.iter5/models` and its environment in
-  `~/.iter5/data.env` (admin password and JWT secret from `$ITER_ENV_FILE`,
+- **iter_data**, built from this workspace into `~/.iter/bin`, with the
+  embedding model in `~/.iter/models` and its environment in
+  `~/.iter/data.env` (admin password and JWT secret from `$ITER_ENV_FILE`,
   default an existing `data.env`, else the repo `.env`; the Arango URL,
   credentials and model path). It listens on `0.0.0.0:8400`, which a WSL distro
-  forwards to Windows as `127.0.0.1:8400`. Log: `~/.iter5/iter_data.log`.
+  forwards to Windows as `127.0.0.1:8400`. Log: `~/.iter/iter_data.log`.
 - **`iter.slice`** holds both services: `MemoryMax=6G`, no swap, and arangod is
   told it has 5 GB (`ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY`), because it sizes
   caches and query limits from the machine's RAM, not from a cgroup cap. These
@@ -51,16 +51,17 @@ Linux engine beside the Windows one.
   hours. `arangodump` reads a consistent snapshot while arangod keeps serving,
   so nothing stops. Each run writes one `iter5-<utc time>.tar` (the dump plus
   `data.env` and iter_data's secret files) to `$ITER_BACKUP_DIR` (default
-  `~/.iter5/backups`; set it in `~/.iter5/backup.env`, e.g. a `/mnt/c/...` path
+  `~/.iter/backups`; set it in `~/.iter/backup.env`, e.g. a `/mnt/c/...` path
   so backups outlive the distro) and keeps the newest `$ITER_BACKUP_KEEP` (28).
   The restore command is in the script's header.
 
 ## `engine`
 
-Builds iter_engine into `~/.iter5/bin` and runs it as `iter-engine.service`
+Builds iter_engine into `~/.iter/bin` and runs it as `iter-engine.service`
 under the invoking user, with `~/.local/bin` and `~/.cargo/bin` on PATH for the
-agents' tools. It needs `~/.iter5/.env` with `ITER_ENGINE_TOKEN` (written by
-`tools/iter_engine_setup.sh`). A stop kills the whole control group, so the
+agents' tools. It needs the engine key `~/.iter/engine.key` (made by
+`iter_engine key new`, which the root `install.sh` runs) or, on an engine set
+up before engine keys, `ITER_ENGINE_TOKEN` in `~/.iter/.env`. A stop kills the whole control group, so the
 agent sessions it started stop with it: `update` refuses to restart a running
 engine without `--yes`.
 

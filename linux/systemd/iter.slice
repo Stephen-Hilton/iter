@@ -1,5 +1,5 @@
 [Unit]
-Description=iter5 data services (ArangoDB + iter_data), capped like the docker container
+Description=iter data services (ArangoDB + iter_data), capped like the docker container
 
 [Slice]
 MemoryMax=6G

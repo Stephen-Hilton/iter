@@ -28,6 +28,14 @@
 //!    path inside a live lock waits for a later tick), commit only the touched
 //!    files (`iter: graph edit — …`), push when a remote exists, then
 //!    `POST files/ack {engine, acks:[{id, node_version, path, hash, commit}]}`.
+//! 5. **sync check** (every [`RECONCILE_EVERY`], writable checkouts) — every
+//!    node file's disk hash and the hash last synced go to `POST
+//!    files/reconcile`, which compares them with the graph itself (steps 1–4
+//!    only compare the disk with this engine's own memory). The graph queues
+//!    a write for a file it moved past (it lands through step 4); a file it
+//!    asks for again is re-read and sent next tick; a graph node with no file
+//!    here is removed when this engine is the project's only engine and the
+//!    file is really gone, else only logged.
 //!
 //! State: per file `{id, hash, sem, version, stat}` in memory and in
 //! `<topdir>/.iter/filesync.json` (keyed by server + project), so a restart
@@ -50,6 +58,8 @@ use std::time::{Duration, Instant};
 
 /// A full walk of the scan roots at least this often.
 pub const FULL_EVERY: Duration = Duration::from_secs(300);
+/// The sync check against the graph (files/reconcile) at most this often.
+pub const RECONCILE_EVERY: Duration = Duration::from_secs(120);
 /// GraphRAG re-index after a sync round changed something, at most this often.
 pub const RAG_EVERY: Duration = Duration::from_secs(60);
 /// Where the per-checkout state lives (inside the engine's `.iter/`).
@@ -101,6 +111,8 @@ pub struct TickStats {
     pub pending_applied: usize,
     pub pending_waiting: usize,
     pub commits: Vec<String>,
+    /// the sync check ran this tick: (asked again, queued, orphans removed)
+    pub reconciled: Option<(usize, usize, usize)>,
 }
 
 /// Per served project, held by the engine between ticks.
@@ -125,6 +137,9 @@ pub struct FileSyncState {
     dirty: bool,
     last_rag: Option<Instant>,
     rag: Option<std::thread::JoinHandle<()>>,
+    last_reconcile: Option<Instant>,
+    /// orphans last reported, so the log says it once per change
+    orphans_said: usize,
     pub last: TickStats,
 }
 
@@ -239,14 +254,19 @@ pub fn commit_paths(top: &Path, rels: &[String], msg: &str) -> Result<Option<Str
 }
 
 /// `git push` when the checkout has a remote, on its own thread (a slow or
-/// unreachable remote never delays a tick; a failure is logged).
+/// unreachable remote never delays a tick; a failure is logged). A remote
+/// that moved on is merged in and the push tried again (merge::push): with
+/// several engines on one repository the other clones push too. There is no
+/// work item here to resolve a conflict for, so one is backed out and left
+/// to the next work item's merge.
 fn push_async(top: &Path) {
-    let Ok(remotes) = git(top, &["remote"]) else { return };
-    let Some(remote) = remotes.lines().find(|r| *r == "origin").or_else(|| remotes.lines().next()).map(String::from) else { return };
-    let top = top.to_path_buf();
+    if git(top, &["remote"]).map(|r| r.trim().is_empty()).unwrap_or(true) {
+        return;
+    }
+    let top = top.to_string_lossy().into_owned();
     std::thread::spawn(move || {
-        if let Err(e) = git(&top, &["push", "-q", &remote, "HEAD"]) {
-            eprintln!("[engine] push from {} failed: {e}", top.display());
+        if let Err(e) = crate::merge::push(&top, None) {
+            eprintln!("[engine] push from {top} failed: {e}");
         }
     });
 }
@@ -437,6 +457,8 @@ pub fn tick(
     if !st.loaded {
         load_state(st, api, project, &top);
     }
+    // the first sync of a checkout sends everything; the check waits a round
+    let started_fresh = st.fresh;
     // files a build just wrote
     {
         let mut built = BUILT.lock().unwrap_or_else(|p| p.into_inner());
@@ -650,6 +672,15 @@ pub fn tick(
         }
     }
 
+    // ---- sync check against the graph
+    if !read_only && !started_fresh && !st.fresh && st.last_reconcile.is_none_or(|t| t.elapsed() >= RECONCILE_EVERY) {
+        st.last_reconcile = Some(Instant::now());
+        match reconcile(api, engine, project, &top, st) {
+            Ok(r) => stats.reconciled = Some(r),
+            Err(e) => eprintln!("[engine] {project}: sync check failed: {e}"),
+        }
+    }
+
     if st.dirty && !read_only {
         save_state(st, api, project, &top);
         st.dirty = false;
@@ -666,6 +697,59 @@ pub fn tick(
     }
     st.last = stats;
     Ok(())
+}
+
+/// One sync check (step 5 of the module doc): (files asked for again,
+/// writes queued, orphans removed).
+fn reconcile(api: &Api, engine: &str, project: &str, top: &Path, st: &mut FileSyncState) -> Result<(usize, usize, usize), String> {
+    let mut files: Vec<Value> = Vec::new();
+    for (rel, m) in &st.files {
+        // a file gone from the disk is the scan's to report
+        let Ok(text) = std::fs::read_to_string(top.join(rel)) else { continue };
+        files.push(json!({"path": stored(rel), "hash": nodefile::content_hash(&text), "cached": m.hash}));
+    }
+    let reply = api
+        .post(&format!("/api/projects/{project}/files/reconcile"), &json!({"engine": engine, "files": files}))
+        .map_err(|e| e.to_string())?;
+    let mut asked = 0;
+    for p in reply["send"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+        let rel = rel_of(p).to_string();
+        if let Some(m) = st.files.get_mut(&rel) {
+            m.hash.clear(); // read and sent again next tick, whatever its stat says
+        }
+        st.retry.insert(rel);
+        asked += 1;
+    }
+    let queued = reply["queued"].as_array().map(|a| a.len()).unwrap_or(0);
+    let orphans: Vec<String> = reply["orphans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o["path"].as_str())
+        // a file this engine does not track but that is on disk (outside the
+        // scan roots, git-ignored) is not an orphan's to judge
+        .filter(|p| !top.join(rel_of(p)).exists())
+        .map(String::from)
+        .collect();
+    let mut removed = 0;
+    if !orphans.is_empty() {
+        if reply["may_delete"].as_bool().unwrap_or(false) {
+            let r = api
+                .post(&format!("/api/projects/{project}/files/sync"), &json!({"engine": engine, "full": false, "files": [], "deleted": orphans}))
+                .map_err(|e| e.to_string())?;
+            removed = r["removed"].as_array().map(|a| a.len()).unwrap_or(0);
+        } else if orphans.len() != st.orphans_said {
+            println!(
+                "[engine] {project}: sync check — {} graph node(s) have no file in this checkout ({}); other engines serve this project, so they are left alone",
+                orphans.len(), orphans.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    st.orphans_said = if reply["may_delete"].as_bool().unwrap_or(false) { 0 } else { orphans.len() };
+    if asked + queued + removed > 0 {
+        println!("[engine] {project}: sync check — {asked} file(s) sent again, {queued} graph version(s) queued to be written, {removed} node(s) without a file removed");
+    }
+    Ok((asked, queued, removed))
 }
 
 fn commit_conform(top: &Path, rels: &[String], stats: &mut TickStats, project: &str, read_only: bool) {

@@ -103,24 +103,39 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let token = header.strip_prefix("Bearer ").unwrap_or("");
-        if token.is_empty() {
-            return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "missing bearer token".into()));
-        }
-        let claims: Claims = auth::verify_token(&state.secret, token)
-            .map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
-        // tokenver check: the row is the revocation authority
-        let row = state
-            .store
-            .get("webui_user", &claims.sub, NOSK)
-            .await
-            .map_err(ApiError::from)?
-            .ok_or_else(|| ApiError::Status(StatusCode::UNAUTHORIZED, "unknown user".into()))?;
-        if body_u64(&row, "tokenver") != claims.tokenver {
-            return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "token revoked".into()));
-        }
-        Ok(AuthUser { sub: claims.sub, role: claims.role })
+        authenticate(state, header.strip_prefix("Bearer ").unwrap_or("")).await
     }
+}
+
+/// Who a bearer token signs in as: an engine session (keys.rs) or a signed
+/// login token. The one check every request goes through (the
+/// extractor above and the project authz layer).
+pub(crate) async fn authenticate(state: &AppState, token: &str) -> Result<AuthUser, ApiError> {
+    if token.is_empty() {
+        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "missing bearer token".into()));
+    }
+    // an engine session (`iter_` + JWT naming its key, keys.rs) or a
+    // person's (or an older engine user's) signed token
+    let session = iter_core::enginekey::session_jwt(token);
+    let claims: Claims = auth::verify_token(&state.secret, session.unwrap_or(token))
+        .map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
+    if session.is_some() != !claims.kid.is_empty() {
+        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "bad engine session".into()));
+    }
+    if session.is_some() {
+        return crate::keys::check_session(state, &claims).await;
+    }
+    // tokenver check: the row is the revocation authority
+    let row = state
+        .store
+        .get("webui_user", &claims.sub, NOSK)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::Status(StatusCode::UNAUTHORIZED, "unknown user".into()))?;
+    if body_u64(&row, "tokenver") != claims.tokenver {
+        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "token revoked".into()));
+    }
+    Ok(AuthUser { sub: claims.sub, role: claims.role })
 }
 
 // ---------- router ----------
@@ -132,6 +147,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::rag::routes())
         .merge(crate::settings::routes())
         .merge(crate::switches::routes())
+        .merge(crate::keys::routes())
         .route("/health", get(health))
         .route("/auth/login", post(login))
         .route("/api/widget/validate", post(widget_validate))
@@ -273,6 +289,10 @@ async fn user_put(
         return Err(forbidden());
     }
     let existing = st.store.get("webui_user", &name, NOSK).await?;
+    // ':' marks an engine token's subject (iter_engine:<id>, keys.rs)
+    if existing.is_none() && name.contains(':') {
+        return Err(bad("a user id may not contain ':'"));
+    }
     if self_edit {
         let Some(ex) = &existing else { return Err(forbidden()) };
         for k in ["role", "authz", "tokenver", "pubkey"] {
@@ -487,7 +507,8 @@ async fn project_put(
     st.store.put("project", &name, NOSK, &body).await?;
     st.store.bump_seq(&name, "project").await?;
     if existing.is_none() {
-        let creator = if user.role == "admin" { None } else { Some(user.sub.as_str()) };
+        // an admin or an engine (a machine, not a member) makes no member edge
+        let creator = if user.role == "admin" || crate::settings::machine_engine(&user.sub).is_some() { None } else { Some(user.sub.as_str()) };
         crate::settings::on_project_created(st.store.as_ref(), &name, creator).await?;
         crate::sync_hooks::project_created(st.store.as_ref(), &name).await;
     }
@@ -746,6 +767,15 @@ async fn engine_put(
 /// write; an owned record only by its owner or an admin.
 fn own_engine(user: &AuthUser, name: &str, existing: Option<&Value>) -> Result<String, ApiError> {
     let owner = existing.map(|e| body_str(e, "user")).unwrap_or_default();
+    // an engine token is the engine itself: it writes its own record (and
+    // registers it, unowned) and no other
+    if let Some(me) = crate::settings::machine_engine(&user.sub) {
+        return if me == name {
+            Ok(owner)
+        } else {
+            Err(ApiError::Status(StatusCode::FORBIDDEN, format!("this token belongs to engine '{me}', not '{name}'")))
+        };
+    }
     if user.role == "admin" {
         return Ok(if existing.is_none() { String::new() } else { owner });
     }

@@ -19,7 +19,6 @@
 //! passed on untouched and the handler refuses it.
 
 use crate::api::{AppState, NOSK};
-use crate::storage::body_u64;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
@@ -73,7 +72,10 @@ pub async fn check_project(st: &AppState, sub: &str, role: &str, project: &str, 
         if engines.iter().any(|e| crate::settings::serves_edge(&edges, e, project).is_some()) {
             return Ok(());
         }
-        return Err(format!("forbidden: no engine of '{sub}' serves project '{project}' (an active serves edge is needed)"));
+        return Err(match crate::settings::machine_engine(sub) {
+            Some(me) => format!("forbidden: engine '{me}' does not serve project '{project}' (an active serves edge is needed)"),
+            None => format!("forbidden: no engine of '{sub}' serves project '{project}' (an active serves edge is needed)"),
+        });
     }
     match crate::settings::member_role(&edges, sub, project) {
         Some(r) if r == "viewer" && !(method == Method::GET || method == Method::HEAD) => {
@@ -95,14 +97,11 @@ pub async fn project_authz(State(st): State<Arc<AppState>>, req: Request, next: 
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("")
         .to_string();
-    let Ok(claims) = crate::auth::verify_token(&st.secret, &token) else {
-        return next.run(req).await; // the handler's extractor answers 401
+    // a bad, revoked or unknown token: the handler's extractor answers 401
+    // (engine tokens and signed tokens alike: crate::api::authenticate)
+    let Ok(who) = crate::api::authenticate(&st, &token).await else {
+        return next.run(req).await;
     };
-    // a revoked token or unknown user: also the extractor's 401
-    match st.store.get("webui_user", &claims.sub, NOSK).await {
-        Ok(Some(row)) if body_u64(&row, "tokenver") == claims.tokenver => {}
-        _ => return next.run(req).await,
-    }
     // creating a project that does not exist yet: the handler decides
     let is_project_root = req.uri().path().trim_end_matches('/').matches('/').count() == 3
         && req.uri().path().starts_with("/api/projects/");
@@ -111,7 +110,7 @@ pub async fn project_authz(State(st): State<Arc<AppState>>, req: Request, next: 
             return next.run(req).await;
         }
     }
-    match check_project(&st, &claims.sub, &claims.role, &project, req.method()).await {
+    match check_project(&st, &who.sub, &who.role, &project, req.method()).await {
         Ok(()) => next.run(req).await,
         Err(msg) => deny(msg),
     }

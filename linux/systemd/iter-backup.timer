@@ -1,5 +1,5 @@
 [Unit]
-Description=iter5 backup every 6 hours
+Description=iter backup every 6 hours
 
 [Timer]
 OnCalendar=*-*-* 00/6:00:00

@@ -1,5 +1,5 @@
 [Unit]
-Description=iter5 online database backup (arangodump, no downtime)
+Description=iter online database backup (arangodump, no downtime)
 Requires=arangodb3.service
 After=arangodb3.service
 
@@ -8,5 +8,5 @@ Type=oneshot
 User=@USER@
 Nice=10
 IOSchedulingClass=idle
-EnvironmentFile=-@HOME@/.iter5/backup.env
+EnvironmentFile=-@HOME@/.iter/backup.env
 ExecStart=/usr/local/bin/iter-backup

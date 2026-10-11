@@ -805,6 +805,9 @@ impl EngineRuntime {
         // the env_file may have changed since the last tick: an account token
         // added, rotated or removed takes effect here, without a restart
         self.reload_env(false);
+        // a next engine key (`iter_engine key new`) is taken up as soon
+        // as an admin registered it (client.rs; tried once a minute)
+        self.api.adopt_next(false);
         let served: Vec<Assignment> = self.assignments.projects.clone();
         // which provider (and bills-edge model) each account dispatches to
         for a in &served {
@@ -1184,6 +1187,14 @@ impl EngineRuntime {
         // a project-wide hold: nothing is asked for this tick, and every item
         // that would otherwise be dispatchable is told why
         let mut hold: Option<String> = None;
+        // a merge conflict waiting on a human holds this checkout (merge.rs)
+        if let Some(reason) = crate::merge::hold_reason(topdir, &items) {
+            if self.next_said.get(&project_name) != Some(&reason) {
+                println!("[engine] {project_name}: {reason} — holding");
+                self.next_said.insert(project_name.clone(), reason.clone());
+            }
+            hold = Some(reason);
+        }
 
         // real usage drives both the account ladder and the maxagents gates
         let now = chrono::Utc::now();

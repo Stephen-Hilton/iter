@@ -17,9 +17,9 @@
 //!  * within the file's keys only `*_TOKEN` names, plus every `token_envar`
 //!    some served project names, are refreshed — an AWS credential in the
 //!    same file is not re-read behind a running agent's back;
-//!  * the engine's own credential (`ITER_ENGINE_TOKEN` per config) is pinned:
-//!    the `Api` client captured it at startup, so refreshing the map would
-//!    change nothing and only mislead a reader of the log;
+//!  * the older engine credential (`ITER_ENGINE_TOKEN`, an engine set up
+//!    before engine keys) is pinned: the `Api` client captured it at
+//!    startup, so refreshing the map would only mislead a log reader;
 //!  * values are never logged, at any level, in any message.
 
 use std::collections::{HashMap, HashSet};

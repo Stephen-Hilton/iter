@@ -81,7 +81,16 @@ pub fn conn(topdir: &Path, project_flag: Option<&str>, data_url_flag: Option<&st
     let project = nonempty(project_flag.filter(|p| !p.contains('/') && *p != ".").map(String::from))
         .or_else(|| nonempty(std::env::var("ITER_PROJECT").ok()))
         .unwrap_or_else(|| project_name(topdir));
-    let api = (!url.is_empty() && !token.is_empty()).then(|| Api::new(&url, &token));
+    // a token from the environment (an agent's session, or set by hand), else
+    // this machine's engine key
+    let key_file = crate::key::default_key_file();
+    let api = if url.is_empty() {
+        None
+    } else if !token.is_empty() {
+        Some(Api::new(&url, &token))
+    } else {
+        key_file.exists().then(|| Api::with_key(&url, &key_file))
+    };
     Conn { api, project, topdir: topdir.to_path_buf(), source }
 }
 

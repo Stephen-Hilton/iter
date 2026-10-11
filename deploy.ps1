@@ -1,5 +1,5 @@
 <#
-Deploy iter5 on Windows (native PowerShell; deploy.sh is the Linux/macOS twin).
+Deploy iter on Windows (native PowerShell; deploy.sh is the Linux/macOS twin).
 
   .\deploy.ps1 engine     build iter_engine for Windows, then (re)start it against iter_data
   .\deploy.ps1 build      build iter_engine only (-> bin\windows-x86_64\)
@@ -18,10 +18,11 @@ there with linux/install.sh; `docker` only says so now.
 
 Engine settings (defaults in brackets):
   -DataUrl  [$env:ITER_DATA_URL, else http://127.0.0.1:8400]
-  -EnvFile  [~\.iter5\.env]   ITER_ENGINE_TOKEN + each account's token variable
+  -EnvFile  [~\.iter\.env]    each account's token variable (the engine signs in with ~\.iter\engine.key)
   -Name     [the hostname]
   -Distro   [Debian]   the WSL distro running the server (startup, autostart)
-The engine's pid and log live in ~\.iter5\ (engine.pid, engine.log, engine.err.log).
+The engine's key, pid and log live in ~\.iter\ (engine.key, engine.pid, engine.log, engine.err.log);
+a machine set up when that was ~\.iter5\ is moved over when no engine runs from it.
 Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), WSL2.
 #>
 param(
@@ -31,7 +32,7 @@ param(
     [switch]$Hold,
     [switch]$Force,
     [string]$DataUrl = $(if ($env:ITER_DATA_URL) { $env:ITER_DATA_URL } else { 'http://127.0.0.1:8400' }),
-    [string]$EnvFile = (Join-Path $HOME '.iter5\.env'),
+    [string]$EnvFile = '',
     # hostname keeps its case (TheBEAST); $env:COMPUTERNAME is upper-cased
     # and would register a second engine
     [string]$Name = (hostname)
@@ -42,10 +43,31 @@ $Root = $PSScriptRoot
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
 $Bin = Join-Path $Root "bin\windows-$Arch"
 $Exe = Join-Path $Bin 'iter_engine.exe'
-$Home5 = Join-Path $HOME '.iter5'
-$PidFile = Join-Path $Home5 'engine.pid'
-$Log = Join-Path $Home5 'engine.log'
-$ErrLog = Join-Path $Home5 'engine.err.log'
+$OldHome = Join-Path $HOME '.iter5'
+# the engine's own files; ~\.iter5 became ~\.iter (2026-10-11)
+function Set-IterHome($dir) {
+    $script:IterHome = $dir
+    $script:PidFile = Join-Path $dir 'engine.pid'
+    $script:Log = Join-Path $dir 'engine.log'
+    $script:ErrLog = Join-Path $dir 'engine.err.log'
+    $script:KeyFile = Join-Path $dir 'engine.key'
+    if (-not $script:EnvFileGiven) { $script:EnvFile = Join-Path $dir '.env' }
+}
+$EnvFileGiven = [bool]$EnvFile
+# Move ~\.iter5 to ~\.iter once and leave a junction at the old path. While an
+# engine runs from it its open log files block the move: this run keeps using
+# ~\.iter5, and the move happens after the next stop (Stop-Engine).
+function Move-IterHome {
+    $new = Join-Path $HOME '.iter'
+    $old = Get-Item $OldHome -Force -ErrorAction SilentlyContinue
+    if (-not $old -or ($old.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-Path $new)) { Set-IterHome $new; return }
+    try {
+        Move-Item $OldHome $new -ErrorAction Stop
+        New-Item -ItemType Junction -Path $OldHome -Target $new | Out-Null
+        Say 'moved ~\.iter5 to ~\.iter (~\.iter5 links to it)'
+        Set-IterHome $new
+    } catch { Set-IterHome $OldHome }
+}
 $Port = if ($env:ITER_PORT) { $env:ITER_PORT } else { '8400' }
 
 function Say($m) { Write-Host "[deploy] $m" }
@@ -80,6 +102,17 @@ function Get-EnvValue($file, $key) {
     return ($line -replace "^\s*(export\s+)?$key\s*=\s*", '').Trim().Trim('"', "'")
 }
 
+# what this machine signs in with, for this script's own API calls: a session
+# from the engine key, else the older fixed token in the env file
+function Get-Bearer {
+    if ((Test-Path $KeyFile) -and (Test-Path $Exe)) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $t = & $Exe key session --key-file $KeyFile --data-url $DataUrl 2>$null } finally { $ErrorActionPreference = $eap }
+        if ($LASTEXITCODE -eq 0 -and $t) { return "$t".Trim() }
+    }
+    return Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN'
+}
+
 function Get-EngineProcess {
     if (-not (Test-Path $PidFile)) { return $null }
     $p = Get-Process -Id ([int](Get-Content $PidFile -Raw).Trim()) -ErrorAction SilentlyContinue
@@ -111,22 +144,24 @@ function Stop-Engine {
         $p.WaitForExit(10000) | Out-Null
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
+    if ($IterHome -eq $OldHome) { Move-IterHome }
 }
 
 function Start-Engine {
     if (-not (Test-Path $Exe)) { throw "$Exe is missing: run .\deploy.ps1 build" }
-    if (-not (Test-Path $EnvFile)) { throw "$EnvFile is missing (needs ITER_ENGINE_TOKEN and the account tokens)" }
-    if (-not (Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN')) { throw "ITER_ENGINE_TOKEN is not set in $EnvFile" }
+    if (-not (Test-Path $KeyFile) -and -not (Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN')) {
+        throw "no engine key at ${KeyFile}: run '$Exe key new', then add its public key in the webui's Engine keys screen (or run install.ps1)"
+    }
     $running = Get-EngineProcess
     if ($running) { Say "iter_engine already running (pid $($running.Id))"; return }
-    New-Item -ItemType Directory -Force $Home5 | Out-Null
-    $engineArgs = @('--data-url', $DataUrl, '--env-file', $EnvFile, '--name', $Name)
-    $p = Start-Process -FilePath $Exe -ArgumentList $engineArgs -WorkingDirectory $Home5 -WindowStyle Hidden `
+    New-Item -ItemType Directory -Force $IterHome | Out-Null
+    $engineArgs = @('--data-url', $DataUrl, '--env-file', $EnvFile, '--key-file', $KeyFile, '--name', $Name)
+    $p = Start-Process -FilePath $Exe -ArgumentList $engineArgs -WorkingDirectory $IterHome -WindowStyle Hidden `
         -RedirectStandardOutput $Log -RedirectStandardError $ErrLog -PassThru
     Set-Content $PidFile $p.Id
     Say "iter_engine '$Name' started (pid $($p.Id)) -> $DataUrl; log $Log"
     # wait for its first heartbeat
-    $token = Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN'
+    $token = Get-Bearer
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep 1
         if ($p.HasExited) { Get-Content $ErrLog -Tail 20 -ErrorAction SilentlyContinue; throw "iter_engine exited ($($p.ExitCode))" }
@@ -216,7 +251,7 @@ function Register-AutoStart {
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Hidden
     Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Settings $settings -Force `
-        -Description "iter5: start WSL distro $Distro (ArangoDB, iter_data, its engine) and this machine's Windows engine" | Out-Null
+        -Description "iter: start WSL distro $Distro (ArangoDB, iter_data, its engine) and this machine's Windows engine" | Out-Null
     Say "registered logon task '$task' (WSL distro $Distro, then iter_engine '$Name')"
 }
 
@@ -258,7 +293,7 @@ function Start-DockerDesktop {
 # "<engine>: N running" for every engine with work in flight (any OS): the
 # shutdown takes iter_data down and kills the WSL engine's agent sessions.
 function Get-RunningWork {
-    $token = Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN'
+    $token = Get-Bearer
     $engines = Invoke-RestMethod "$DataUrl/api/engines" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5
     @($engines | Where-Object { $_.running -gt 0 } | ForEach-Object { "$($_.name): $($_.running) running" })
 }
@@ -280,6 +315,8 @@ function Restart-Wsl {
     Start-All   # distro + keepalive, iter_data health, this machine's engine
     if ($hadDocker) { Start-DockerDesktop }
 }
+
+Move-IterHome
 
 switch ($Mode) {
     'docker'    { Show-DockerMoved; exit 1 }

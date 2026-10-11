@@ -12,6 +12,7 @@ mod auth;
 mod datasync;
 mod filesync;
 mod graph;
+mod keys;
 mod graph_view;
 #[cfg(test)]
 mod graph_tests;
@@ -94,8 +95,8 @@ const WEBUI_FILES: &[(&str, &str, &[u8])] = &[
     ("/settings.js", "application/javascript", include_bytes!("../../webui/settings.js")),
 ];
 
-/// The engine setup script the webui's new-project wizard tells people to
-/// download (also on GitHub at tools/iter_engine_setup.sh). Served in
+/// The retired engine setup script (tools/iter_engine_setup.sh): it now only
+/// points at install.sh / install.ps1, so an old link says where to go. Served in
 /// both webui modes; it holds no secrets, so no sign-in.
 const ENGINE_SETUP_SH: &[u8] = include_bytes!("../../tools/iter_engine_setup.sh");
 async fn engine_setup_sh() -> axum::response::Response {

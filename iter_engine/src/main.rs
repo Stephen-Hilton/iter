@@ -17,11 +17,13 @@ mod envstore;
 mod filesync;
 mod gate;
 mod init;
+mod merge;
 mod prompt;
 mod provider;
 mod rag;
 mod sweep;
 mod sync;
+mod key;
 mod usage;
 mod work;
 
@@ -35,6 +37,9 @@ enum Cmd {
     /// agent-facing verbs (`iter add|ask|reject|block|doc|critreview|capability|status`); the
     /// engine installs `{topdir}/.iter/bin/iter` as a shim to this
     Cli(cli::CliArgs),
+    /// this machine's engine key: `key new` makes it (its public key goes in
+    /// the webui's Engine keys screen), `key status` checks it
+    Key(key::KeyArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -45,9 +50,12 @@ struct Args {
     /// iter_data URL (else $ITER_DATA_URL)
     #[arg(long)]
     data_url: Option<String>,
-    /// env file: ITER_ENGINE_TOKEN, the accounts' token_envars, other secrets
-    #[arg(long, default_value = ".env")]
-    env_file: String,
+    /// env file: the accounts' token_envars and other secrets [~/.iter/.env]
+    #[arg(long)]
+    env_file: Option<String>,
+    /// the engine key it signs in with [~/.iter/engine.key] (`iter_engine key new`)
+    #[arg(long)]
+    key_file: Option<String>,
     /// engine name (default: this machine's short hostname)
     #[arg(long)]
     name: Option<String>,
@@ -88,13 +96,16 @@ struct Args {
     file: Option<String>,
 }
 
-/// The engine's own credential, read from the env file.
+/// An engine set up before engine keys: its fixed bearer token, read from
+/// the env file (used only when there is no key file).
 pub const ENGINE_TOKEN_VAR: &str = "ITER_ENGINE_TOKEN";
 
 fn main() {
     let args = Args::parse();
-    if let Some(Cmd::Cli(cli_args)) = args.cmd {
-        return cli::run(cli_args);
+    match args.cmd {
+        Some(Cmd::Cli(cli_args)) => return cli::run(cli_args),
+        Some(Cmd::Key(k)) => return key::run(k),
+        None => {}
     }
     // helpers that need no iter_data
     if let Some(path) = &args.question_widget {
@@ -103,17 +114,21 @@ fn main() {
     // seed the env store (and, once, the process environment) from the env
     // file; token reads from here on go through envstore::get, and the file
     // is re-read while running (account hot reload)
-    envstore::init(&args.env_file, &[ENGINE_TOKEN_VAR]);
+    let env_file = args.env_file.clone().unwrap_or_else(|| key::iter_home().join(".env").to_string_lossy().into_owned());
+    let key_file = args.key_file.clone().map(std::path::PathBuf::from).unwrap_or_else(key::default_key_file);
+    envstore::init(&env_file, &[ENGINE_TOKEN_VAR]);
     // SAFETY: still single-threaded (see envstore::init); Git Bash in every
     // child makes real symlinks instead of copying (iter_core::platform)
     unsafe { iter_core::platform::init_child_env() };
-    let token = envstore::get(ENGINE_TOKEN_VAR).unwrap_or_default();
+    let legacy_token = envstore::get(ENGINE_TOKEN_VAR).unwrap_or_default();
     let Some(data_url) = resolve_data_url(args.data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref()) else {
-        eprintln!("usage: iter_engine --data-url <iter_data url> --env-file <path> [--name <engine name>]");
+        eprintln!("usage: iter_engine --data-url <iter_data url> [--env-file <path>] [--key-file <path>] [--name <engine name>]");
         eprintln!("(no --data-url given and $ITER_DATA_URL is not set)");
         std::process::exit(2);
     };
-    let api = Api::new(&data_url, &token);
+    // the machine's key; an engine set up before keys runs on its fixed token
+    let has_key = key_file.exists();
+    let api = if has_key { Api::with_key(&data_url, &key_file) } else { Api::new(&data_url, &legacy_token) };
     let name = args.name.clone().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(short_hostname);
 
     if let Some(user) = &args.adduser {
@@ -129,16 +144,17 @@ fn main() {
         return doc(&api, prefix, args.text.as_deref(), args.file.as_deref());
     }
 
-    if token.is_empty() {
-        eprintln!("no engine token: set {ENGINE_TOKEN_VAR} in {} (mint via POST /api/users/<engine-user>/token as admin)", args.env_file);
+    if !has_key && legacy_token.is_empty() {
+        eprintln!("no engine key at {}: run `iter_engine key new`, then add its public key in the webui's Engine keys screen", key_file.display());
         std::process::exit(2);
     }
     let backend = api.get("/health").ok().and_then(|h| h["backend"].as_str().map(String::from)).unwrap_or_else(|| "unreachable".into());
-    let mut rt = engine::EngineRuntime::new(api, name.clone(), args.env_file.clone());
+    let mut rt = engine::EngineRuntime::new(api, name.clone(), env_file.clone());
     if args.ticks > 0 {
         rt.max_ticks = Some(args.ticks);
     }
-    println!("[engine] {name} starting against {data_url} (iter_data backend: {backend}, env file {})", args.env_file);
+    let how = if has_key { format!("key {}", key_file.display()) } else { format!("the older token in {env_file}") };
+    println!("[engine] {name} starting against {data_url} (iter_data backend: {backend}, signs in with {how}, env file {env_file})");
     rt.run();
 }
 
@@ -188,9 +204,9 @@ mod tests {
     #[test]
     fn startup_args_parse_and_config_is_gone() {
         let a = Args::try_parse_from(["iter_engine", "--data-url", "http://x:8400", "--env-file", "/e/.env", "--name", "mbp", "--ticks", "3"]).unwrap();
-        assert_eq!((a.data_url.as_deref(), a.env_file.as_str(), a.name.as_deref(), a.ticks), (Some("http://x:8400"), "/e/.env", Some("mbp"), 3));
+        assert_eq!((a.data_url.as_deref(), a.env_file.as_deref(), a.name.as_deref(), a.ticks), (Some("http://x:8400"), Some("/e/.env"), Some("mbp"), 3));
         let d = Args::try_parse_from(["iter_engine"]).unwrap();
-        assert_eq!((d.data_url, d.env_file.as_str(), d.name), (None, ".env", None));
+        assert_eq!((d.data_url, d.env_file.as_deref(), d.name), (None, None, None));
         assert!(Args::try_parse_from(["iter_engine", "--config", ".iter/config.json"]).is_err(), "--config was removed");
         // the agent shim's subcommand still parses without any engine args
         assert!(matches!(Args::try_parse_from(["iter_engine", "cli", "status"]).map(|a| a.cmd.is_some()), Ok(true)));

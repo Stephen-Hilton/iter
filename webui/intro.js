@@ -472,10 +472,10 @@
 
   function freshWizard() {
     return {
-      step: 0, busy: false, error: "", created: null, token: null, tokenErr: "",
+      step: 0, busy: false, error: "", created: null,
       d: {
         name: "", desc: "", gitrepo: "", file_naming: "sequence", maxdailycost: "",
-        engine: "", envFile: "~/.iter5/.env",
+        engine: "",
         dataUrl: (typeof location !== "undefined" && /^https?:/.test(location.origin)) ? location.origin : "http://127.0.0.1:8400"
       }
     };
@@ -485,8 +485,6 @@
     // spec §2.5: lowercase, [a-z0-9_-], runs of other characters become _, trimmed
     return String(name || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60);
   }
-  const shq = s => /^[A-Za-z0-9_./:@%+=~-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'";
-  const shqPath = p => /^~\//.test(p) ? "~/" + (p.length > 2 ? shq(p.slice(2)) : "") : shq(p);
 
   function validate(w, step) {
     const d = w.d, e = {};
@@ -506,16 +504,6 @@
     };
     if (String(d.maxdailycost).trim() !== "") rec.maxdailycost = +d.maxdailycost;
     return rec;
-  }
-  function engineCmd(d) {
-    return `iter_engine --data-url ${shq(d.dataUrl.trim())} --env-file ${shqPath(d.envFile.trim() || "~/.iter5/.env")}` + (d.engine.trim() ? ` --name ${shq(d.engine.trim())}` : "");
-  }
-  function envLines(d, token) {
-    return ["# the engine's env file — once per machine, never in a repository",
-      `ITER_ENGINE_TOKEN=${token || "<the engine token, minted below>"}`,
-      "# one line per LLM account this machine holds; the account node's token_envar names it",
-      "CLAUDE_TOKEN_MAIN=<run 'claude setup-token' while logged in to that account>",
-      "# anything else agents need (API keys for your own services…)"].join("\n");
   }
 
   /* ------------------------------------------------------------ the module */
@@ -607,21 +595,16 @@
     </div>`;
 
     h += `<h3>Set up an engine (once per machine)</h3>
-      <p class="intro-dim intro-small">The engine needs only two things: this server's address and an env file holding its credentials. Everything else — which projects it serves, in which folders, with which accounts — comes from the settings graph.</p>`;
-    h += field("engine", "Engine name (optional)", inp("engine", d.engine, 'list="intro-englist" placeholder="defaults to the machine\'s short hostname" autocomplete="off"'),
-      `Also its login user. ${S.engines.length ? "Registered: " + S.engines.map(x => esc(x.id || x.name) + (x.id && x.name && x.name !== x.id ? " (" + esc(x.name) + ")" : "")).join(", ") + "." : "No engine is registered yet."}`) +
+      <p class="intro-dim intro-small">An engine is a machine, not a user: it runs on the computer and signs in to this server with a key of its own. Which projects it serves, in which folders, with which accounts, all comes from the settings graph. On the machine, from the folder that holds your code projects:</p>`;
+    h += code("Linux (Omarchy / Arch, Debian, Ubuntu)", "cd ~/dev && git clone https://github.com/Stephen-Hilton/iter.git && ./iter/install.sh") +
+      code("Windows (PowerShell)", "cd ~\\dev; git clone https://github.com/Stephen-Hilton/iter.git; .\\iter\\install.ps1");
+    h += field("dataUrl", "This server, as the engine machine reaches it", inp("dataUrl", d.dataUrl, 'autocomplete="off" spellcheck="false"'), "The install script asks for it.") +
+      field("engine", "Engine name (optional)", inp("engine", d.engine, 'list="intro-englist" placeholder="defaults to the machine\'s short hostname" autocomplete="off"'),
+        `The name the script asks for; used below to watch for its check-in. ${S.engines.length ? "Registered: " + S.engines.map(x => esc(x.id || x.name) + (x.id && x.name && x.name !== x.id ? " (" + esc(x.name) + ")" : "")).join(", ") + "." : "No engine is registered yet."}`) +
       `<datalist id="intro-englist">${S.engines.map(x => `<option value="${esc(x.id || x.name)}">`).join("")}</datalist>`;
-    h += `<h4>1 · The engine token</h4><p class="intro-dim intro-small">The engine signs in as a user with role <code>engine</code>; its token goes in the env file as <code>ITER_ENGINE_TOKEN</code>. Shown once.</p>`;
-    if (w.token) h += `<div class="intro-note intro-okn">Token for <b>${esc(d.engine.trim())}</b> minted and filled in below.</div><div class="intro-actions"><button class="intro-btn intro-sm intro-ghost" data-copytoken="1">Copy the token alone</button></div>`;
-    else if (admin) h += `<div class="intro-actions"><button class="intro-btn" data-wmint="1" ${w.busy || !d.engine.trim() ? "disabled" : ""} title="${d.engine.trim() ? "" : "type the engine name above first"}">Create user ${esc(d.engine.trim() || "<engine name>")} and mint its token</button></div>`;
-    else h += `<div class="intro-note">Only an admin can mint an engine token.</div>`;
-    if (w.tokenErr) h += `<div class="intro-note intro-badn">${esc(w.tokenErr)}</div>`;
-    h += `<h4>2 · The env file</h4>` + code(d.envFile.trim() || "~/.iter5/.env", envLines(d, w.token)) +
-      `<p class="intro-dim intro-small">Keep <code>ANTHROPIC_API_KEY</code> out of it: it outranks the account token and bills API credits instead.</p>`;
-    h += `<h4>3 · Start it</h4>` + field("envFile", "Env file path", inp("envFile", d.envFile, 'autocomplete="off" spellcheck="false"'), "On the engine machine.") +
-      field("dataUrl", "This server, as the engine machine reaches it", inp("dataUrl", d.dataUrl, 'autocomplete="off" spellcheck="false"'), "Defaults to this page's address.") +
-      `<div id="intro-setupcmd">${code("on the engine machine", engineCmd(d))}</div>`;
-    h += `<h4>4 · Wait for it to check in</h4><div id="intro-engwatch">${watchHtml()}</div>
+    h += `<p class="intro-dim intro-small">The script installs what is missing, builds the engine and makes its key (<code>iter_engine key new</code>; the private key stays on the machine). Paste the public key it prints into <b>Engine keys</b> with the engine's name; the script sees it accepted and starts the engine.</p>` +
+      (admin ? `<div class="intro-actions"><button class="intro-btn" data-wkeys="1">Open Engine keys</button></div>` : `<div class="intro-note">An admin adds the public key in Engine keys (the key button in the header).</div>`);
+    h += `<h4>Wait for it to check in</h4><div id="intro-engwatch">${watchHtml()}</div>
       <p class="intro-dim intro-small">Then connect it: <b>Build</b> from the Project graph (a new repository), or, for a repository that already exists on that machine, draw a <b>serves</b> edge from the engine to the project in the settings graph and set its <code>topdir</code>.</p>`;
     watchEngine();
     return h;
@@ -649,26 +632,6 @@
       try { if (S.ctx.selectProject) await S.ctx.selectProject(name); else if (S.ctx.reloadProjects) S.ctx.reloadProjects(); } catch (e) { /* the list refreshes on its own later */ }
     } catch (e) {
       w.error = "Could not create the project: " + (e.message || e);
-    } finally { w.busy = false; render(); }
-  }
-
-  async function mintToken() {
-    const w = S.w, eng = w.d.engine.trim(), api = S.ctx.api;
-    if (!eng) return;
-    w.busy = true; w.tokenErr = ""; render();
-    try {
-      let user = null;
-      try { user = await api("/api/users/" + encodeURIComponent(eng)); } catch (e) { if (e.status !== 404) throw e; }
-      if (user && user.role && user.role !== "engine") {
-        w.tokenErr = `A user named "${eng}" already exists with role ${user.role}; an engine needs its own user with role engine. Pick another engine name.`;
-        return;
-      }
-      if (!user) await api("/api/users/" + encodeURIComponent(eng), { method: "PUT", body: JSON.stringify({ user: eng, role: "engine", email: "", settings: {}, authz: {} }) });
-      const r = await api("/api/users/" + encodeURIComponent(eng) + "/token", { method: "POST", body: JSON.stringify({ ttl_days: 365 }) });
-      w.token = r && r.token;
-      if (!w.token) w.tokenErr = "The server answered without a token.";
-    } catch (e) {
-      w.tokenErr = "Could not mint the token: " + (e.message || e);
     } finally { w.busy = false; render(); }
   }
 
@@ -783,11 +746,10 @@
     if (ds.graph) { if (S.ctx && S.ctx.openGraph) S.ctx.openGraph(ds.graph); return; }
     if (ds.queue) { if (S.ctx && S.ctx.openQueue) S.ctx.openQueue(); return; }
     if (ds.copy != null) return copyText(copies[+ds.copy]);
-    if (ds.copytoken) return copyText(w.token || "");
     if (ds.wnext) return wizNext();
     if (ds.wback) { w.step = Math.max(0, w.step - 1); w.error = ""; w.errs = {}; return render(true); }
     if (ds.wcreate) return createProject();
-    if (ds.wmint) return mintToken();
+    if (ds.wkeys) { if (S.ctx && S.ctx.openKeys) S.ctx.openKeys(); return; }
     if (ds.wreset) { S.w = freshWizard(); return render(true); }
     if (ds.wopen) { if (S.ctx && S.ctx.openGraph) S.ctx.openGraph("", d.name.trim()); return; }
     if (ds.wsettings != null) { if (S.ctx && S.ctx.openSettings) S.ctx.openSettings(ds.wsettings); return; }
@@ -817,12 +779,8 @@
       const f = t.dataset.f;
       d[f] = t.value;
       if (t.classList.contains("intro-bad")) t.classList.remove("intro-bad");
-      // the engine page: rewrite the command (and what Copy copies) and the mint button without a re-render
-      if (S.w.step === 2 && ["engine", "envFile", "dataUrl"].includes(f)) {
-        const box = S.el.querySelector("#intro-setupcmd");
-        if (box) { const cmd = engineCmd(d); const btn = box.querySelector("[data-copy]"); if (btn) copies[+btn.dataset.copy] = cmd; box.querySelector("pre").textContent = cmd; }
-        const mint = S.el.querySelector("[data-wmint]");
-        if (mint) { mint.disabled = !d.engine.trim() || S.w.busy; mint.textContent = `Create user ${d.engine.trim() || "<engine name>"} and mint its token`; }
+      // the engine page: the check-in watch follows the engine name without a re-render
+      if (S.w.step === 2 && f === "engine") {
         const watch = S.el.querySelector("#intro-engwatch"); if (watch) watch.innerHTML = watchHtml();
       }
     }

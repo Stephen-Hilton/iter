@@ -1,20 +1,20 @@
 ---
 id: 43f5efdd-7136-4f8d-8db3-4d4ef198e977
 name: "Connect an engine and an account to a project in the settings graph"
-desc: "An operator sets up the one engine of a machine with tools/iter_engine_setup.sh (env file with the engine token and account tokens); the engine registers itself and appears in the Settings graph. An admin then draws edges there — serves (engine → project, with topdir), holds (engine → account), bills (account → project, with order and switch/stop %) — and the engine's next assignments read starts running the project with that account. Dragging an edge end onto a _deactivated placeholder stops it and keeps its settings."
+desc: "An operator sets up the one engine of a machine with install.sh (install.ps1 on Windows), which makes the machine's engine key; an admin adds its public key in Engine keys, and the engine registers itself and appears in the Settings graph. An admin then draws edges there — serves (engine → project, with topdir), holds (engine → account), bills (account → project, with order and switch/stop %) — and the engine's next assignments read starts running the project with that account. Dragging an edge end onto a _deactivated placeholder stops it and keeps its settings."
 creator: "stephen"
 teststate: inherit
 actors: ["{topdir}/global/usecases/operator.actor.iter.md", "{topdir}/global/usecases/admin.actor.iter.md"]
 flowmap:
-  summary: "The setup script writes ~/.iter5/.env and starts iter_engine with only a data URL, an env file and a name. The engine self-registers (PUT /api/engines/{name}), which adds a hosts edge and an owns edge from the token's user. In the Settings tab the admin draws serves, holds and bills edges; iter_data validates each edge's endpoint types and stores it in sys_edge. Every tick the engine reads GET /api/engines/{name}/assignments — the projects with an active serves edge (topdir, read_only) and, per project, the accounts that both bill it and are held by the engine, with their provider — and from then on syncs files and asks for work for that project."
+  summary: "The install script makes ~/.iter/engine.key, waits until an admin has added its public key in Engine keys, and starts iter_engine with only a data URL and a name. The engine signs in with its key and self-registers (PUT /api/engines/{name}), which adds a hosts edge; an engine is a machine, so no user owns it. In the Settings tab the admin draws serves, holds and bills edges; iter_data validates each edge's endpoint types and stores it in sys_edge. Every tick the engine reads GET /api/engines/{name}/assignments — the projects with an active serves edge (topdir, read_only) and, per project, the accounts that both bill it and are held by the engine, with their provider — and from then on syncs files and asks for work for that project."
   sequence: ["{topdir}/global/usecases/operator.actor.iter.md", "{topdir}/tools/tools.code.iter.md", "{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/global/usecases/admin.actor.iter.md", "{topdir}/webui/settings.code.iter.md", "{topdir}/iter_data/src/settings.code.iter.md", "{topdir}/iter_engine/src/assign.code.iter.md"]
   process_flow:
     - step: 1
       from: "{topdir}/global/usecases/operator.actor.iter.md"
       to: "{topdir}/tools/tools.code.iter.md"
-      what: "On the machine, the operator pipes the setup script from the server with the data URL, an engine name and an engine token minted by an admin; it checks git, curl and claude, finds or builds iter_engine, checks the token, writes ~/.iter5/.env (mode 600) with ITER_ENGINE_TOKEN and the account tokens, and starts the engine."
+      what: "On the machine, the operator clones the iter repository beside the projects and runs install.sh (install.ps1 on Windows): it installs the tools, builds iter_engine, makes the engine key (iter_engine key new; the private key stays in ~/.iter/engine.key), waits while an admin pastes the public key into Engine keys, and starts the engine as a service."
       plain: "The machine gets its engine."
-      evidence: "curl <data_url>/iter_engine_setup.sh | bash -s -- --data-url … --engine … --token … --start"
+      evidence: "cd ~/dev && git clone https://github.com/Stephen-Hilton/iter.git && ./iter/install.sh"
     - step: 2
       from: "{topdir}/iter_engine/src/loop.code.iter.md"
       to: "{topdir}/iter_data/src/settings.code.iter.md"

@@ -7,7 +7,7 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_engine/src/client.rs"]
+  codedirs:  ["{topdir}/iter_engine/src/client.rs", "{topdir}/iter_engine/src/key.rs"]
   codenodes: []
   tests:     []
   reqs:      []
@@ -27,5 +27,7 @@ How it works: `iter_engine/src/client.rs: Api` holds the server's base address, 
 It is built in three places: `iter_engine/src/main.rs` for the engine itself (address from `--data-url`, else `$ITER_DATA_URL`; token `ITER_ENGINE_TOKEN` from the env file), `env` in `cli.rs` for queue verbs run inside an agent session (`ITER_DATA_URL`, `ITER_ENGINE_TOKEN`), and `sync::conn` for checkout verbs run from a shell (`iter sync`, `sweep`, `rag sync`). Its users are the Engine tick loop, the Work runner, the Duplicate work judge, Node-file sync, the Test sweep, the GraphRAG worker and the iter command line. It calls nothing but the network.
 
 Why it matters: one small, blocking client keeps the engine's worker threads simple, and the status-0 rule lets the Work runner's `with_retry` and `is_transient` ride out an outage (retrying with backoff, then saving a close to disk) instead of losing a finished run. For tests, `client::fake::serve` starts a real throwaway HTTP server on 127.0.0.1 so engine code can be tested without iter_data.
+
+How the engine proves who it is (2026-10-11): with the machine's own Ed25519 key (`iter_engine key new`, `key.rs`). `Api::with_key` signs in (`POST /auth/engine`) for a session token. It sends that token as its bearer, signs in again well before the session ends, and does so at once on a 401. When `key new` left a next key beside the key file (`engine.key.next`), `adopt_next` tries it once a minute from the tick, and at once when the current key is refused. As soon as iter_data accepts it, every clone of the client signs in with it and the next key becomes the key file. Agent sessions get the session token the engine holds when they start. An engine set up before keys runs on its fixed `ITER_ENGINE_TOKEN` (`Api::new`).
 
 Example: when a run ends, the Work runner calls `api.put("/api/projects/<p>/workitems/<id>", record)`. If another writer got there first, the server answers 409 and the runner re-reads the record and tries once more; if the network is down, the error has status 0 and the write is retried.

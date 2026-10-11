@@ -17,6 +17,21 @@
 //!   either way, and a pending edit that is only test results is no conflict;
 //! - `deleted` paths (and, with `full: true`, every file the engine did not
 //!   send that was once written) mark their nodes deleted.
+//!
+//! files/reconcile (the sync check, 2026-10-11): every couple of minutes the
+//! engine reports every node file it has with its disk hash and the hash it
+//! last synced, and `apply_reconcile` compares that with the graph, not with
+//! the engine's own memory, so drift either side missed is put right:
+//! - the file is what the engine last synced but the graph's hash differs
+//!   (a server-win rewrite that never landed, a restore, a direct database
+//!   edit): the node is queued as a pending write, the normal lock-aware,
+//!   committed path through files/pending;
+//! - the file changed without the engine noticing (same size and mtime), or
+//!   the graph has no node for it: the engine is told to send it again;
+//! - a synced node whose file the engine does not have: an orphan. It is
+//!   removed only when this engine is the project's only engine (the engine
+//!   checks the file is really gone): with several engines, a checkout that
+//!   is behind would otherwise delete what another engine just added.
 
 use crate::api::{ApiError, AppState, AuthUser, NOSK};
 use crate::nodes::{self, DESIGNED, Graph, PENDING_DELETE, PENDING_WRITE, SYNCED, StoredNode, bad, not_found};
@@ -39,6 +54,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{name}/files/pending", get(files_pending))
         .route("/api/projects/{name}/files/pause", get(sync_pause_get).post(sync_pause_set))
         .route("/api/projects/{name}/files/ack", post(files_ack))
+        .route("/api/projects/{name}/files/reconcile", post(files_reconcile))
         .route("/api/projects/{name}/build", post(build).get(build_get))
         .route("/api/projects/{name}/build/done", post(build_done))
 }
@@ -341,6 +357,81 @@ pub fn apply_sync(g: &mut Graph, req: &SyncReq) -> (SyncReply, Vec<Value>) {
         }
     }
     (rep, conflicts)
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReconcileFile {
+    pub path: String,
+    /// content hash of the file on disk now
+    pub hash: String,
+    /// the hash the engine last synced for it
+    #[serde(default)]
+    pub cached: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReconcileReq {
+    #[serde(default)]
+    pub engine: String,
+    #[serde(default)]
+    pub files: Vec<ReconcileFile>,
+}
+
+/// The change note on a node the sync check queued for writing.
+pub const RECONCILE_CHANGE: &str = "sync check: the graph's version had not reached the file";
+
+/// The sync check on a loaded graph (the caller holds the project lock):
+/// `{send, queued, orphans, may_delete}` (module doc).
+pub fn apply_reconcile(g: &mut Graph, req: &ReconcileReq, sole_engine: bool) -> Value {
+    let reported: HashSet<&str> = req.files.iter().map(|f| f.path.as_str()).collect();
+    let (mut send, mut queued, mut orphans) = (Vec::new(), Vec::new(), Vec::new());
+    for f in &req.files {
+        if nf::type_of(&f.path).is_none_or(|t| !nf::is_synced(t)) {
+            continue;
+        }
+        let node = g.nodes.iter().find(|n| !n.deleted && (n.doc.path == f.path || n.old_path == f.path)).cloned();
+        let Some(n) = node else {
+            send.push(json!(f.path)); // the graph has no node for this file
+            continue;
+        };
+        if n.file_state != SYNCED || n.old_path == f.path || n.file_hash == f.hash {
+            continue; // in step, or a pending edit / move the normal path writes
+        }
+        if !f.cached.is_empty() && f.cached == f.hash {
+            // the file is as the engine last synced it: the graph moved on
+            // without it, so the graph's version is written to the file
+            let x = g.get_mut(n.id()).unwrap();
+            x.node_version += 1;
+            x.file_state = PENDING_WRITE.into();
+            x.change = RECONCILE_CHANGE.into();
+            x.updated_by = format!("engine.{}", if req.engine.is_empty() { "?" } else { &req.engine });
+            x.updated = now_utc();
+            queued.push(json!({"id": n.id(), "path": f.path}));
+        } else {
+            send.push(json!(f.path)); // the file changed and the engine missed it
+        }
+    }
+    for n in g.nodes.iter().filter(|n| !n.deleted && n.file_state == SYNCED && n.file_version > 0) {
+        if nf::type_of(&n.doc.path).is_none_or(|t| !nf::is_synced(t)) {
+            continue;
+        }
+        if !reported.contains(n.doc.path.as_str()) && (n.old_path.is_empty() || !reported.contains(n.old_path.as_str())) {
+            orphans.push(json!({"id": n.id(), "path": n.doc.path}));
+        }
+    }
+    json!({"send": send, "queued": queued, "orphans": orphans, "may_delete": sole_engine})
+}
+
+async fn files_reconcile(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(req): Json<ReconcileReq>) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let edges = crate::settings::load_edges(st.store.as_ref()).await?;
+    let pid = iter_core::settings::node_id("project", &name);
+    let serving = edges.iter().filter(|e| e.edge_type == "serves" && e.to == pid && e.is_active()).count();
+    let _g = nodes::lock(&name).await;
+    let mut g = Graph::load(st.store.as_ref(), &name).await?;
+    let v = apply_reconcile(&mut g, &req, serving <= 1);
+    g.save(st.store.as_ref()).await?;
+    Ok(Json(v))
 }
 
 async fn insert_conflicts(st: &AppState, rows: &[Value]) -> Result<(), ApiError> {

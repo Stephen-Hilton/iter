@@ -5,7 +5,8 @@
 #   ./deploy.sh local    native iter_data (release build) against a dev Arango container on :8529
 #
 # The container keeps everything that persists (database, Arango apps,
-# iter_data's files) in one host folder, ITER_DATA_DIR [~/.iter5/iter_data].
+# iter_data's files) in one host folder, ITER_DATA_DIR [~/.iter/iter_data; an
+# existing ~/.iter5/iter_data from before the rename is kept where it is].
 # Secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) come from ITER_ENV_FILE,
 # default the repo root .env.
 # Release binaries land in bin/<os>-<arch>/ (rm+cp, never cp-over: macOS kills
@@ -24,7 +25,8 @@ RUN="$ROOT/run"
 PORT="${ITER_PORT:-8400}"
 ENV_FILE="${ITER_ENV_FILE:-$ROOT/.env}"
 ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iter4dev}"
-DATA_DIR="${ITER_DATA_DIR:-$HOME/.iter5/iter_data}"
+DATA_DIR="${ITER_DATA_DIR:-$HOME/.iter/iter_data}"
+[ -n "${ITER_DATA_DIR:-}" ] || [ -e "$DATA_DIR" ] || [ ! -d "$HOME/.iter5/iter_data" ] || DATA_DIR="$HOME/.iter5/iter_data"
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 mkdir -p "$BIN" "$RUN"
 

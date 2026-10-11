@@ -14,6 +14,10 @@ pub struct Claims {
     pub role: String,
     pub tokenver: u64,
     pub exp: u64,
+    /// an engine session (keys.rs): the id of the engine key it was issued
+    /// for, re-checked on every request; "" for a person's token
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kid: String,
 }
 
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -33,8 +37,12 @@ pub fn verify_password(password: &str, pwhash: &str) -> bool {
 
 pub fn mint_token(secret: &[u8], sub: &str, role: &str, tokenver: u64, ttl_secs: u64) -> Result<String, String> {
     let exp = chrono::Utc::now().timestamp() as u64 + ttl_secs;
-    let claims = Claims { sub: sub.to_string(), role: role.to_string(), tokenver, exp };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).map_err(|e| e.to_string())
+    let claims = Claims { sub: sub.to_string(), role: role.to_string(), tokenver, exp, kid: String::new() };
+    mint_claims(secret, &claims)
+}
+
+pub fn mint_claims(secret: &[u8], claims: &Claims) -> Result<String, String> {
+    encode(&Header::default(), claims, &EncodingKey::from_secret(secret)).map_err(|e| e.to_string())
 }
 
 pub fn verify_token(secret: &[u8], token: &str) -> Result<Claims, String> {

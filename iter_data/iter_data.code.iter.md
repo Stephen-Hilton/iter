@@ -8,7 +8,7 @@ level: container
 owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
-  codenodes: ["{topdir}/iter_data/src/server.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md", "{topdir}/iter_data/src/auth.code.iter.md", "{topdir}/iter_data/src/authz.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_data/src/settings.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/datasync.code.iter.md", "{topdir}/iter_data/src/rag/rag.code.iter.md", "{topdir}/iter_data/src/mcp.code.iter.md", "{topdir}/iter_data/src/storage.code.iter.md", "{topdir}/iter_data/src/arango.code.iter.md"]
+  codenodes: ["{topdir}/iter_data/src/server.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md", "{topdir}/iter_data/src/auth.code.iter.md", "{topdir}/iter_data/src/keys.code.iter.md", "{topdir}/iter_data/src/authz.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_data/src/settings.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/datasync.code.iter.md", "{topdir}/iter_data/src/rag/rag.code.iter.md", "{topdir}/iter_data/src/mcp.code.iter.md", "{topdir}/iter_data/src/storage.code.iter.md", "{topdir}/iter_data/src/arango.code.iter.md"]
   tests:     ["{thisfiledir}/test/*.test.iter.md"]
   reqs:      ["{topdir}/docs/iter5_spec.md"]
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:10:16Z", last_tested: ""}

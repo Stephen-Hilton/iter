@@ -1,12 +1,50 @@
 //! Blocking HTTP client for the iter_data API.
+//!
+//! How the engine proves who it is (2026-10-11): with its own Ed25519 key
+//! (`iter_engine key new`, key.rs). The client signs in (`POST /auth/engine`,
+//! iter_core::enginekey) for a session token and sends that as its bearer,
+//! signing in again well before the session ends and at once on a 401.
+//! When `key new` left a next key beside the key file (`<key file>.next`),
+//! `adopt_next` tries it; once iter_data accepts it (an admin rotated the
+//! key in the Engine keys screen) every clone of this client signs in with
+//! it and the next key becomes the key file. The engine calls `adopt_next`
+//! every tick (rate-limited), and a refused sign-in calls it at once.
+//!
+//! An engine set up before engine keys still runs on a fixed bearer token
+//! (`ITER_ENGINE_TOKEN`), and an agent's `iter` shim on the session token it
+//! was started with: `Api::new`.
 
-use serde_json::Value;
-use std::time::Duration;
+use ed25519_dalek::pkcs8::DecodePrivateKey;
+use ed25519_dalek::{Signer, SigningKey};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+/// Sign in again when the session has less than this left: an agent started
+/// now gets a session that outlives it.
+const RENEW_BEFORE_SECS: i64 = 12 * 3600;
+/// How often a next key iter_data refused is tried again: on the tick, and
+/// after a refused sign-in (a revoked key must not wait a minute).
+const NEXT_RETRY: Duration = Duration::from_secs(60);
+const NEXT_RETRY_ON_401: Duration = Duration::from_secs(5);
+
+/// Signing in with the machine's key: where it is and the session it holds.
+struct KeyAuth {
+    key_file: PathBuf,
+    /// the session's expiry (unix seconds); 0 = none yet
+    expires_at: Mutex<i64>,
+    /// one sign-in at a time
+    signing_in: Mutex<()>,
+    /// when a next key was last tried
+    next_tried: Mutex<Option<Instant>>,
+}
 
 #[derive(Clone)]
 pub struct Api {
     pub base: String,
-    pub token: String,
+    token: Arc<RwLock<String>>,
+    key: Option<Arc<KeyAuth>>,
     http: reqwest::blocking::Client,
 }
 
@@ -22,15 +60,97 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+/// `<key file>.next`: the key `iter_engine key new` made while one existed.
+pub fn next_key_file(key_file: &Path) -> PathBuf {
+    let mut s = key_file.as_os_str().to_owned();
+    s.push(".next");
+    PathBuf::from(s)
+}
+
+/// The signing key in a PEM file (PKCS#8).
+pub fn load_key(path: &Path) -> Result<SigningKey, String> {
+    let pem = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    SigningKey::from_pkcs8_pem(&pem).map_err(|e| format!("{}: not an engine key ({e})", path.display()))
+}
+
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
 impl Api {
+    /// A client with a fixed bearer token.
     pub fn new(base: &str, token: &str) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
-            token: token.to_string(),
+            token: Arc::new(RwLock::new(token.to_string())),
+            key: None,
             http: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("http client"),
+        }
+    }
+
+    /// A client that signs in with the machine's key (on first use).
+    pub fn with_key(base: &str, key_file: &Path) -> Self {
+        let mut api = Self::new(base, "");
+        api.key = Some(Arc::new(KeyAuth {
+            key_file: key_file.to_path_buf(),
+            expires_at: Mutex::new(0),
+            signing_in: Mutex::new(()),
+            next_tried: Mutex::new(None),
+        }));
+        api
+    }
+
+    /// The bearer token in use right now (signing in first when the session
+    /// is missing or runs out within RENEW_BEFORE_SECS).
+    pub fn token(&self) -> String {
+        if let Some(k) = &self.key {
+            if *k.expires_at.lock().unwrap_or_else(|p| p.into_inner()) - now_secs() < RENEW_BEFORE_SECS {
+                if let Err(e) = self.sign_in(false) {
+                    eprintln!("[engine] sign-in with the engine key failed: {e}");
+                }
+            }
+        }
+        self.token.read().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    /// One signed login with `key`: (session token, its expiry).
+    pub fn login_with(&self, key: &SigningKey) -> Result<(String, i64), ApiError> {
+        let kid = iter_core::enginekey::key_id(&key.verifying_key().to_bytes());
+        let (ts, nonce) = (now_secs(), uuid::Uuid::new_v4().simple().to_string());
+        let sig: String = key.sign(iter_core::enginekey::login_message(&kid, ts, &nonce).as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let resp = self
+            .http
+            .post(format!("{}/auth/engine", self.base))
+            .json(&json!({"key_id": kid, "ts": ts, "nonce": nonce, "signature": sig}))
+            .send()
+            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+        let v = Self::handle(resp)?;
+        let token = v["token"].as_str().unwrap_or_default().to_string();
+        Ok((token, v["expires_at"].as_i64().unwrap_or(0)))
+    }
+
+    /// Sign in with the key file (`force`: even with a fresh session).
+    fn sign_in(&self, force: bool) -> Result<(), String> {
+        let Some(k) = &self.key else { return Ok(()) };
+        let _one = k.signing_in.lock().unwrap_or_else(|p| p.into_inner());
+        if !force && *k.expires_at.lock().unwrap_or_else(|p| p.into_inner()) - now_secs() >= RENEW_BEFORE_SECS {
+            return Ok(()); // another thread just did
+        }
+        let key = load_key(&k.key_file)?;
+        let (token, exp) = self.login_with(&key).map_err(|e| e.to_string())?;
+        self.set_session(token, exp);
+        Ok(())
+    }
+
+    fn set_session(&self, token: String, exp: i64) {
+        if let Ok(mut t) = self.token.write() {
+            *t = token;
+        }
+        if let Some(k) = &self.key {
+            *k.expires_at.lock().unwrap_or_else(|p| p.into_inner()) = exp;
         }
     }
 
@@ -44,46 +164,74 @@ impl Api {
         }
     }
 
-    pub fn get(&self, path: &str) -> Result<Value, ApiError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .send()
-            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+    fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>, token: &str) -> Result<Value, ApiError> {
+        let mut req = self.http.request(method, format!("{}{}", self.base, path)).bearer_auth(token);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().map_err(|e| ApiError { status: 0, body: e.to_string() })?;
         Self::handle(resp)
+    }
+
+    /// One call; a 401 signs in again (with the next key when the current
+    /// one is refused) and, when that worked, sends the call again.
+    fn call(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
+        let token = self.token();
+        match self.send(method.clone(), path, body, &token) {
+            Err(e) if e.status == 401 && self.key.is_some() && (self.sign_in(true).is_ok() || self.adopt_next(true)) => {
+                self.send(method, path, body, &self.token())
+            }
+            r => r,
+        }
+    }
+
+    pub fn get(&self, path: &str) -> Result<Value, ApiError> {
+        self.call(reqwest::Method::GET, path, None)
     }
 
     pub fn put(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
-        let resp = self
-            .http
-            .put(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
-        Self::handle(resp)
+        self.call(reqwest::Method::PUT, path, Some(body))
     }
 
     pub fn delete(&self, path: &str) -> Result<Value, ApiError> {
-        let resp = self
-            .http
-            .delete(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .send()
-            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
-        Self::handle(resp)
+        self.call(reqwest::Method::DELETE, path, None)
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
-        Self::handle(resp)
+        self.call(reqwest::Method::POST, path, Some(body))
+    }
+
+    /// Sign in with the next key once iter_data accepts it, and make it the
+    /// key file. Tried at most every NEXT_RETRY (NEXT_RETRY_ON_401 when
+    /// `now`: the current key was just refused); true = this call switched.
+    pub fn adopt_next(&self, now: bool) -> bool {
+        let Some(k) = &self.key else { return false };
+        let next = next_key_file(&k.key_file);
+        if !next.exists() {
+            return false;
+        }
+        let Ok(mut tried) = k.next_tried.try_lock() else { return false };
+        let every = if now { NEXT_RETRY_ON_401 } else { NEXT_RETRY };
+        if tried.is_some_and(|t| t.elapsed() < every) {
+            return false;
+        }
+        *tried = Some(Instant::now());
+        let key = match load_key(&next) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("[engine] next engine key unreadable: {e}");
+                return false;
+            }
+        };
+        let Ok((token, exp)) = self.login_with(&key) else { return false }; // not registered yet, or the server is away
+        let _one = k.signing_in.lock().unwrap_or_else(|p| p.into_inner());
+        self.set_session(token, exp);
+        let id = iter_core::enginekey::key_id(&key.verifying_key().to_bytes());
+        match std::fs::rename(&next, &k.key_file) {
+            Ok(()) => println!("[engine] iter_data accepted the next engine key ({id}): signed in with it, and it is now {}", k.key_file.display()),
+            Err(e) => eprintln!("[engine] signed in with the next engine key ({id}) but could not move it to {}: {e} — move it by hand before a restart", k.key_file.display()),
+        }
+        true
     }
 }
 
@@ -97,7 +245,7 @@ pub mod fake {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
-    pub type Handler = dyn Fn(&str, &str, &Value) -> Option<(u16, Value)> + Send + Sync;
+    pub type BearerHandler = dyn Fn(&str, &str, &str, &Value) -> Option<(u16, Value)> + Send + Sync;
 
     pub struct FakeServer {
         pub base: String,
@@ -115,10 +263,15 @@ pub mod fake {
     }
 
     pub fn serve(handler: impl Fn(&str, &str, &Value) -> Option<(u16, Value)> + Send + Sync + 'static) -> FakeServer {
+        serve_with_bearer(move |_bearer, m, p, b| handler(m, p, b))
+    }
+
+    /// `serve`, with the request's bearer token as the handler's first argument.
+    pub fn serve_with_bearer(handler: impl Fn(&str, &str, &str, &Value) -> Option<(u16, Value)> + Send + Sync + 'static) -> FakeServer {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let calls: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
-        let handler: Arc<Handler> = Arc::new(handler);
+        let handler: Arc<BearerHandler> = Arc::new(handler);
         let seen = calls.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -152,8 +305,12 @@ pub mod fake {
                     let method = first.next().unwrap_or("").to_string();
                     let path = first.next().unwrap_or("").to_string();
                     let body: Value = serde_json::from_slice(&buf[header_end..(header_end + len).min(buf.len())]).unwrap_or(Value::Null);
+                    let bearer = head
+                        .lines()
+                        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().trim_start_matches("Bearer ").to_string()))
+                        .unwrap_or_default();
                     seen.lock().unwrap().push((method.clone(), path.clone(), body.clone()));
-                    let Some((code, out)) = handler(&method, &path, &body) else {
+                    let Some((code, out)) = handler(&bearer, &method, &path, &body) else {
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                         return;
                     };
@@ -167,5 +324,63 @@ pub mod fake {
             }
         });
         FakeServer { base, calls }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+    fn write_key(path: &Path) -> String {
+        let k = SigningKey::generate(&mut rand::rngs::OsRng);
+        std::fs::write(path, k.to_pkcs8_pem(Default::default()).unwrap().as_bytes()).unwrap();
+        iter_core::enginekey::key_id(&k.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn signs_in_with_its_key_and_moves_to_the_next_once_accepted() {
+        // the fake iter_data: a key in `ok` signs in; a session is good while its key is
+        let ok: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let ok2 = ok.clone();
+        let srv = fake::serve_with_bearer(move |bearer, m, p, b| {
+            let ok = ok2.lock().unwrap();
+            if m == "POST" && p == "/auth/engine" {
+                let kid = b["key_id"].as_str().unwrap_or("");
+                return Some(if ok.iter().any(|k| k == kid) {
+                    (200, json!({"token": format!("iter_s.{kid}"), "expires_at": now_secs() + 86400}))
+                } else {
+                    (401, json!({"error": "unknown engine key"}))
+                });
+            }
+            let kid = bearer.strip_prefix("iter_s.").unwrap_or("");
+            Some(if ok.iter().any(|k| k == kid) { (200, json!({"ok": true})) } else { (401, json!({"error": "engine key revoked"})) })
+        });
+        let dir = std::env::temp_dir().join(format!("iter-client-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("engine.key");
+        let k1 = write_key(&file);
+        let k2 = write_key(&next_key_file(&file));
+        ok.lock().unwrap().push(k1.clone());
+
+        let api = Api::with_key(&srv.base, &file);
+        let clone = api.clone();
+        assert!(api.get("/api/server").is_ok());
+        assert_eq!(api.token(), format!("iter_s.{k1}"));
+        // the next key is not accepted yet: nothing changes, and it is not retried within the minute
+        assert!(!api.adopt_next(false));
+        ok.lock().unwrap().push(k2.clone());
+        assert!(!api.adopt_next(false), "rate-limited");
+        // the old key is revoked: the next call is refused, signs in again, falls
+        // back on the next key, and goes through; every clone follows
+        ok.lock().unwrap().retain(|k| k != &k1);
+        *api.key.as_ref().unwrap().next_tried.lock().unwrap() = None;
+        assert!(clone.get("/api/server").is_ok());
+        assert_eq!((api.token(), clone.token()), (format!("iter_s.{k2}"), format!("iter_s.{k2}")));
+        // the next key is now the key file
+        assert!(!next_key_file(&file).exists());
+        assert_eq!(iter_core::enginekey::key_id(&load_key(&file).unwrap().verifying_key().to_bytes()), k2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

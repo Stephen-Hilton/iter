@@ -1,7 +1,7 @@
 ---
 id: 8855b650-a6ee-43a3-bdbe-b862f6a41bdb
 name: "tools — engine setup and test helpers"
-desc: "Three helper scripts: iter_engine_setup.sh sets up the one iter5 engine of a machine (served by iter_data at /iter_engine_setup.sh; checks git/curl/claude, finds or builds iter_engine into ~/.iter5/bin, checks the engine token, writes ~/.iter5/.env mode 600, starts the engine and waits for its check-in; --status / --stop); cargo-test-crate.sh runs one crate's cargo tests and reports them as a test result line; fetch_model.sh downloads the GraphRAG embedding model."
+desc: "Helper scripts: iter_engine_setup.sh is retired (served by iter_data at /iter_engine_setup.sh, it only points at install.sh / install.ps1, which set up an engine machine now); cargo-test-crate.sh runs one crate's cargo tests and reports them as a test result line; fetch_model.sh downloads the GraphRAG embedding model."
 creator: "stephen"
 teststate: inherit
 level: component
@@ -15,28 +15,13 @@ timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30
 ---
 # tools — engine setup and test helpers
 
-## `iter_engine_setup.sh` — one engine per machine
+## `iter_engine_setup.sh` — retired
 
-iter5 runs one engine per machine, serving every project the settings graph
-connects to it, so setup needs no project. The script is embedded in
-iter_data (`include_bytes!` in `iter_data/src/main.rs`) and served at
-`<data_url>/iter_engine_setup.sh`, so nothing is copied by hand:
-
-```bash
-curl -fsSL http://127.0.0.1:8400/iter_engine_setup.sh | bash -s -- \
-  --data-url http://127.0.0.1:8400 --engine mbp --token <engine token> --start
-```
-
-In order, each step saying what it found and overwriting nothing: check the
-tools (git, curl, the `claude` CLI the agents run in); find `iter_engine`
-(`--bin`, `$ITER_ENGINE_BIN`, `~/.iter5/bin`) or build it from GitHub with
-cargo; check the server answers and the token signs in; write the env file
-(default `~/.iter5/.env`, mode 600) with `ITER_ENGINE_TOKEN` plus one token per
-account the engine holds; with `--start`, run
-`iter_engine --data-url URL --env-file FILE --name NAME` in the background and
-wait for its first heartbeat. Then, in the Settings tab, draw `serves` edges
-(engine → project, with the checkout as `topdir`) and `holds` edges (engine →
-account). `--status` and `--stop` check or stop the engine it started.
+Retired 2026-10-11. An engine machine is set up with the install script at
+the repo root (`install.sh` on Linux, `install.ps1` on Windows), which makes
+the machine's own engine key. The script stays embedded in iter_data
+(`include_bytes!` in `iter_data/src/main.rs`) and served at
+`<data_url>/iter_engine_setup.sh` only so an old link prints where to go.
 
 ## `cargo-test-crate.sh <crate>`
 

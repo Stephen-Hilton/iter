@@ -12,6 +12,9 @@ struct World {
     rewrite: Option<(String, String)>,
     fail_sync: bool,
     graph: Value,
+    /// the reply to files/reconcile (Null: no such route) and what it was sent
+    reconcile: Value,
+    reconciled: Vec<Value>,
 }
 
 fn server(world: Arc<Mutex<World>>) -> FakeServer {
@@ -45,6 +48,10 @@ fn server(world: Arc<Mutex<World>>) -> FakeServer {
         }
         if m == "POST" && path.ends_with("/build/done") {
             return Some((200, json!({"ok": true})));
+        }
+        if m == "POST" && path.ends_with("/files/reconcile") && !w.reconcile.is_null() {
+            w.reconciled.push(body.clone());
+            return Some((200, w.reconcile.clone()));
         }
         if m == "GET" && path.ends_with("/graph") {
             return Some((200, w.graph.clone()));
@@ -445,4 +452,49 @@ fn a_renamed_parts_folder_moves_with_its_code() {
     // a move that is not a folder's namesake stays a single-file move
     assert_eq!(crate::filesync::folder_rename("{topdir}/src/old/o.code.iter.md", "{topdir}/src/moved/o.code.iter.md"), None);
     assert_eq!(crate::filesync::folder_rename("{topdir}/a/x/x.code.iter.md", "{topdir}/b/y/y.code.iter.md"), None, "a different parent is a move, not a rename");
+}
+
+#[test]
+fn the_sync_check_resends_queues_and_removes_only_what_is_really_gone() {
+    let top = repo("reconcile");
+    write(&top, "src/a/a.code.iter.md", &conformed("src/a/a.code.iter.md", "A"));
+    write(&top, "src/b/b.code.iter.md", &conformed("src/b/b.code.iter.md", "B"));
+    let world = Arc::new(Mutex::new(World::default()));
+    let srv = server(world.clone());
+    let api = srv.api();
+    let mut st = FileSyncState::default();
+    tick(&api, "e1", "p", &top, false, false, &mut st).unwrap();
+    assert_eq!(st.last.reconciled, None, "never on the first (full) sync");
+
+    world.lock().unwrap().reconcile = json!({
+        "send": ["{topdir}/src/a/a.code.iter.md"],
+        "queued": [{"id": "x", "path": "{topdir}/src/b/b.code.iter.md"}],
+        "orphans": [{"id": "g", "path": "{topdir}/src/gone/gone.code.iter.md"}, {"id": "h", "path": "{topdir}/README.md"}],
+        "may_delete": true,
+    });
+    tick(&api, "e1", "p", &top, false, false, &mut st).unwrap();
+    assert_eq!(st.last.reconciled, Some((1, 1, 0)));
+    let sent = world.lock().unwrap().reconciled[0].clone();
+    let files = sent["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|f| f["hash"] == f["cached"] && !f["hash"].as_str().unwrap().is_empty()), "{sent}");
+    // the orphan whose file is gone is removed; one whose file is on disk is not
+    let deletes: Vec<Value> = syncs(&srv).into_iter().filter(|c| !c["deleted"].as_array().unwrap().is_empty()).collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["deleted"], json!(["{topdir}/src/gone/gone.code.iter.md"]));
+    // the file asked for is sent again on the next tick, though it did not change
+    let before = syncs(&srv).len();
+    tick(&api, "e1", "p", &top, false, false, &mut st).unwrap();
+    let after = syncs(&srv);
+    assert_eq!(after.len(), before + 1);
+    assert_eq!(sent_paths(after.last().unwrap()), vec!["{topdir}/src/a/a.code.iter.md".to_string()]);
+    assert_eq!(st.last.reconciled, None, "not again within RECONCILE_EVERY");
+
+    // several engines: orphans are only logged
+    world.lock().unwrap().reconcile["may_delete"] = json!(false);
+    st.last_reconcile = None;
+    let before = syncs(&srv).len();
+    tick(&api, "e1", "p", &top, false, false, &mut st).unwrap();
+    assert_eq!(syncs(&srv).len(), before, "no delete (the file asked for goes out next tick)");
+    assert_eq!(st.last.reconciled, Some((1, 1, 0)));
 }

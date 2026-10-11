@@ -1,7 +1,7 @@
 ---
 id: 96833f8c-3001-4029-9797-312e23da8c21
 name: "Build, ship and prove"
-desc: "Packages iter5 into one container (ArangoDB CE + iter_data on :8400, Arango console on 127.0.0.1:8630), starts it in docker or local mode with deploy.sh, sets an engine up on any machine with tools/iter_engine_setup.sh, and proves the whole stack with e2e.sh (one engine serving two projects on the mock provider) and the Playwright web suite."
+desc: "Packages iter5 into one container (ArangoDB CE + iter_data on :8400, Arango console on 127.0.0.1:8630), starts it in docker or local mode with deploy.sh, sets an engine up on any machine with install.sh / install.ps1 (the machine makes its own engine key), and proves the whole stack with e2e.sh (one engine serving two projects on the mock provider) and the Playwright web suite."
 creator: "iter migrate5"
 teststate: inherit
 level: context
@@ -34,7 +34,7 @@ It holds two containers: **docker — all-in-one container** and
   Both wait for `/health` to say `"ok":true`.
 - `tools/iter_engine_setup.sh`, served by iter_data at `/iter_engine_setup.sh`,
   sets up the one engine of a machine: checks tools, finds or builds
-  `iter_engine`, checks the token, writes `~/.iter5/.env` (mode 600) and starts
+  `iter_engine`, checks the token, writes `~/.iter/.env` (mode 600) and starts
   the engine, which then appears in the Settings graph.
 - `./e2e.sh` runs a real iter_data (throwaway `iter5_e2e_*` database) and one
   real engine serving **two** copies of `e2e/sample5`, all on the `mock`

@@ -303,7 +303,7 @@ fn sync_repo_files(api: &Api, project: &str, topdir: &Path, globs: &[String], fo
 /// A PUT that may take longer than the client's 30 s default (embedding a batch).
 fn put_long(api: &Api, path: &str, body: &Value) -> Result<Value, String> {
     let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(600)).build().map_err(|e| e.to_string())?;
-    let resp = http.put(format!("{}{}", api.base, path)).bearer_auth(&api.token).json(body).send().map_err(|e| e.to_string())?;
+    let resp = http.put(format!("{}{}", api.base, path)).bearer_auth(api.token()).json(body).send().map_err(|e| e.to_string())?;
     let status = resp.status();
     let text = resp.text().unwrap_or_default();
     if !status.is_success() {

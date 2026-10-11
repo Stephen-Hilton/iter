@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 pub mod cluster;
 pub mod dedup;
+pub mod enginekey;
 pub mod nodefile;
 pub mod platform;
 pub mod sched;
@@ -44,6 +45,8 @@ pub const TABLES: &[&str] = &[
     "provider",
     "workitem_type",
     "sys_edge",
+    // engine public keys an admin registered (iter_core::enginekey)
+    "engine_key",
 ];
 
 /// Workitem states (glossary in iter.v3.md).
