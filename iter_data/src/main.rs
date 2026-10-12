@@ -90,6 +90,7 @@ const WEBUI_FILES: &[(&str, &str, &[u8])] = &[
     ("/vendor/cose-base.js", "application/javascript", include_bytes!("../../webui/vendor/cose-base.js")),
     ("/vendor/cytoscape-fcose.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape-fcose.js")),
     ("/vendor/cytoscape-dagre.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape-dagre.js")),
+    ("/vendor/elk.bundled.js", "application/javascript", include_bytes!("../../webui/vendor/elk.bundled.js")),
     ("/kit.js", "application/javascript", include_bytes!("../../webui/kit.js")),
     ("/kit.css", "text/css", include_bytes!("../../webui/kit.css")),
     ("/settings.js", "application/javascript", include_bytes!("../../webui/settings.js")),

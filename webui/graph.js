@@ -53,6 +53,10 @@
   const PROTOCOLS = ['TCP', 'UDP', 'HTTP', 'HTTPS', 'gRPC', 'WebSocket', 'GraphQL', 'SQL', 'Kafka', 'AMQP', 'MQTT', 'Redis', 'SSH', 'File', 'In-process'];
   /** how edges are drawn: straight (parallel ones bow apart), curved, or elbow (right angles) */
   const LINE_MODES = { straight: 'straight', curved: 'curved', elbow: 'elbow' };
+  // layouts that draw ownership as boxes inside boxes (a code node holds the code nodes it owns)
+  const NESTED_LAYOUTS = new Set(['cluster', 'layered', 'layered-down', 'boxes']);
+  // the ELK layouts (2026-10-11): layered left to right / top to bottom, or packed boxes
+  const ELK_LAYOUTS = { layered: 'RIGHT', 'layered-down': 'DOWN', boxes: null };
   const EDGE_KINDS = {
     codenodes: { label: 'owns (child code node)', verb: 'owns', color: '#8b95a7', line: 'dotted', width: 1.7 },
     tests: { label: 'tested by', verb: 'is tested by', color: '#22c55e', line: 'dashed', width: 1.3 },
@@ -230,6 +234,9 @@
     <div class="g-group">
       <div class="g-seg" id="g-layouts" role="group" aria-label="Layout">
         <button data-layout="cluster" title="Boxes inside boxes: each code node holds the code nodes it owns (force-directed)">Cluster</button>
+        <button data-layout="layered" title="Boxes inside boxes, in layers from left to right along the arrows; lines run at right angles around the boxes">Layered →</button>
+        <button data-layout="layered-down" title="Boxes inside boxes, in layers from top to bottom along the arrows; lines run at right angles around the boxes">Layered ↓</button>
+        <button data-layout="boxes" title="Boxes inside boxes packed like a floor plan; lines stay faint until you hover or pick a node">Boxes</button>
         <button data-layout="tiered" title="Rows from top to bottom by type (or, in a use case, by the order the journey reaches each part)">Tiered</button>
         <button data-layout="rings" title="Rings from the centre outward">Rings</button>
         <button data-layout="flow" title="Left to right, following the arrows (dagre) — the Network map uses it">Flow</button>
@@ -265,7 +272,7 @@
     <span class="g-sep"></span>
     <div class="g-presets" id="g-presets"></div>
     <label class="g-chk reqsecopt" title="Draw every requirement (each ## section of a bizreq/techreq file) as a small node beside its file — the Req chip"><input type="checkbox" id="g-reqsec"> requirement sections</label>
-    <label class="g-chk wholeopt" title="Draw the dotted 'owns' lines even where Cluster already shows ownership as boxes"><input type="checkbox" id="g-own"> ownership lines</label>
+    <label class="g-chk wholeopt" title="Draw the dotted 'owns' lines even where the boxes already show ownership"><input type="checkbox" id="g-own"> ownership lines</label>
     <label class="g-chk clusteropt" title="On: Cluster re-arranges the drawing for you (a dragged node pulls its neighbours and the graph settles; a redraw re-runs the layout). Off: nodes stay exactly where you put them, across redraws and reloads; Re-layout (R) still re-runs it on request."><input type="checkbox" id="g-autofit"> auto-fit nodes</label>
   </div>
   <div class="g-row g-editrow"><span id="g-summary" class="g-summary"></span><span class="g-edit" id="g-editbar"></span></div>
@@ -313,7 +320,7 @@
     update(raw) { if (current && current.api) current.api.update(normalize(raw)); },
     get current() { return current; },
     get api() { return current && current.api; },
-    registerLayouts, normalize, LEVELS, LEVEL_ORDER, EDGE_KINDS, PROTOCOLS, DATAFLOW_KINDS, FILE_STATES, CODE_LEVELS,
+    registerLayouts, normalize, LEVELS, LEVEL_ORDER, EDGE_KINDS, PROTOCOLS, DATAFLOW_KINDS, FILE_STATES, CODE_LEVELS, NESTED_LAYOUTS,
   };
 
   function start(ROOT, G0, CTX, SIGNAL) {
@@ -443,7 +450,7 @@
         state[k] = BOOLS.includes(k) ? p.get(k) === '1' : p.get(k);
       }
       if (state.uc && !ucById.has(state.uc)) state.uc = '';
-      if (!['cluster', 'tiered', 'rings', 'sequence', 'flow'].includes(state.layout)) state.layout = 'cluster';
+      if (!['cluster', 'layered', 'layered-down', 'boxes', 'tiered', 'rings', 'sequence', 'flow'].includes(state.layout)) state.layout = 'cluster';
       if (!['process', 'data', 'both'].includes(state.flow)) state.flow = DEFAULTS.flow;
       let hide = state.hide;
       if (hide == null) { try { hide = localStorage.getItem(HIDE_KEY()); } catch (e) { hide = null; } }
@@ -771,10 +778,14 @@
         { selector: 'edge.lm-curved', style: { 'curve-style': 'unbundled-bezier', 'control-point-distances': 'data(cpd2)', 'control-point-weights': 0.5 } },
         { selector: 'edge.lm-elbow', style: { 'curve-style': 'taxi', 'taxi-direction': 'auto', 'taxi-turn': 'data(turn)', 'taxi-turn-min-distance': 12 } },
         { selector: 'edge.lm-elbow.curved', style: { 'source-endpoint': 'data(se)', 'target-endpoint': 'data(se)' } },
+        // Layered: the route ELK found, around the boxes, at right angles
+        { selector: 'edge.routed', style: { 'curve-style': 'segments', 'segment-weights': 'data(rw)', 'segment-distances': 'data(rd)', 'edge-distances': 'node-position', 'segment-radius': 6, 'radius-type': 'arc-radius' } },
         // ends that overlap (one node on top of another): only a straight line can be drawn
         { selector: 'edge.lm-off', style: { 'curve-style': 'straight' } },
         { selector: 'edge:loop', style: { 'curve-style': 'bezier' } },
-        { selector: 'edge.k-calls, edge.k-pulls, edge.k-pushes, edge.k-same_as', style: { label: 'data(label)', 'font-size': 11, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.85, 'text-background-padding': '1px', 'text-rotation': 'autorotate', opacity: 0.95 } },
+        // a line's label is drawn once it is large enough to read (zoomed out, it is only clutter)
+        { selector: 'edge.k-calls, edge.k-pulls, edge.k-pushes, edge.k-same_as', style: { label: 'data(label)', 'font-size': 11, color: 'data(color)', 'text-background-color': '#14161a', 'text-background-opacity': 0.85, 'text-background-padding': '1px', 'text-rotation': 'autorotate', opacity: 0.95, 'min-zoomed-font-size': 8 } },
+        { selector: 'edge.routed', style: { 'text-rotation': 'none' } },
         { selector: 'edge.k-codenodes', style: { opacity: 0.55, 'arrow-scale': 0.6 } },
         { selector: 'edge.k-reqs, edge.k-tests', style: { opacity: 0.55 } },
         { selector: 'edge.k-supplies, edge.k-connects', style: { opacity: 0.9, 'arrow-scale': 1 } },
@@ -793,6 +804,9 @@
         { selector: '.dim', style: { opacity: 0.12 } },
         { selector: 'node.dim', style: { 'text-opacity': 0.35 } },
         { selector: '.faded', style: { opacity: 0.1 } },
+        // Boxes: lines stay faint (no labels) until a node or line is hovered or picked
+        { selector: 'edge.quiet', style: { opacity: 0.1, 'text-opacity': 0 } },
+        { selector: 'edge.quiet.hl, edge.quiet:selected', style: { opacity: 1, 'text-opacity': 1, 'z-index': 20 } },
         { selector: '.selfade', style: { opacity: 0.2 } },
         // a box's opacity multiplies into everything drawn inside it, so a faded box dims only its own fill,
         // border and name: a node inside a faded box stays visible (2026-10-11: a nested target vanished)
@@ -879,12 +893,12 @@
       }
       LASTING = banners.join(' '); showBanner(LASTING, hint);
       const all = new Set(v.ids); const ghosts = new Set();
-      if (layout === 'cluster' && v.uc && !state.dim) {
+      if (NESTED_LAYOUTS.has(layout) && v.uc && !state.dim) {
         for (const id of v.ids) { let p = (nodesById.get(id) || {}).parent; while (p) { if (!all.has(p)) ghosts.add(p); p = (nodesById.get(p) || {}).parent; } }
         ghosts.forEach((g) => all.add(g));
       }
       const parentFor = (id) => {
-        if (layout !== 'cluster') return undefined;
+        if (!NESTED_LAYOUTS.has(layout)) return undefined;
         let p = (nodesById.get(id) || {}).parent;
         while (p) { if (all.has(p)) return p; p = (nodesById.get(p) || {}).parent; }
         return undefined;
@@ -906,7 +920,7 @@
       if (bands) { const vals = [...new Set([...all].map((id) => bands.get(id)))].sort((a, b) => a - b); all.forEach((id) => rowRank.set(id, vals.indexOf(bands.get(id)))); }
       // in Cluster, the box already says "owns": that line is drawn only on request
       const list = v.edges.filter((e) => all.has(e.source) && all.has(e.target)
-        && !(e.type === 'link' && e.kind === 'codenodes' && layout === 'cluster' && !state.own && parentFor(e.target) === e.source));
+        && !(e.type === 'link' && e.kind === 'codenodes' && NESTED_LAYOUTS.has(layout) && !state.own && parentFor(e.target) === e.source));
       const bow = list.map((m) => {
         if (!(bands && layout === 'tiered' && m.type === 'flow')) return 0;
         const a = rowRank.get(m.source); const b = rowRank.get(m.target); const span = Math.abs(b - a);
@@ -984,6 +998,128 @@
     // that is expected (the line reappears once they part), so the console stays quiet
     if (typeof cytoscape.warnings === "function") cytoscape.warnings(false);
 
+    /*
+     * The ELK layouts (2026-10-11), on the elkjs library (vendor/elk.bundled.js):
+     * - Layered → / ↓: ELK's layered algorithm over the whole hierarchy at once (hierarchyHandling
+     *   INCLUDE_CHILDREN), so the lines run one way, cross as little as it can manage, and boxes never
+     *   overlap; ELK's orthogonal routes are kept (Cytoscape segment edges, class `routed`).
+     * - Boxes: ELK's rectangle packing inside every box, bottom up (a floor plan); lines are drawn
+     *   faint (class `quiet`) and light up when a node or line is hovered or picked.
+     * ELK sizes each leaf by its body and its name together, and each box leaves room for its title,
+     * so Cytoscape's own box padding fits inside what ELK reserved. A later layout run (or a redraw)
+     * makes a pending result stale; it is dropped.
+     */
+    let ELK_RUN = 0;
+    const ELK_BOX_PAD = '[top=58,left=36,bottom=36,right=36]';
+    function elkLayout(layout, aspect, place, done) {
+      const run = ++ELK_RUN;
+      const direction = ELK_LAYOUTS[layout];
+      const nodes = cy.nodes().filter((n) => !n.hasClass('req') && !isHelper(n));
+      const inLayout = new Set(nodes.map((n) => n.id()));
+      const offs = new Map();
+      const boxOpts = direction
+        ? { 'elk.padding': ELK_BOX_PAD }
+        : { 'elk.algorithm': 'rectpacking', 'elk.padding': ELK_BOX_PAD, 'elk.spacing.nodeNode': '26', 'elk.aspectRatio': '1.5' };
+      const mk = (n) => {
+        if (n.isParent()) return { id: n.id(), layoutOptions: boxOpts, children: n.children().filter((c) => inLayout.has(c.id())).map(mk) };
+        const bb = n.boundingBox({ includeLabels: true, includeOverlays: false });
+        const p = n.position();
+        offs.set(n.id(), { x: p.x - bb.x1, y: p.y - bb.y1 });
+        return { id: n.id(), width: Math.max(1, bb.w), height: Math.max(1, bb.h) };
+      };
+      const top = nodes.filter((n) => !n.parent().nonempty() || !inLayout.has(n.parent().id()));
+      const edges = !direction ? [] : cy.edges().filter((e) => {
+        const s = e.source(); const t = e.target();
+        return !e.isLoop() && inLayout.has(s.id()) && inLayout.has(t.id()) && !s.ancestors().contains(t) && !t.ancestors().contains(s);
+      }).map((e) => ({ id: e.id(), sources: [e.source().id()], targets: [e.target().id()] }));
+      const rootOpts = direction ? {
+        'elk.algorithm': 'layered', 'elk.direction': direction, 'elk.hierarchyHandling': 'INCLUDE_CHILDREN', 'elk.edgeRouting': 'ORTHOGONAL',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '70', 'elk.spacing.nodeNode': '30', 'elk.spacing.edgeNode': '18', 'elk.spacing.edgeEdge': '10',
+        'elk.layered.spacing.edgeNodeBetweenLayers': '18', 'elk.layered.spacing.edgeEdgeBetweenLayers': '10',
+        'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX', 'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+        'elk.aspectRatio': String(aspect.toFixed(2)), 'elk.padding': '[top=20,left=20,bottom=20,right=20]',
+        ...(window.__elkOverride || {}),
+      } : { 'elk.algorithm': 'rectpacking', 'elk.aspectRatio': String(aspect.toFixed(2)), 'elk.spacing.nodeNode': '40', 'elk.padding': '[top=20,left=20,bottom=20,right=20]' };
+      const graph = { id: '__root', layoutOptions: rootOpts, children: top.map(mk), edges };
+      if (cy.container()) cy.container().style.opacity = '0';
+      const show = () => { if (cy.container()) cy.container().style.opacity = ''; };
+      new ELK().layout(graph).then((res) => {
+        if (run !== ELK_RUN || cy.destroyed()) return;
+        const abs = new Map();
+        const walk = (k, ox, oy) => { const x = ox + (k.x || 0); const y = oy + (k.y || 0); abs.set(k.id, { x, y }); (k.children || []).forEach((c) => walk(c, x, y)); };
+        abs.set('__root', { x: 0, y: 0 });
+        (res.children || []).forEach((c) => walk(c, 0, 0));
+        cy.batch(() => {
+          nodes.filter((n) => !n.isParent()).forEach((n) => { const a = abs.get(n.id()); const o = offs.get(n.id()); if (a && o) n.position({ x: a.x + o.x, y: a.y + o.y }); });
+          cy.edges().removeClass('routed quiet');
+          if (!direction) cy.edges().addClass('quiet');
+        });
+        place();
+        // routes are measured from the ends' positions, a box's included: Cytoscape recomputes a box's
+        // bounds lazily, so they are brought up to date first
+        if (direction) {
+          cy.nodes(':parent').updateCompoundBounds(true);
+          cy.batch(() => (res.edges || []).forEach((k) => routeEdge(k, abs.get(k.container || '__root') || { x: 0, y: 0 })));
+          unroute(cy.nodes('.kit-pinned')); // a pinned node is not where ELK put it
+        }
+        done(); show();
+      }).catch((err) => {
+        if (run !== ELK_RUN || cy.destroyed()) return;
+        show();
+        IterKit.toast('The layout could not be computed (' + (err && err.message || err) + '): showing Cluster.', { kind: 'info' });
+        state.layout = 'cluster'; render({ relayout: true });
+      });
+    }
+    /** One ELK route as a Cytoscape segment edge: each bend as (weight, distance) along source → target. */
+    function routeEdge(k, origin) {
+      const e = cy.getElementById(k.id); const sec = k.sections && k.sections[0];
+      if (!e || e.empty() || !sec) return;
+      const pts = [sec.startPoint, ...(sec.bendPoints || []), sec.endPoint].map((p) => ({ x: p.x + origin.x, y: p.y + origin.y }));
+      if (!setRoute(e, pts)) return;
+      Object.keys(LINE_MODES).forEach((m) => e.removeClass('lm-' + m));
+      e.addClass('routed');
+    }
+    /** Draw `e` through the absolute points `pts`, measured from where its ends are now (Cytoscape's segment
+     *  weight runs source → target, its distance is positive to the right of that line); false when its ends coincide. */
+    function setRoute(e, pts) {
+      const S = e.source().position(); const T = e.target().position();
+      const dx = T.x - S.x; const dy = T.y - S.y; const L2 = dx * dx + dy * dy;
+      if (L2 < 1) return false;
+      const L = Math.sqrt(L2);
+      const ws = []; const ds = [];
+      pts.forEach((p) => { const px = p.x - S.x; const py = p.y - S.y; ws.push(((px * dx + py * dy) / L2).toFixed(4)); ds.push(((py * dx - px * dy) / L).toFixed(2)); });
+      e.data({ rw: ws.join(' '), rd: ds.join(' ') });
+      e.scratch('_route', { pts, ds: ds.map(Number), at: { S: { ...S }, T: { ...T } } });
+      return true;
+    }
+    /*
+     * A route is stored as absolute points but drawn relative to its two ends' centres, and a box's centre
+     * moves when the box only grows (a late font, a renamed node inside it). After each redraw (at most
+     * every 150 ms) a line whose box end moved is re-measured, so it stays on its route; a line whose node
+     * end moved (that node was moved) goes back to the plain line style instead.
+     */
+    let routeCheck = null;
+    cy.on('render', () => {
+      if (routeCheck || !cy.edges('.routed').nonempty()) return;
+      routeCheck = setTimeout(() => {
+        routeCheck = null;
+        const moved = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) > 0.5;
+        cy.edges('.routed').forEach((e) => {
+          const r = e.scratch('_route'); if (!r) return;
+          const S = e.source().position(); const T = e.target().position();
+          const sm = moved(S, r.at.S); const tm = moved(T, r.at.T);
+          if (!sm && !tm) return;
+          if ((sm && !e.source().isParent()) || (tm && !e.target().isParent())) { e.removeClass('routed'); if (!e.hasClass('lm-off')) e.addClass('lm-' + LINE_MODE); return; }
+          setRoute(e, r.pts);
+        });
+      }, 150);
+    });
+    /** A moved node's routes no longer fit: its lines (and its contents' lines) go back to the chosen line style. */
+    function unroute(nodes) {
+      nodes.union(nodes.descendants()).connectedEdges('.routed').forEach((e) => { e.removeClass('routed'); if (!e.hasClass('lm-off')) e.addClass('lm-' + LINE_MODE); });
+    }
+    cy.on('grab', 'node', (evt) => unroute(evt.target));
+
     function runLayout(layout, v, ub) {
       const bands = ub ? ub.bands : null;
       cy.resize();
@@ -999,6 +1135,16 @@
       const bandOf = bands ? (id) => bands.get(id) ?? 99 : null;
       let pos = null;
       const aspect = Math.min(3, Math.max(0.8, cy.width() / Math.max(1, cy.height())));
+      if (layout in ELK_LAYOUTS) {
+        // pins and requirement columns are placed before the lines are routed (they can move a box)
+        const place = () => { if (PINS) PINS.apply(); if (reqDrawn) placeReqs(null); };
+        elkLayout(layout, aspect, place, () => {
+          cy.fit(undefined, v.uc && !state.dim ? 55 : 30);
+          if (cy.zoom() > 1.4) { cy.zoom(1.4); cy.center(); }
+          fixOverlaps();
+        });
+        return;
+      }
       if (layout === 'cluster') {
         // pinned nodes (P) are held where they were pinned
         if (PINS) PINS.apply();
@@ -1186,6 +1332,7 @@
         keep = el.union(el.connectedNodes()).union(ends).union(ends.ancestors());
       }
       cy.elements().not(keep).not('.kit-ep').addClass('selfade');
+      keep.edges().addClass('hl');
     }
     function stepEdgesOf(id) {
       const es = cy.edges('.seqmsg').filter((ed) => { const m = EDGES.get(ed.id()); return !!m && (m.source === id || m.target === id); });
@@ -1590,7 +1737,7 @@
       $('ucpick').value = state.uc;
       const uc = state.uc ? ucById.get(state.uc) : null;
       ROOT.querySelectorAll('.ucopt').forEach((el) => el.classList.toggle('hidden', !uc));
-      ROOT.querySelectorAll('.wholeopt').forEach((el) => el.classList.toggle('hidden', !!uc || state.layout !== 'cluster'));
+      ROOT.querySelectorAll('.wholeopt').forEach((el) => el.classList.toggle('hidden', !!uc || !NESTED_LAYOUTS.has(state.layout)));
       $('dim').checked = state.dim; $('own').checked = state.own; $('autofit').checked = AUTOFIT; $('lines').value = LINE_MODE;
       ROOT.querySelectorAll('.clusteropt').forEach((el) => el.classList.toggle('hidden', state.layout !== 'cluster'));
       ROOT.querySelectorAll('#g-layouts button').forEach((b) => {

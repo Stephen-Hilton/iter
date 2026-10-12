@@ -10,6 +10,7 @@ from `file://`. Each library's own licence file sits beside it (`LICENSE.<packag
 | cytoscape-fcose.js | cytoscape-fcose | 2.2.0 | MIT (LICENSE.cytoscape-fcose) |
 | cose-base.js | cose-base | 2.2.0 | MIT (LICENSE.cose-base) |
 | layout-base.js | layout-base | 2.0.1 | MIT (LICENSE.layout-base) |
+| elk.bundled.js | elkjs (lib/elk.bundled.js) | 0.9.3 | EPL-2.0 (LICENSE.elkjs) |
 
 The dagre graph-layout library (`@dagrejs/dagre`, MIT licence, Copyright (c) 2012-2014 Chris
 Pettitt) is not a separate file: cytoscape-dagre 4.0.0 bundles it inside `cytoscape-dagre.js`,

@@ -419,7 +419,7 @@
     cy.on('grab', 'node', (e) => { const p = e.target.parent(); grabAt = Object.assign({ id: e.target.id(), box: p.nonempty() ? Object.assign({}, p.boundingBox()) : null }, e.target.position()); });
     cy.on('free', 'node', (e) => {
       const g0 = grabAt; grabAt = null;
-      if (!S.canEdit || DRAW || G().layout !== 'cluster' || isHelper(e.target)) return;
+      if (!S.canEdit || DRAW || !(window.IterGraph.NESTED_LAYOUTS || new Set(['cluster'])).has(G().layout) || isHelper(e.target)) return;
       const at = e.target.position();
       if (!g0 || g0.id !== e.target.id() || Math.hypot(at.x - g0.x, at.y - g0.y) < 8) return;
       // a plain drag only moves the node on screen; Shift+drag moves it into another part or out of its own (2026-10-11)
