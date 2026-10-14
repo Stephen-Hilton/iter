@@ -14,8 +14,9 @@
 //!     process.  `ITER_USAGE_PROBE_URL` overrides the endpoint (e2e fake).
 //!
 //! Snapshot files: `$ITER_USAGE_DIR/iter3-usage-<account>.json` (default dir
-//! `~/.claude`; account "" -> "default", and the V2 machine-wide
-//! `iter-usage-snapshot.json` is still read as a fallback for "default").
+//! `~/.claude`; account "" -> "default", and the machine-wide
+//! `usage-snapshot.json` a statusline collector writes is read as a fallback
+//! for "default").
 //! Format keeps the V2 collector shape so hand-written fixtures still load:
 //!   {"ts","source","status","rate_limits":{"five_hour":{"used_percentage",
 //!    "resets_at"},"seven_day":{...}},"overage":{"is_using","used_percentage"}}
@@ -136,11 +137,15 @@ fn parse_snapshot(text: &str) -> Option<Usage> {
     })
 }
 
+/// Machine-wide snapshot a statusline collector writes (renamed from the V2
+/// `iter-usage-snapshot.json` on 2026-10-13 so it is not tied to iter).
+const MACHINE_SNAPSHOT: &str = "usage-snapshot.json";
+
 pub fn read_usage(account: &str) -> Option<Usage> {
     let text = std::fs::read_to_string(snapshot_path(account)).ok().or_else(|| {
-        // V2 compatibility: the old machine-wide snapshot feeds "default"
+        // the machine-wide statusline snapshot feeds "default"
         if account_key(account) == "default" {
-            std::fs::read_to_string(usage_dir().join("iter-usage-snapshot.json")).ok()
+            std::fs::read_to_string(usage_dir().join(MACHINE_SNAPSHOT)).ok()
         } else {
             None
         }
@@ -390,6 +395,24 @@ mod tests {
         let flag = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap()["token"].as_str().unwrap().to_string();
         assert_eq!(flag("Has"), "set");
         assert_eq!(flag("Not"), "unset");
+    }
+
+    /// The "default" account falls back to the machine-wide statusline
+    /// snapshot, ~/.claude/usage-snapshot.json (2026-10-13).
+    #[test]
+    fn default_account_reads_the_machine_wide_snapshot() {
+        let dir = usage_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(snapshot_path(""));
+        std::fs::write(
+            dir.join("usage-snapshot.json"),
+            r#"{"ts":"2026-10-13T00:00:00Z","rate_limits":{"five_hour":{"used_percentage":74,"resets_at":1791955245},"seven_day":{"used_percentage":48,"resets_at":1792044645}}}"#,
+        )
+        .unwrap();
+        let u = read_usage("").expect("default reads usage-snapshot.json");
+        assert_eq!(u.five_hour_pct, 74.0);
+        assert_eq!(u.seven_day_pct, 48.0);
+        assert!(read_usage("SomeOtherAccount").is_none());
     }
 
     /// The ladder's tie-break input (2026-10-08): a future reset as is, a past
