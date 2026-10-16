@@ -38,7 +38,7 @@ pub fn apply_op(top: &Path, op: &Value) -> Result<Vec<String>, String> {
             if path.ends_with(".iter.md") {
                 return Err(format!("{} never touches *.iter.md node files", s(op, "op")));
             }
-            let p = iter_local::walk::real_path(top, path)?;
+            let p = crate::local::walk::real_path(top, path)?;
             let rel = path.trim_start_matches("{topdir}/").to_string();
             if s(op, "op") == "store_doc" {
                 use base64::Engine as _;

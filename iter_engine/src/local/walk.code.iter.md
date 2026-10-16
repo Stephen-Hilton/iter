@@ -7,7 +7,7 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_local/src/walk.rs", "{topdir}/iter_local/src/lib.rs"]
+  codedirs:  ["{topdir}/iter_engine/src/local/walk.rs", "{topdir}/iter_engine/src/local/mod.rs"]
   codenodes: []
   tests:     []
   reqs:      []
@@ -22,7 +22,7 @@ Finds the project's description files on disk, quickly and without being fooled 
 
 ## How it works
 
-`iter_local/src/walk.rs` (iter5 spec §3.2):
+`iter_engine/src/local/walk.rs` (iter5 spec §3.2):
 
 - `is_node_name` asks `iter_core::nodefile::type_of` whether a filename is a node file (plain
   `*.iter.md` context docs are not).
@@ -35,7 +35,7 @@ Finds the project's description files on disk, quickly and without being fooled 
 - `topdir_path` turns an absolute path into `{topdir}/rel`; `real_path` turns a stored path back into
   an absolute one and refuses anything leaving the topdir.
 
-`iter_local/src/lib.rs` holds the shared pieces: `SKIP_DIRS` / `is_skip_dir`, `GitIgnored` (one
+`iter_engine/src/local/mod.rs` holds the shared pieces: `SKIP_DIRS` / `is_skip_dir`, `GitIgnored` (one
 `git ls-files --others --ignored` listing per walk, `contains`), `drop_git_ignored` (`git check-ignore`)
 and `now_iso`. Outside a git repository nothing is dropped.
 

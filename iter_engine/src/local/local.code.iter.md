@@ -1,6 +1,6 @@
 ---
 id: d189ff3e-7930-4fff-9092-ec1a0a80a006
-name: "iter_local — checkout tools"
+name: "iter_engine::local — checkout tools"
 desc: "Works on a project checkout with no server involved: walks the tree for node files (git-ignore aware, incremental stat-based pieces for the engine's filescan), runs a test node's scripts and aggregates them into the standard result JSON, and conform-checks every node file (`iter validate`)."
 creator: "iter migrate5"
 teststate: inherit
@@ -8,13 +8,13 @@ level: container
 owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
-  codenodes: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md"]
+  codenodes: ["{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_engine/src/local/validate.code.iter.md"]
   tests:     ["{thisfiledir}/test/*.test.iter.md"]
   reqs:      ["{topdir}/docs/iter5_spec.md"]
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
 ---
 
-# iter_local — checkout tools
+# iter_engine::local — checkout tools
 
 ## Summary
 
@@ -22,7 +22,7 @@ The toolkit the engine and the `iter` command use on the files of a checkout: fi
 
 ## What it does
 
-iter_local is a Rust library with no network and no queue: give it a project folder and it answers from
+`iter_engine::local` (`iter_engine/src/local/`, the former iter_local crate) is a module with no network and no queue: give it a project folder and it answers from
 the files. Parsing, rendering and conforming a node file is not done here — `iter_core::nodefile` is the
 one node-file library, shared byte-for-byte with iter_data. iter4's marker scan, graph snapshot, id
 stamper and graph-edit writer were removed in iter5.
@@ -58,4 +58,4 @@ failing test, infrastructure problems would be filed as code defects.
 `iter validate` in this repository conforms every node file in memory and exits 0 when none would change
 and no id is duplicated.
 
-Built and tested as the cargo package `iter_local` (`cargo test -p iter_local` from the repo root).
+Built and tested as part of the `iter_engine` package (`cargo test -p iter_engine` from the repo root).

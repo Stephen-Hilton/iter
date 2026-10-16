@@ -41,7 +41,7 @@ pub mod guide;
 pub mod pipeline;
 pub mod search;
 
-pub use iter_rag::{embed, extract};
+pub use iter_core::rag::{embed, extract};
 
 use crate::api::{ApiError, AppState, AuthUser};
 use crate::arango::ArangoBackend;

@@ -1,7 +1,7 @@
 //! Node-file walking (iter5 spec §3.2): every `*.iter.md` whose filename names
 //! a node type (`iter_core::nodefile::type_of`), under the project's
 //! `scandirs`, git-ignore aware, never entering `.git`, `target`,
-//! `node_modules`, `.iter` or `.claude` ([`crate::SKIP_DIRS`]). Symlinks are
+//! `node_modules`, `.iter` or `.claude` ([`super::SKIP_DIRS`]). Symlinks are
 //! never followed.
 //!
 //! Two shapes: [`node_files`] (one full walk, for validate / migrate / the
@@ -11,7 +11,7 @@
 //! mtime moved (an entry was added or removed) and only re-reads files whose
 //! `(mtime, size)` moved.
 
-use crate::GitIgnored;
+use super::GitIgnored;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -50,7 +50,7 @@ pub fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let Ok(ft) = e.file_type() else { continue };
         let name = e.file_name().to_string_lossy().into_owned();
         if ft.is_dir() {
-            if !crate::is_skip_dir(&name) {
+            if !super::is_skip_dir(&name) {
                 dirs.push(e.path());
             }
         } else if ft.is_file() && is_node_name(&name) {
@@ -73,7 +73,7 @@ pub struct Walked {
 
 /// Walk `root` recursively; directories git ignores (per `ignored`, one
 /// listing loaded up front) are not entered. Files are NOT checked against
-/// git here — pass new files through [`crate::drop_git_ignored`] (one git call).
+/// git here — pass new files through [`super::drop_git_ignored`] (one git call).
 pub fn walk(root: &Path, ignored: &GitIgnored) -> Walked {
     let mut out = Walked::default();
     let mut stack = vec![root.to_path_buf()];
@@ -139,7 +139,7 @@ pub fn node_files(topdir: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
     }
     files.sort();
     files.dedup();
-    crate::drop_git_ignored(topdir, files)
+    super::drop_git_ignored(topdir, files)
 }
 
 /// `{topdir}/rel` for a path under `topdir` (None outside it).

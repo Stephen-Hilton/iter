@@ -35,14 +35,14 @@ Runs one use case's tests per sweep (the use case whose tests ran longest ago), 
   use case / actor and run down `codenodes` and `uses` edges; a `block` stops a chain, `omit` / `include`
   switch it. A test node runs when its own teststate is not `omit` / `block` and at least one chain
   reaching an owner (via a `tests` edge) includes it.
-- **Running**: each test node's scripts run through iter_local's test runner; the aggregated standard
+- **Running**: each test node's scripts run through `iter_engine::local`'s test runner; the aggregated standard
   result is posted to `POST …/graph/nodes/{id}/testresult`. A failed node files one `code` fix item locked
   to its owner's codedirs (`file_fix_item`), keyed by `check:` + `container:` tags so a repeat is
   recorded on the open item instead of filed twice. "Could not run" is recorded but files nothing.
 - **Filing** (each capped per sweep): `untested_sweep` — leaf code nodes some chain includes with no
   linked test node that has a script on disk get a `test` item; `coverage_sweep` — test nodes short of
   their `coverage` targets (normal / longtail / failure counts) get a top-up item per owner;
-  `text_sweep` — code nodes whose desc or body break iter_local's node-text rules get an `ingest` item.
+  `text_sweep` — code nodes whose desc or body break `iter_engine::local`'s node-text rules get an `ingest` item.
 - `install_schedule` (`--install-schedule --every 4h`) turns the project's Test sweep schedule on. The
   Engine tick loop creates that schedule paused for every project (`ensure_test_sweep`) and runs its
   clones outside the agent cap and holds, with no end-of-run commit.
@@ -60,5 +60,5 @@ Red tests become work without anyone filing them, untested parts are noticed, an
 ## Example
 
 `iter sweep --dry-run` lists the test nodes it would run and the items it would file; without
-`--dry-run`, a red `iter_local unit tests` node records its result and files one fix item on
-`iter_local/`.
+`--dry-run`, a red `iter_engine unit tests` node records its result and files one fix item on
+`iter_engine/`.

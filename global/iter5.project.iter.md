@@ -67,10 +67,10 @@ the root: its `children.codenodes` are the five context nodes —
   (API, project graph, settings graph, get_next, MCP, GraphRAG) and the `webui`
   it serves.
 - **Engines and checkout tools** (`map/engine/`) — `iter_engine`, one per
-  machine, which also is the `iter` command line, and `iter_local`, which walks,
-  validates and tests a checkout.
+  machine, which also is the `iter` command line, and its `local` module, which
+  walks, validates and tests a checkout.
 - **Shared rules and types** (`map/shared/`) — `iter_core` (records, queue
-  rules, the node-file library both sides use) and `iter_rag`.
+  rules, the node-file library both sides use, and `rag` for GraphRAG).
 - **Build, ship and prove** (`map/delivery/`) — the all-in-one container,
   `deploy.sh`, the engine setup script, `e2e.sh` and Playwright.
 - **Outside systems** (`map/external/`) — ArangoDB and the Claude Code CLI,

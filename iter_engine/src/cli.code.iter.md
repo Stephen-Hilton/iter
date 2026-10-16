@@ -33,9 +33,9 @@ clap parses the words into the `Verb` enum. Inside an engine run, agents reach i
   `check_add_request`); `iter wait --on` records blockers the Close gate waits behind; `iter block
   --cluster-restart` parks an item until the cluster is back.
 - **Checkout verbs** (`mod local`): `runtests` finds a test node (id, unique tail, name, stem or path, or
-  the calling item's `$ITER_NODEFILE`), runs it through iter_local's test runner, posts the standard
+  the calling item's `$ITER_NODEFILE`), runs it through `iter_engine::local`'s test runner, posts the standard
   result to the test node and, with `--broken` / `--fixed`, records a claim the Close gate checks;
-  `validate [--fix]` is iter_local's validate; `markers` prints every node file parsed as JSON;
+  `validate [--fix]` is `iter_engine::local`'s validate; `markers` prints every node file parsed as JSON;
   `teststate` sets or lists teststate on node files; `usecase` edits a use case's `children.codenodes`.
 - **Connected checkout verbs** (via `sync::conn`): `sync` (one Node-file sync round), `sweep` (Test
   sweep), `rag sync` (GraphRAG change sweep).

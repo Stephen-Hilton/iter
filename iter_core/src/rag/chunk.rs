@@ -377,10 +377,10 @@ mod tests {
 
     #[test]
     fn token_sized_chunks_fit_the_model_window_whole() {
-        let Some(dir) = crate::embed::find_model_dir() else { return };
-        let e = crate::embed::Embedder::load(&dir).unwrap();
+        let Some(dir) = crate::rag::embed::find_model_dir() else { return };
+        let e = crate::rag::embed::Embedder::load(&dir).unwrap();
         let count = |s: &str| e.count_tokens(s);
-        let sz = Sizer::tokens(&count, crate::embed::MAX_TOKENS);
+        let sz = Sizer::tokens(&count, crate::rag::embed::MAX_TOKENS);
         // code-heavy text: short in characters, long in word-pieces
         let line = "- `{topdir}/iter_data/src/rag/mod.rs: work_claim` claims `rag_chunk` rows (sum_state=claimed).\n";
         let text = format!("# Doc\n\n## Paths\n\n{}\n\n## Prose\n\n{}", line.repeat(40), "The engine runs the agent. ".repeat(120));
@@ -388,7 +388,7 @@ mod tests {
         assert!(ck.len() > 4);
         for c in &ck {
             let n = e.count_tokens(&embed_input("iter4 spec", &c.heading, &c.text));
-            assert!(n + 2 <= crate::embed::MAX_TOKENS, "chunk {} is {n} tokens: {}", c.idx, c.text);
+            assert!(n + 2 <= crate::rag::embed::MAX_TOKENS, "chunk {} is {n} tokens: {}", c.idx, c.text);
         }
     }
 

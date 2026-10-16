@@ -1,12 +1,12 @@
 ---
 id: 090b870c-dea5-4b5b-8ec1-74ce1dbf6d15
 name: "Node files in a git checkout"
-desc: "The repository itself as a connection: *.iter.md node files (and the code they describe) on disk in a git checkout. The engine is the only iter5 writer — conform write-backs, graph edits pulled from files/pending, the designer build (git init + first commit), scoped commits after each work item, GraphRAG document originals — and agent sessions edit files inside an item's lock scope. Readers: the engine's file scan and prompt builder (node context, agent memory) and iter_local's git-ignore aware walk, validate, test runner and migrate5."
+desc: "The repository itself as a connection: *.iter.md node files (and the code they describe) on disk in a git checkout. The engine is the only iter5 writer — conform write-backs, graph edits pulled from files/pending, the designer build (git init + first commit), scoped commits after each work item, GraphRAG document originals — and agent sessions edit files inside an item's lock scope. Readers: the engine's file scan and prompt builder (node context, agent memory) and `iter_engine::local`'s git-ignore aware walk, validate, test runner and migrate5."
 creator: "stephen"
 teststate: inherit
 connects:
   from: ["{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/datasync.code.iter.md", "{topdir}/map/external/claude_code/claude_code.code.iter.md"]
-  to: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_engine/src/prompt.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md"]
+  to: ["{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_engine/src/local/validate.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_engine/src/prompt.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md"]
 level: connection
 children:
   codedirs:  []
@@ -40,9 +40,9 @@ graph, keyed by its frontmatter `id` (format v5, `iter_core::nodefile`).
   documents' originals and `.gitignore` lines.
 - **Reads**: the engine's per-tick filescan (stat first, re-read only what
   changed, full walk every few minutes; state in `<topdir>/.iter/filesync.json`)
-  (with iter_local's git-ignore aware walk), the prompt builder (the node
+  (with `iter_engine::local`'s git-ignore aware walk), the prompt builder (the node
   file, its children list and the agentmem file for an agent's context), and
-  iter_local's validate and test runner.
+  `iter_engine::local`'s validate and test runner.
 
 ## Auth
 

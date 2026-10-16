@@ -7,7 +7,7 @@ teststate: inherit
 actors: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/global/usecases/claude_agent.actor.iter.md"]
 flowmap:
   summary: "When the Test sweep schedule comes due, the engine clones it into a run and starts it at once, outside the agent cap; its command is iter sweep. The sweep reads GET …/graph, evaluates teststate along each chain from the project node and every use case or actor, runs each eligible test node's scripts with the test runner, posts each aggregated result to the test node, and for each failing node files one code item locked to the owning node's codedirs. A repeat with the same check: + container: tags is merged into the open item. Could-not-run is recorded but files nothing. The fix item is then worked by an agent like any other."
-  sequence: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md", "{topdir}/global/usecases/claude_agent.actor.iter.md"]
+  sequence: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md", "{topdir}/global/usecases/claude_agent.actor.iter.md"]
   process_flow:
     - step: 1
       from: "{topdir}/iter_engine/src/loop.code.iter.md"
@@ -23,10 +23,10 @@ flowmap:
       evidence: "GET /api/projects/{p}/graph; iter_engine/src/sweep.rs: eligible"
     - step: 3
       from: "{topdir}/iter_engine/src/sweep.code.iter.md"
-      to: "{topdir}/iter_local/src/runner.code.iter.md"
+      to: "{topdir}/iter_engine/src/local/runner.code.iter.md"
       what: "Each eligible test node goes to the test runner, which runs its scripts with bash under a time limit and turns each last stdout line and exit code into pass, fail or could-not-run, aggregated per node."
       plain: "Each test node runs."
-      evidence: "iter_local/src/runtests.rs: run_node"
+      evidence: "iter_engine/src/local/runtests.rs: run_node"
     - step: 4
       from: "{topdir}/iter_engine/src/sweep.code.iter.md"
       to: "{topdir}/iter_data/src/testlogs.code.iter.md"
@@ -41,7 +41,7 @@ flowmap:
       evidence: "iter_engine/src/sweep.rs: file_fix_item → POST /api/projects/{p}/workitems"
     - step: 6
       from: "{topdir}/global/usecases/claude_agent.actor.iter.md"
-      to: "{topdir}/iter_local/src/runner.code.iter.md"
+      to: "{topdir}/iter_engine/src/local/runner.code.iter.md"
       what: "An agent working the fix item reproduces with `iter runtests <test node> --broken`, fixes the code, and finishes with `iter runtests <test node> --fixed`, which the close gate checks."
       plain: "An agent fixes it and proves it."
       evidence: "iter_engine/src/cli.rs: runtests"
@@ -60,7 +60,7 @@ flowmap:
       plain: "The fix-it task carries the failing output."
 children:
   codedirs:  []
-  codenodes: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md"]
+  codenodes: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md"]
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}

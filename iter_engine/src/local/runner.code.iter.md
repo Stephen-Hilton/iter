@@ -7,7 +7,7 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_local/src/runtests.rs"]
+  codedirs:  ["{topdir}/iter_engine/src/local/runtests.rs"]
   codenodes: []
   tests:     []
   reqs:      []
@@ -23,7 +23,7 @@ Runs a set of automated tests the same way every time and reports, in one standa
 ## How it works
 
 A test node (`*.test.iter.md`) is metadata; its `children.tests` entries are globs or paths of scripts
-(iter5 spec §3.5). `iter_local/src/runtests.rs`:
+(iter5 spec §3.5). `iter_engine/src/local/runtests.rs`:
 
 - `test_node_files`, `load_test_node` and `find_test_node` locate a test node by id, id tail, name,
   file stem or path; `scripts_of` resolves its scripts on disk.
@@ -51,6 +51,6 @@ scripts.
 
 ## Example
 
-A test node lists `tests/iter_local.test*.sh`; the script runs `cargo test -p iter_local` and prints
-`{"name":"iter_local unit tests",…,"overall_success":true,"normal":{"total":40,"pass":40,"err":0},…}` as
+A test node lists `test/cargo_test.sh`; the script runs `cargo test -p iter_engine` and prints
+`{"name":"iter_engine unit tests",…,"overall_success":true,"normal":{"total":40,"pass":40,"err":0},…}` as
 its last line with exit 0, so the node's result is pass, 40 of 40.

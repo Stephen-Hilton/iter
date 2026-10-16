@@ -7,10 +7,10 @@ The iter4 engine: the loop that claims work items, runs headless Claude agents, 
 - `gate.rs`: the close gate that checks the final message against the request. `dedup.rs`: duplicate-item judge.
 - `prompt.rs`: builds agent prompts. `client.rs`: HTTP to iter_data. `envstore.rs` / `usage.rs`: accounts and usage%.
 - `*.code.iter.md` beside each file: the node docs, so read them first.
-- Text extraction for uploads lives outside this codepath, in `../../iter_rag/src/extract.rs`.
+- Text extraction for uploads lives outside this codepath, in `../../iter_core/src/rag/extract.rs`.
 
 ## Build and test
-- From `iter4/`: `cargo build --release -p iter_engine` (workspace: iter_core, iter_data, iter_engine, iter_local, iter_rag).
+- From `iter4/`: `cargo build --release -p iter_engine` (workspace: iter_core, iter_data, iter_engine).
 - Tests: `"$ITER_BIN" runtests --project "$ITER_PROJECT" --group "iter_engine-unit"` (runs `cargo test -p iter_engine`; 71/71 passing on 2026-09-29). Registry and script are in `../test/`, outside this write fence, so read them but do not edit them.
 
 ## Gotchas

@@ -24,6 +24,7 @@ mod rag;
 mod sweep;
 mod sync;
 mod key;
+mod local;
 mod usage;
 mod work;
 

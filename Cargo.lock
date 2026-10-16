@@ -1554,14 +1554,22 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 name = "iter_core"
 version = "0.1.0"
 dependencies = [
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
  "chrono",
  "chrono-tz",
  "glob",
+ "lopdf",
+ "pdf-extract",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tokenizers",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1576,7 +1584,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "iter_core",
- "iter_rag",
  "jsonwebtoken",
  "mimalloc",
  "rand 0.8.8",
@@ -1600,45 +1607,13 @@ dependencies = [
  "ed25519-dalek",
  "glob",
  "iter_core",
- "iter_local",
- "iter_rag",
  "rand 0.8.8",
  "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "uuid",
-]
-
-[[package]]
-name = "iter_local"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "glob",
- "iter_core",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
  "uuid",
-]
-
-[[package]]
-name = "iter_rag"
-version = "0.1.0"
-dependencies = [
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "lopdf",
- "pdf-extract",
- "reqwest",
- "serde_json",
- "sha2",
- "tokenizers",
- "zip",
 ]
 
 [[package]]

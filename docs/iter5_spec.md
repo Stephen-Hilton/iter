@@ -26,8 +26,8 @@ Arango console **127.0.0.1:8630**, database `iter5`, dev/test Arango = the exist
 | `iter_core` | shared types + **the node-file library** (`nodefile`): parse / render / conform / name / resolve-children. Used identically by iter_data (node side) and iter_engine (file side) so both sides agree byte-for-byte. Also settings-graph types, test-result type. |
 | `iter_data` | the server: work items, locks, **server-side get_next**, the **project graph store (nodes = files)**, the **settings graph**, auth/authz, MCP, GraphRAG, webui. Never touches a repo. |
 | `iter_engine` | **one per machine**, serves every project it is connected to. Services: agent (get_next → load_context → dispatch → get_usage → workitem_report → test), filescan → conform → sync, schedule, test, build (designer push). |
-| `iter_local` | checkout-side helpers used by the engine: file walking (git-ignore aware), test runner, validate. Its iter4 marker scan/graph snapshot is replaced by `iter_core::nodefile`. |
-| `iter_rag` | unchanged. |
+| `iter_engine::local` | checkout-side helpers (was the iter_local crate, folded into iter_engine 2026-10-16): file walking (git-ignore aware), test runner, validate. Its iter4 marker scan/graph snapshot is replaced by `iter_core::nodefile`. |
+| `iter_core::rag` | GraphRAG text extraction, chunking, embedding (was the iter_rag crate, folded into iter_core 2026-10-16). |
 
 iter3 DynamoDB migration code (`migrate_ddb.rs`, `ddb.rs`, aws deps) is **removed**.
 

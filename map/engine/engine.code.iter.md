@@ -1,14 +1,14 @@
 ---
 id: 759585ed-1241-4c90-b98e-4dd129a4ce56
 name: "Engines and checkout tools"
-desc: "The engine, one per machine, and the checkout library it uses. iter_engine starts with only a server URL and an env file, learns from the settings graph which projects (and checkouts) it serves and which accounts it may bill, and for each project every tick: syncs node files with the project graph (filescan, conform, sync, pending writes, designer builds), fires schedules, asks the server for the next item, dispatches it to a provider, runs the close gate and commits. iter_local walks, validates, tests and migrates checkouts."
+desc: "The engine, one per machine, with its checkout tools built in. iter_engine starts with only a server URL and an env file, learns from the settings graph which projects (and checkouts) it serves and which accounts it may bill, and for each project every tick: syncs node files with the project graph (filescan, conform, sync, pending writes, designer builds), fires schedules, asks the server for the next item, dispatches it to a provider, runs the close gate and commits. Its local module walks, validates and tests checkouts."
 creator: "iter migrate5"
 teststate: inherit
 level: context
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_engine/", "{topdir}/iter_local/"]
-  codenodes: ["{topdir}/iter_engine/iter_engine.code.iter.md", "{topdir}/iter_local/iter_local.code.iter.md"]
+  codedirs:  ["{topdir}/iter_engine/"]
+  codenodes: ["{topdir}/iter_engine/iter_engine.code.iter.md"]
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
@@ -20,9 +20,9 @@ timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30
 The workers that sit next to the code: the only part of iter5 that reads or
 writes a repository.
 
-It holds two containers: **iter_engine — local engine** (the long-running
-process, and also the `iter` command line through `iter_engine cli`) and
-**iter_local — checkout tools** (the library of things done to files on disk).
+It holds one container: **iter_engine — local engine** (the long-running
+process, and also the `iter` command line through `iter_engine cli`), whose
+module **iter_engine::local — checkout tools** does the things done to files on disk.
 
 ## How it works
 
@@ -54,7 +54,7 @@ MCP endpoint the engine configures for the session.
 ## What goes in and out
 
 Everything about work and the graph goes through iter_data's HTTP API; the
-checkout is read through iter_local and written (node files, commits) by the
+checkout is read through `iter_engine::local` and written (node files, commits) by the
 engine and its agents; model calls go to the provider.
 
 ## Why it matters

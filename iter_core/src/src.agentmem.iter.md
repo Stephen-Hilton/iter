@@ -1,4 +1,4 @@
-# Agent memory: iter_core/src — the shared Rust library (work item model, node-file library, settings-graph types, test result, schedules, dedup keys, wait graph, cluster, question forms) used by iter_data, iter_engine and iter_local.
+# Agent memory: iter_core/src — the shared Rust library (work item model, node-file library, settings-graph types, test result, schedules, dedup keys, wait graph, cluster, question forms) used by iter_data and iter_engine; also GraphRAG's text and embedding code in `rag/`.
 
 ## Where things live
 - lib.rs — the work item model and shared types (node file: model.code.iter.md).
@@ -13,7 +13,7 @@
 - ../test/ — iter_core.test.iter.md + cargo_test.sh (tests belong to the testwriter; do not edit).
 
 ## Build and test
-- Build: from the repo root, `cargo build -p iter_core` (workspace: iter_core, iter_data, iter_engine, iter_local, iter_rag).
+- Build: from the repo root, `cargo build -p iter_core` (workspace: iter_core, iter_data, iter_engine).
 - Test: `iter runtests iter_core/test/iter_core.test.iter.md` (cargo test -p iter_core via tools/cargo-test-crate.sh; prints the standard result JSON).
 - `nodefile::tests::conform_idempotent_over_repo_tree` conforms every *.iter.md in the checkout: a malformed node file anywhere breaks it.
 

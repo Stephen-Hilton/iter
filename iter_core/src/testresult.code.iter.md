@@ -32,7 +32,7 @@ The one format a test reports in, and the rule for whether it passed.
 
 ## What goes in and out
 
-iter_local's runner (`iter_local/src/runtests.rs`) evaluates each script and aggregates a test node's scripts into one result; `iter runtests` and the test sweep post it to `POST /api/projects/{p}/graph/nodes/{id}/testresult`, where iter_data (`testlogs.rs`) stores it on the test node (`front.last_result`) and in the test log, and files a fix item when it is red or could not run.
+`iter_engine::local`'s runner (`iter_engine/src/local/runtests.rs`) evaluates each script and aggregates a test node's scripts into one result; `iter runtests` and the test sweep post it to `POST /api/projects/{p}/graph/nodes/{id}/testresult`, where iter_data (`testlogs.rs`) stores it on the test node (`front.last_result`) and in the test log, and files a fix item when it is red or could not run.
 
 ## Why it matters
 
@@ -40,4 +40,4 @@ Test scripts are written by people and agents in any language. One small contrac
 
 ## Example
 
-`tools/cargo-test-crate.sh iter_rag` ends with `{"name":"iter_rag unit tests",…,"normal":{"total":11,"pass":11,"err":0},…}` and exits 0 → pass; the same script with no ArangoDB for iter_data exits 2 → could not run: the test log records it as `error`, not `red`, so a broken harness is never read as broken code.
+`tools/cargo-test-crate.sh iter_core` ends with `{"name":"iter_core unit tests",…,"normal":{"total":190,"pass":190,"err":0},…}` and exits 0 → pass; the same script with no ArangoDB for iter_data exits 2 → could not run: the test log records it as `error`, not `red`, so a broken harness is never read as broken code.

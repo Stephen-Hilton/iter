@@ -1,3 +1,3 @@
 [workspace]
-members = ["iter_core", "iter_data", "iter_engine", "iter_local", "iter_rag"]
+members = ["iter_core", "iter_data", "iter_engine"]
 resolver = "2"

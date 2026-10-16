@@ -48,7 +48,7 @@
 
 use crate::client::Api;
 use iter_core::nodefile::{self, NodeType};
-use iter_local::walk::{self, Stat};
+use crate::local::walk::{self, Stat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -125,7 +125,7 @@ pub struct FileSyncState {
     files: BTreeMap<String, FileMeta>,
     dirs: HashMap<PathBuf, Stat>,
     last_full: Option<Instant>,
-    ignored: iter_local::GitIgnored,
+    ignored: crate::local::GitIgnored,
     scandirs: Vec<String>,
     project_dir: Option<String>,
     /// files to re-process next tick (a failed sync, a lock)
@@ -221,7 +221,7 @@ pub fn commit_paths(top: &Path, rels: &[String], msg: &str) -> Result<Option<Str
     // a path git ignores can never be committed; a deleted path git never
     // tracked has nothing to commit
     let present: Vec<PathBuf> = rels.iter().map(|r| top.join(r)).filter(|p| p.exists()).collect();
-    let present: BTreeSet<String> = iter_local::drop_git_ignored(top, present)
+    let present: BTreeSet<String> = crate::local::drop_git_ignored(top, present)
         .into_iter()
         .filter_map(|p| p.strip_prefix(top).ok().map(iter_core::platform::slash))
         .collect();
@@ -355,7 +355,7 @@ fn scan(st: &mut FileSyncState, top: &Path, full: bool) -> (Vec<String>, Vec<Str
     let mut candidates: BTreeSet<String> = std::mem::take(&mut st.retry);
     let mut deleted = Vec::new();
     if full {
-        st.ignored = iter_local::GitIgnored::load(top);
+        st.ignored = crate::local::GitIgnored::load(top);
         let mut dirs = HashMap::new();
         let mut found: BTreeSet<String> = BTreeSet::new();
         for r in roots(st, top) {
@@ -423,7 +423,7 @@ fn scan(st: &mut FileSyncState, top: &Path, full: bool) -> (Vec<String>, Vec<Str
     // since the last full walk, e.g. a fresh build output copy)
     new_files.sort();
     new_files.dedup();
-    for f in iter_local::drop_git_ignored(top, new_files) {
+    for f in crate::local::drop_git_ignored(top, new_files) {
         if let Some(rp) = rel(&f) {
             candidates.insert(rp);
         }

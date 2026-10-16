@@ -10,6 +10,7 @@ pub mod dedup;
 pub mod enginekey;
 pub mod nodefile;
 pub mod platform;
+pub mod rag;
 pub mod sched;
 pub mod settings;
 pub mod testresult;

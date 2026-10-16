@@ -14,7 +14,7 @@ iter4 keeps a team of AI coding agents working on a real software project withou
 
 - **iter_data** — the central server. It holds every work item, lock, agent definition, schedule, user, cost record and the architecture map in ArangoDB, answers one HTTP API, serves the web page, and serves the MCP server for agents.
 - **iter_engine** — the engine. Run it next to a checkout of your project; it claims work, runs agents, commits and pushes. The same binary is also the `iter` command line (`iter_engine cli <verb>`).
-- **iter_local** and **iter_core** — libraries compiled into the two programs (checkout tools and the shared rules).
+- **iter_core** — the library compiled into both programs (the shared rules, the node-file library and GraphRAG's text and embedding code). The engine's checkout tools live in iter_engine itself.
 - **The web page** — four tabs: Intro, Work queue, Project graph, GraphRAG.
 
 ### What database does iter4 use?

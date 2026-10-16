@@ -6,7 +6,7 @@ creator: "stephen"
 teststate: inherit
 connects:
   from: ["{topdir}/tools/tools.code.iter.md"]
-  to: ["{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md"]
+  to: ["{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md"]
 level: connection
 children:
   codedirs:  []
@@ -19,7 +19,7 @@ timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30
 
 ## Protocol
 
-The test runner (`iter_local/src/runtests.rs`) runs each script of a test node
+The test runner (`iter_engine/src/local/runtests.rs`) runs each script of a test node
 with `bash`, in the checkout, under a time limit (the process group is killed
 on timeout). The script's **last stdout line** is the result:
 

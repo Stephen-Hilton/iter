@@ -7,7 +7,7 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_local/src/validate.rs"]
+  codedirs:  ["{topdir}/iter_engine/src/local/validate.rs"]
   codenodes: []
   tests:     []
   reqs:      []
@@ -22,7 +22,7 @@ Checks that every description file is in the standard shape and, on request, put
 
 ## How it works
 
-`iter_local/src/validate.rs: run(topdir, single, fix)` is `iter validate [--file F] [--fix]`, a thin
+`iter_engine/src/local/validate.rs: run(topdir, single, fix)` is `iter validate [--file F] [--fix]`, a thin
 wrapper over `iter_core::nodefile::conform`:
 
 - every node file under the topdir (found by the Node-file walker; agent memory excluded), or one

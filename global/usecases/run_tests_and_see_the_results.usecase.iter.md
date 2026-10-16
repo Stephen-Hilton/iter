@@ -7,7 +7,7 @@ teststate: inherit
 actors: ["{topdir}/global/usecases/developer.actor.iter.md"]
 flowmap:
   summary: "Run tests posts graph/run_tests {node}; the server files a queued test item (agent test, priority 5, exec_shell iter runtests --node <id>). The engine claims it through POST …/next and its work runner runs the shell command in the checkout. iter runtests loads the test node, runs its scripts with bash under a time limit, combines each script's last stdout line and exit code into pass / fail / could-not-run, aggregates them, and posts the result to graph/nodes/{id}/testresult. iter_data stores it on the test node (front.last_result, timestamps.last_tested → pending_write), appends a test_log row, and files one deduplicated fix item if it is not green; the detail panel reads testlogs."
-  sequence: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/webui/grapheditor.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/cli.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/webui/grapheditor.code.iter.md"]
+  sequence: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/webui/grapheditor.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/cli.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/webui/grapheditor.code.iter.md"]
   process_flow:
     - step: 1
       from: "{topdir}/global/usecases/developer.actor.iter.md"
@@ -29,10 +29,10 @@ flowmap:
       evidence: "iter_engine/src/engine.rs: dispatch → work.rs"
     - step: 4
       from: "{topdir}/iter_engine/src/cli.code.iter.md"
-      to: "{topdir}/iter_local/src/runner.code.iter.md"
+      to: "{topdir}/iter_engine/src/local/runner.code.iter.md"
       what: "iter runtests loads the test node and runs each script in children.tests with bash under the time limit; each script's last stdout line (standard JSON, or legacy ITER_RESULT) and exit code give pass, fail or could-not-run, and the scripts are aggregated into one result."
       plain: "The scripts run and say how they did."
-      evidence: "iter_engine/src/cli.rs: runtests → iter_local/src/runtests.rs: run_node; iter_core/src/testresult.rs: evaluate"
+      evidence: "iter_engine/src/cli.rs: runtests → iter_engine/src/local/runtests.rs: run_node; iter_core/src/testresult.rs: evaluate"
     - step: 5
       from: "{topdir}/iter_engine/src/cli.code.iter.md"
       to: "{topdir}/iter_data/src/testlogs.code.iter.md"
@@ -47,14 +47,14 @@ flowmap:
       evidence: "webui/graphedit.js: GET testlogs?node=<id>&limit=10"
   data_flow:
     - step: 1
-      from: "{topdir}/iter_local/src/runner.code.iter.md"
+      from: "{topdir}/iter_engine/src/local/runner.code.iter.md"
       to: "{topdir}/iter_data/src/testlogs.code.iter.md"
       data: "The standard result {name, id, overall_success, normal, longtail, failure, details}."
       stored: true
       plain: "The result rests on the test node and in the test log."
 children:
   codedirs:  []
-  codenodes: ["{topdir}/webui/grapheditor.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/cli.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md"]
+  codenodes: ["{topdir}/webui/grapheditor.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/next.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/cli.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md"]
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}

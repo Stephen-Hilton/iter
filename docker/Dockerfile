@@ -10,8 +10,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY iter_core iter_core
 COPY iter_data iter_data
 COPY iter_engine iter_engine
-COPY iter_local iter_local
-COPY iter_rag iter_rag
 # the user guide GraphRAG ingests (only iter4_guide.md passes .dockerignore)
 COPY docs docs
 COPY webui webui

@@ -14,7 +14,7 @@
 //! 2. The **GraphRAG worker** — when the heartbeat reply's `rag_waiting` says
 //!    a served project has work, workers claim jobs on their own threads,
 //!    outside the agent cap and the queue:
-//!    - **ingest**: an uploaded file — extract its text (`iter_rag::extract`;
+//!    - **ingest**: an uploaded file — extract its text (`iter_core::rag::extract`;
 //!      a scanned PDF is rendered with `pdftoppm` and read page by page by a
 //!      Claude session, `ocr_pdf`), prepare it, PUT the chunks;
 //!    - **chunks** / **rollup**: the **Summary agent**, one short tool-less
@@ -26,7 +26,7 @@ use crate::client::Api;
 use crate::sync::Conn;
 use iter_core::Project;
 use serde_json::{Value, json};
-use iter_rag::{chunk, embed, extract};
+use iter_core::rag::{chunk, embed, extract};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -113,10 +113,10 @@ pub fn node_text(name: &str, nodetype: &str, description: &str, raw: &str) -> St
     format!("{head}\n{}", body.trim())
 }
 
-/// Text → chapters + chunks + raw vectors (iter_rag::prepare), with the
+/// Text → chapters + chunks + raw vectors (iter_core::rag::prepare), with the
 /// model downloaded on first use.
 pub fn prepare(title: &str, text: &str) -> Result<Value, String> {
-    iter_rag::prepare(embed::get_or_download()?, title, text)
+    iter_core::rag::prepare(embed::get_or_download()?, title, text)
 }
 
 pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool) -> Result<SyncReport, String> {

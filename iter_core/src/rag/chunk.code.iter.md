@@ -7,14 +7,14 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_rag/src/chunk.rs"]
+  codedirs:  ["{topdir}/iter_core/src/rag/chunk.rs"]
   codenodes: []
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
 ---
 
-# Chapters and chunks (`iter_rag::chunk`)
+# Chapters and chunks (`iter_core::rag::chunk`)
 
 ## Summary
 
@@ -30,7 +30,7 @@ Cuts a document into passages small enough to search and big enough to make sens
 
 ## What goes in and out
 
-`iter_rag::prepare` (lib.rs) runs it with the token sizer before embedding; the engine's GraphRAG worker and iter_data's built-in user guide index use `prepare`.
+`iter_core::rag::prepare` (lib.rs) runs it with the token sizer before embedding; the engine's GraphRAG worker and iter_data's built-in user guide index use `prepare`.
 
 ## Example
 

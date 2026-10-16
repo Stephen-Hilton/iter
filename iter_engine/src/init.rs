@@ -109,7 +109,7 @@ mod tests {
         assert!(init_project(&top, "Demo Shop", "", "", false).unwrap().is_empty(), "nothing overwritten");
         assert_eq!(init_project(&top, "Demo Shop", "", "", true).unwrap().len(), 4);
         // the validator agrees
-        let rep = iter_local::validate::run(&top, None, false).unwrap();
+        let rep = crate::local::validate::run(&top, None, false).unwrap();
         assert_eq!(rep.exit_code(), 0, "{:?}", rep.files);
     }
 }

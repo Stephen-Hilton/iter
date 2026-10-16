@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33
 
 Keeps the searchable copy of the project's files up to date and writes short summaries of every passage.
 
-The GraphRAG engine worker is the engine half of GraphRAG (`iter_engine/src/rag.rs`). It owns the work that needs a checkout, a model account or real CPU, using the shared iter_rag library.
+The GraphRAG engine worker is the engine half of GraphRAG (`iter_engine/src/rag.rs`). It owns the work that needs a checkout, a model account or real CPU, using the shared `iter_core::rag` code.
 
 The change sweep, `iter rag sync` (`sync`), reads the project graph's nodes (`GET /api/projects/{p}/graph`, filtered by the project's `rag/settings` node types) and each node file from the checkout, and for files whose hash (text plus `INDEX_VERSION`) differs from the index, builds the node's text (`node_text`), chunks and embeds it (`prepare`), and sends chunks with vectors (`PUT …/rag/nodes`, 25 files per call). The last call lists every current path so deleted files drop out. Node-file sync runs it on its own thread after a sync round that changed something (`filesync::maybe_rag`, at most once a minute); the scheduled "GraphRAG change sweep" item and a person can run it too.
 

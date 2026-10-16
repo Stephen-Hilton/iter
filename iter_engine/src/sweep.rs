@@ -22,7 +22,7 @@ use crate::client::Api;
 use crate::sync::Conn;
 use iter_core::nodefile::{self, NodeDoc};
 use iter_core::testresult::Outcome;
-use iter_local::runtests as rt;
+use crate::local::runtests as rt;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -518,7 +518,7 @@ fn text_sweep(api: &Api, c: &Conn, nodes: &[Value], o: &SweepOpts) {
         .iter()
         .filter(|v| s(v, "nodetype") == "code")
         .filter_map(|v| {
-            let f = iter_local::validate::node_text_findings(s(v, "desc"), s(v, "body"));
+            let f = crate::local::validate::node_text_findings(s(v, "desc"), s(v, "body"));
             (!f.is_empty()).then_some((v, f))
         })
         .collect();

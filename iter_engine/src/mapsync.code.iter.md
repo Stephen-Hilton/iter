@@ -26,7 +26,7 @@ Makes sure a change to a description file shows up in the project graph within s
 with per-checkout state in `.iter/filesync.json` (`FileSyncState`: each file's id, content hash, semantic
 hash, acked version and stat):
 
-1. **filescan** (`scan`, using iter_local's walker): the project node's `scandirs`, git-ignore aware;
+1. **filescan** (`scan`, using `iter_engine::local`'s walker): the project node's `scandirs`, git-ignore aware;
    only files whose `(mtime, size)` moved are re-read and only directories whose mtime moved are
    re-listed; a full walk on the first tick and every `FULL_EVERY` (5 minutes). Agent memory files are
    never synced.

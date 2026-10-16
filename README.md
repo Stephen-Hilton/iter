@@ -4,11 +4,9 @@ iter5 is a fork of iter4. A project lives in two places that stay in step: the r
 
 | dir | what it is |
 |---|---|
-| `iter_core` | shared types: work items, projects, settings graph types, locks, dedup keys, the test result JSON, and `nodefile` (parse / conform / render / edge derivation / path planning for v5 node files) |
+| `iter_core` | shared types: work items, projects, settings graph types, locks, dedup keys, the test result JSON, `nodefile` (parse / conform / render / edge derivation / path planning for v5 node files) and `rag/` (GraphRAG extraction, chunking and embedding) |
 | `iter_data` | the data server: axum API on ArangoDB, auth and authz, get_next (`POST …/next`), the project graph and file sync (`nodes.rs`, `filesync.rs`), the settings graph (`settings.rs`), test results (`testlogs.rs`), MCP (`mcp.rs`) and GraphRAG (`rag/`) |
-| `iter_engine` | the engine (one per machine; providers in `provider/`, file sync in `filesync.rs`) and the `iter` verbs (`cli.rs`) |
-| `iter_local` | checkout-side tools: node scan, validate, test runner |
-| `iter_rag` | GraphRAG extraction, chunking and embedding |
+| `iter_engine` | the engine (one per machine; providers in `provider/`, file sync in `filesync.rs`) the `iter` verbs (`cli.rs`) and the checkout tools in `local/` (node scan, validate, test runner) |
 | `webui/` | the web page (embedded into iter_data) |
 | `docker/` | the all-in-one image: ArangoDB CE + iter_data |
 | `linux/` | native systemd install: ArangoDB, iter_data, backups and the engine as services (also in a WSL2 distro) |

@@ -275,7 +275,7 @@ fn req_docs_on_disk(entry: &str, this_path: &str, topdir: &Path) -> Vec<PathBuf>
             for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let path = e.path();
                 if path.is_dir() {
-                    if !path.file_name().map(|n| iter_local::is_skip_dir(&n.to_string_lossy())).unwrap_or(false) {
+                    if !path.file_name().map(|n| crate::local::is_skip_dir(&n.to_string_lossy())).unwrap_or(false) {
                         stack.push(path);
                     }
                 } else {
@@ -517,7 +517,7 @@ pub fn nodes_from_files(topdir: &Path) -> Vec<NodeDoc> {
             let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
             if path.is_dir() {
-                if !iter_local::is_skip_dir(&name) && !name.starts_with('.') {
+                if !crate::local::is_skip_dir(&name) && !name.starts_with('.') {
                     stack.push(path);
                 }
             } else if nodefile::type_of(&name).map(nodefile::is_synced).unwrap_or(false) {
@@ -528,7 +528,7 @@ pub fn nodes_from_files(topdir: &Path) -> Vec<NodeDoc> {
             }
         }
     }
-    let files = iter_local::drop_git_ignored(topdir, files);
+    let files = crate::local::drop_git_ignored(topdir, files);
     let top = iter_core::platform::slash(topdir).trim_end_matches('/').to_string();
     let mut out: Vec<NodeDoc> = Vec::new();
     for f in files {

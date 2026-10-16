@@ -313,12 +313,12 @@
       </div>
       <div class="intro-ctx intro-ctx-eng"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Engines and checkout tools</b><span class="intro-dim">the working side: one per machine</span></div>
         ${crate("iter_engine", "The engine, and the <code>iter</code> command agents use.", "Runs the agents where the code lives; nothing leaves your machines but results.", "one per machine, many projects; claude -p sessions; close gate; file sync + conform; build; GraphRAG worker", "iter_engine")}
-        ${crate("iter_local", "Reads and writes the project's files on disk.", "Keeps the map and the tests in the repository, under version control.", "git-ignore-aware file walking, test runner (standard result JSON), validate", "iter_local")}
+        ${crate("iter_engine::local", "Reads and writes the project's files on disk.", "Keeps the map and the tests in the repository, under version control.", "git-ignore-aware file walking, test runner (standard result JSON), validate", "iter_engine::local")}
       </div>
       <div class="intro-ctx intro-ctx-shared"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Shared rules and types</b><span class="intro-dim">used by both sides, so they never disagree</span></div>
         <div class="intro-crates-row">
         ${crate("iter_core", "The rulebook: what a work item is, when a reservation counts, when a schedule fires.", "", "pure functions: states, priorities, waits, dedup keys, schedules", "iter_core")}
-        ${crate("iter_rag", "Reads documents and turns passages into searchable fingerprints.", "", "extract (pdf, docx, pptx…), token-sized chunks, all-MiniLM-L6-v2 embedder", "iter_rag")}
+        ${crate("iter_core::rag", "Reads documents and turns passages into searchable fingerprints.", "", "extract (pdf, docx, pptx…), token-sized chunks, all-MiniLM-L6-v2 embedder", "iter_core::rag")}
         </div>
       </div>
       ${t ? `<div class="intro-ctx intro-ctx-ship"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Build, ship and prove</b></div>

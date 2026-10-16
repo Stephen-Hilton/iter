@@ -1,14 +1,14 @@
 ---
 id: 1d81b937-e18d-4650-8856-233c825b7e09
 name: "Shared rules and types"
-desc: "The libraries both sides compile in so they can never disagree: iter_core (work items, projects, engines, accounts, the settings-graph types, the queue rules — dependencies, locks, waits, schedules, dedup keys, cluster holds — the standard test result, and nodefile, which parses, conforms, renders, names and links v5 node files byte-for-byte the same on the server and in the engine) and iter_rag (GraphRAG text extraction, chunking and embedding)."
+desc: "The library both sides compile in so they can never disagree: iter_core (work items, projects, engines, accounts, the settings-graph types, the queue rules — dependencies, locks, waits, schedules, dedup keys, cluster holds — the standard test result, and nodefile, which parses, conforms, renders, names and links v5 node files byte-for-byte the same on the server and in the engine, and rag, the GraphRAG text extraction, chunking and embedding)."
 creator: "iter migrate5"
 teststate: inherit
 level: context
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_core/", "{topdir}/iter_rag/"]
-  codenodes: ["{topdir}/iter_core/iter_core.code.iter.md", "{topdir}/iter_rag/iter_rag.code.iter.md"]
+  codedirs:  ["{topdir}/iter_core/"]
+  codenodes: ["{topdir}/iter_core/iter_core.code.iter.md"]
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
@@ -20,8 +20,8 @@ timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30
 The common rulebook the server and the engines both follow. Nothing here does
 network or database I/O; each rule is a function from records to an answer.
 
-It holds two containers: **iter_core — shared rules library** and
-**iter_rag — document text and embeddings**.
+It holds one container: **iter_core — shared rules library**, whose module
+**iter_core::rag — document text and embeddings** does the GraphRAG text work.
 
 ## How it works
 
@@ -41,13 +41,13 @@ It holds two containers: **iter_core — shared rules library** and
   reqs, supplies, connects, drives, touches, uses). iter_data conforms and
   renders every stored node with it; the engine conforms every file with it,
   so a node and its file are the same text.
-- `iter_rag` extracts text from documents (pdf, docx, pptx, html, md),
+- `iter_core::rag` (`iter_core/src/rag/`) extracts text from documents (pdf, docx, pptx, html, md),
   chunks it and embeds it for GraphRAG.
 
 ## What goes in and out
 
-iter_data and iter_engine compile these crates in (iter_local uses iter_core
-too). No I/O of their own.
+iter_data and iter_engine compile this crate in. No I/O of its own, apart
+from the embedder fetching its model weights once.
 
 ## Why it matters
 

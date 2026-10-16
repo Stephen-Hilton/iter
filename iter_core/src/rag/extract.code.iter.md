@@ -7,14 +7,14 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_rag/src/extract.rs"]
+  codedirs:  ["{topdir}/iter_core/src/rag/extract.rs"]
   codenodes: []
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
 ---
 
-# Document text extraction (`iter_rag::extract`)
+# Document text extraction (`iter_core::rag::extract`)
 
 ## Summary
 

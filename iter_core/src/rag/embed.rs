@@ -60,7 +60,7 @@ pub fn set_model_dir(dir: &str) {
 }
 
 fn cache_dir() -> Option<PathBuf> {
-    // USERPROFILE: Windows sets no HOME (iter_rag does not depend on iter_core)
+    // USERPROFILE: Windows sets no HOME
     let home = ["HOME", "USERPROFILE"].iter().filter_map(|k| std::env::var(k).ok()).find(|h| !h.is_empty())?;
     Some(PathBuf::from(home).join(".cache/iter/models").join(MODEL_NAME))
 }

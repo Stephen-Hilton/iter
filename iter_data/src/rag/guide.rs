@@ -53,7 +53,7 @@ async fn ingest(a: &ArangoBackend) -> Result<String, String> {
         return Ok("unchanged".into());
     }
     let owned = text.to_string();
-    let prepared = tokio::task::spawn_blocking(move || iter_rag::prepare(embed::get()?, TITLE, &owned))
+    let prepared = tokio::task::spawn_blocking(move || iter_core::rag::prepare(embed::get()?, TITLE, &owned))
         .await
         .map_err(|e| e.to_string())??;
     let mut p: pipeline::Prepared = serde_json::from_value(prepared).map_err(|e| e.to_string())?;

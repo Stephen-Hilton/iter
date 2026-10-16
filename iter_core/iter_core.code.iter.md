@@ -8,7 +8,7 @@ level: container
 owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
-  codenodes: ["{topdir}/iter_core/src/model.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_core/src/settings.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md", "{topdir}/iter_core/src/waits.code.iter.md", "{topdir}/iter_core/src/sched.code.iter.md", "{topdir}/iter_core/src/dedupkeys.code.iter.md", "{topdir}/iter_core/src/cluster.code.iter.md", "{topdir}/iter_core/src/widget.code.iter.md"]
+  codenodes: ["{topdir}/iter_core/src/model.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_core/src/settings.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md", "{topdir}/iter_core/src/waits.code.iter.md", "{topdir}/iter_core/src/sched.code.iter.md", "{topdir}/iter_core/src/dedupkeys.code.iter.md", "{topdir}/iter_core/src/cluster.code.iter.md", "{topdir}/iter_core/src/widget.code.iter.md", "{topdir}/iter_core/src/rag/rag.code.iter.md"]
   tests:     ["{thisfiledir}/test/*.test.iter.md"]
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
@@ -34,7 +34,7 @@ Unknown fields on a record round-trip untouched, because storage keeps each reco
 
 ## What goes in and out
 
-iter_data compiles it in to validate writes, run server-side get_next (`next.rs`: dependency gate, live locks, claim tags), store project-graph nodes (`nodes.rs`, `filesync.rs` through `nodefile`), keep the settings graph (`settings.rs`) and accept test results (`testlogs.rs`). iter_engine compiles it in for file sync (`filesync.rs`: conform before sync), schedules, account choice, the close gate and dedup triage. iter_local uses `nodefile` and `testresult` for validate, the test runner and `migrate5`. It calls nothing.
+iter_data compiles it in to validate writes, run server-side get_next (`next.rs`: dependency gate, live locks, claim tags), store project-graph nodes (`nodes.rs`, `filesync.rs` through `nodefile`), keep the settings graph (`settings.rs`) and accept test results (`testlogs.rs`). iter_engine compiles it in for file sync (`filesync.rs`: conform before sync), schedules, account choice, the close gate and dedup triage. The engine's `local` module uses `nodefile` and `testresult` for validate, the test runner and `migrate5`. It calls nothing.
 
 ## Why it matters
 

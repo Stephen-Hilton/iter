@@ -51,13 +51,13 @@ impl Report {
 pub fn run(topdir: &Path, single: Option<&Path>, fix: bool) -> std::io::Result<Report> {
     let files: Vec<PathBuf> = match single {
         Some(f) => vec![f.to_path_buf()],
-        None => crate::walk::node_files(topdir, &[topdir.to_path_buf()]),
+        None => super::walk::node_files(topdir, &[topdir.to_path_buf()]),
     };
     let now = nodefile::now_ts();
     let mut rep = Report::default();
     let mut ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for f in files {
-        let Some(stored) = crate::walk::topdir_path(topdir, &f) else { continue };
+        let Some(stored) = super::walk::topdir_path(topdir, &f) else { continue };
         match nodefile::type_of(&stored) {
             None | Some(NodeType::Agentmem) => continue,
             _ => {}

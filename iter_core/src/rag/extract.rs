@@ -303,7 +303,7 @@ mod tests {
         let e = extract("deck.pptx", buf.get_ref()).unwrap();
         assert_eq!((e.format, e.pages), ("pptx", 2));
         assert_eq!(e.text, "# Slide 1: Goals\n\nGrow & more\n\nNotes:\n\nSay this slowly\n\n# Slide 2: Plan\n\nShip it & more");
-        let (ch, _) = crate::chunk::chunk(&e.text);
+        let (ch, _) = crate::rag::chunk::chunk(&e.text);
         assert_eq!(ch.len(), 2);
     }
 

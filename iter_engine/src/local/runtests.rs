@@ -92,7 +92,7 @@ pub fn scripts_of(topdir: &Path, doc: &NodeDoc) -> Vec<PathBuf> {
                 for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                     let ep = e.path();
                     if ep.is_dir() {
-                        if !crate::is_skip_dir(&e.file_name().to_string_lossy()) {
+                        if !super::is_skip_dir(&e.file_name().to_string_lossy()) {
                             stack.push(ep);
                         }
                     } else if ep.extension().is_some_and(|x| x == "sh") {
@@ -142,7 +142,7 @@ pub fn aggregate(name: &str, id: &str, runs: &[(String, TestResult, Outcome)]) -
 
 /// Every test node file under the topdir (git-ignore aware).
 pub fn test_node_files(topdir: &Path) -> Vec<PathBuf> {
-    crate::walk::node_files(topdir, &[topdir.to_path_buf()])
+    super::walk::node_files(topdir, &[topdir.to_path_buf()])
         .into_iter()
         .filter(|p| nodefile::type_of(&p.to_string_lossy()) == Some(NodeType::Test))
         .collect()
@@ -150,7 +150,7 @@ pub fn test_node_files(topdir: &Path) -> Vec<PathBuf> {
 
 /// Read + parse one test node file.
 pub fn load_test_node(topdir: &Path, file: &Path) -> Result<NodeDoc, String> {
-    let stored = crate::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
+    let stored = super::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
     if nodefile::type_of(&stored) != Some(NodeType::Test) {
         return Err(format!("{} is not a test node (*.test.iter.md)", file.display()));
     }
@@ -287,7 +287,7 @@ pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<
 }
 
 fn log_body(script: &str, exit_code: i32, stdout: &str, stderr: &str, detail: &str) -> String {
-    let mut body = format!("# iter test run\n# script: {script}\n# time: {}\n# exit: {exit_code}\n", crate::now_iso());
+    let mut body = format!("# iter test run\n# script: {script}\n# time: {}\n# exit: {exit_code}\n", super::now_iso());
     if !detail.is_empty() {
         body.push_str(&format!("# note: {detail}\n"));
     }

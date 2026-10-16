@@ -7,7 +7,7 @@ teststate: inherit
 actors: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/global/usecases/claude_agent.actor.iter.md"]
 flowmap:
   summary: "Every tick, for every served project, the engine stats the known node files and folders under scandirs (git-ignore aware; a full walk every few minutes), re-reads only what moved, conforms each changed file with iter_core::nodefile (stamping a hand edit with the file's mtime) and writes back what conform changed, then posts the changed texts and deleted paths to files/sync with the node_version it last acked. iter_data parses each file, upserts the node by id, settles conflicts and id collisions, recomputes edges and replies with applied versions and any rewrites; the engine commits conform write-backs and rewrites together."
-  sequence: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/webui/projectgraph.code.iter.md"]
+  sequence: ["{topdir}/global/usecases/developer.actor.iter.md", "{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/webui/projectgraph.code.iter.md"]
   process_flow:
     - step: 1
       from: "{topdir}/global/usecases/developer.actor.iter.md"
@@ -23,10 +23,10 @@ flowmap:
       evidence: "iter_engine/src/engine.rs: run_filesync → filesync::tick"
     - step: 3
       from: "{topdir}/iter_engine/src/mapsync.code.iter.md"
-      to: "{topdir}/iter_local/src/walk.code.iter.md"
+      to: "{topdir}/iter_engine/src/local/walk.code.iter.md"
       what: "The filescan stats known files and folders; files whose (mtime, size) moved are re-read and folders whose mtime moved are re-listed, skipping git-ignored paths, .git, target, node_modules, .iter and .claude."
       plain: "Only the changed files are read."
-      evidence: "iter_engine/src/filesync.rs: scan; iter_local/src/walk.rs"
+      evidence: "iter_engine/src/filesync.rs: scan; iter_engine/src/local/walk.rs"
     - step: 4
       from: "{topdir}/iter_engine/src/mapsync.code.iter.md"
       to: "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md"
@@ -65,7 +65,7 @@ flowmap:
       plain: "The node and its links rest in the graph."
 children:
   codedirs:  []
-  codenodes: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/webui/projectgraph.code.iter.md"]
+  codenodes: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_data/src/filesync.code.iter.md", "{topdir}/iter_data/src/nodes.code.iter.md", "{topdir}/webui/projectgraph.code.iter.md"]
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}

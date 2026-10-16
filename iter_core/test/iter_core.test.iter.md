@@ -1,7 +1,7 @@
 ---
 id: 14c76725-6f0b-4907-9e4c-327f4036dcbe
 name: "iter_core unit tests"
-desc: "Runs cargo test -p iter_core — the work-item rules (dependencies, priorities, accounts, lock shape), the node-file library (round trips, conform idempotence over every *.iter.md in the checkout, legacy migration, globs, path planning, edges), the settings-graph types, the standard test result, schedules, dedup keys, wait graph, cluster hold and question forms — and reports one standard result line counted per test. Fast, no services needed."
+desc: "Runs cargo test -p iter_core — the work-item rules (dependencies, priorities, accounts, lock shape), the node-file library (round trips, conform idempotence over every *.iter.md in the checkout, legacy migration, globs, path planning, edges), the settings-graph types, the standard test result, schedules, dedup keys, wait graph, cluster hold and question forms, and the GraphRAG text code in `rag/` (html, docx and pptx extraction with headings kept, chapter and chunk splitting within the size budget, frontmatter splitting, and — when the all-MiniLM-L6-v2 weights are on disk — similar sentences embedding closer than unrelated ones) — and reports one standard result line counted per test. No services needed."
 creator: "iter migrate5"
 teststate: inherit
 children:
@@ -21,5 +21,6 @@ One script, `cargo_test.sh`, runs the crate's whole `cargo test` through `tools/
 - **Work-item model** (`lib.rs`): dependency gate and cycles, priority bands, account ladder, lock shape, close-gate settings.
 - **Node-file library** (`nodefile/tests.rs`): parse/render round trip, `conform` idempotence on hand-made messy files, on the iter4 files in `nodefile/fixtures/` and on **every `*.iter.md` in this checkout** (`conform_idempotent_over_repo_tree`) — so a malformed node file anywhere in iter5 turns this red — legacy key migration, glob resolution, designer path planning with sequence / uuid12 collisions, edge derivation, add / remove child.
 - **Settings-graph types**, **standard test result** parsing and verdicts, **schedules**, **dedup keys**, **wait graph**, **cluster hold**, **question forms**.
+- **GraphRAG text code** (`rag/`, the former iter_rag crate): text extraction, chunking, frontmatter splitting and the embedder. The embedding test needs the model weights (`models/all-MiniLM-L6-v2`, `$ITER_EMBED_MODEL` or `~/.cache/iter/models`); without them it prints "skipped" and passes.
 
 Needs only cargo; runs in well under a minute when the build is cached. Run it with `iter runtests iter_core/test/iter_core.test.iter.md` (add `--no-record` to keep the result out of iter_data). By name or id it is ambiguous while the iter4 fixture `src/nodefile/fixtures/iter_core.tests.iter.md` carries the same id and name.

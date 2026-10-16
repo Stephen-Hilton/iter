@@ -177,7 +177,7 @@ enum Verb {
         #[arg(long)]
         fixed: bool,
         /// wall-clock budget (minutes) for the node's scripts together; overrun = killed → error
-        #[arg(long = "timeout-min", default_value_t = iter_local::runtests::DEFAULT_TIMEOUT_MIN)]
+        #[arg(long = "timeout-min", default_value_t = crate::local::runtests::DEFAULT_TIMEOUT_MIN)]
         timeout_min: u64,
         /// do not post the result to iter_data
         #[arg(long)]
@@ -536,7 +536,7 @@ mod local {
     use super::Api;
     use iter_core::nodefile::{self, NodeDoc, NodeType};
     use iter_core::testresult::Outcome;
-    use iter_local::{runtests as rt, validate as val};
+    use crate::local::{runtests as rt, validate as val};
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -698,13 +698,13 @@ mod local {
     /// The test nodes a node file links (its `children.tests` entries that
     /// are test node files on disk).
     fn linked_test_nodes(topdir: &Path, file: &Path) -> Result<Vec<(PathBuf, NodeDoc)>, String> {
-        let sp = iter_local::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
+        let sp = crate::local::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
         let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
         let (doc, _) = nodefile::parse_tolerant(&sp, &text).map_err(|e| e.to_string())?;
         if doc.nodetype == NodeType::Test {
             return Ok(vec![(file.to_path_buf(), doc)]);
         }
-        let all: Vec<String> = rt::test_node_files(topdir).iter().filter_map(|p| iter_local::walk::topdir_path(topdir, p)).collect();
+        let all: Vec<String> = rt::test_node_files(topdir).iter().filter_map(|p| crate::local::walk::topdir_path(topdir, p)).collect();
         let mut out = Vec::new();
         for e in &doc.children.tests {
             for p in nodefile::resolve(e, &sp, &all) {
@@ -857,10 +857,10 @@ mod local {
     }
 
     fn node_files(topdir: &Path) -> Vec<(PathBuf, NodeDoc)> {
-        iter_local::walk::node_files(topdir, &[topdir.to_path_buf()])
+        crate::local::walk::node_files(topdir, &[topdir.to_path_buf()])
             .into_iter()
             .filter_map(|f| {
-                let sp = iter_local::walk::topdir_path(topdir, &f)?;
+                let sp = crate::local::walk::topdir_path(topdir, &f)?;
                 if !nodefile::type_of(&sp).is_some_and(nodefile::is_synced) {
                     return None;
                 }
@@ -883,7 +883,7 @@ mod local {
 
     /// Rewrite one node file through `f` (parse → edit → conform → write).
     fn edit_node(topdir: &Path, file: &Path, f: impl FnOnce(&mut NodeDoc) -> Result<(), String>) -> Result<NodeDoc, String> {
-        let sp = iter_local::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
+        let sp = crate::local::walk::topdir_path(topdir, file).ok_or_else(|| format!("{} is outside {}", file.display(), topdir.display()))?;
         let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         let now = nodefile::now_ts();
         let c = nodefile::conform(&sp, &text, &now, "");
@@ -1197,8 +1197,8 @@ fn area_warnings(topdir: &str, lockdirs: &[String]) -> Vec<String> {
         return vec![];
     }
     let mut nodes: Vec<(String, Vec<String>)> = Vec::new();
-    for f in iter_local::walk::node_files(top_p, &[top_p.to_path_buf()]) {
-        let Some(sp) = iter_local::walk::topdir_path(top_p, &f) else { continue };
+    for f in crate::local::walk::node_files(top_p, &[top_p.to_path_buf()]) {
+        let Some(sp) = crate::local::walk::topdir_path(top_p, &f) else { continue };
         if nodefile::type_of(&sp) != Some(NodeType::Code) {
             continue;
         }

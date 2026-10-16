@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 iter_core = { path = "../iter_core" }
-iter_rag = { path = "../iter_rag" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }

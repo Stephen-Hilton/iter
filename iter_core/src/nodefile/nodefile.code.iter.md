@@ -32,7 +32,7 @@ In iter5 a project lives twice: as `*.iter.md` files in the repository and as no
 
 ## What goes in and out
 
-The engine's filescan → conform → sync service (`iter_engine/src/filesync.rs`) conforms each changed file and writes it back before posting it. iter_data (`nodes.rs`, `filesync.rs`, `graph.rs`) parses synced files, derives edges, plans paths for nodes created in the graph and renders every server-side edit for the engine to write. iter_local uses it for `iter validate`, the test runner and `iter migrate5`.
+The engine's filescan → conform → sync service (`iter_engine/src/filesync.rs`) conforms each changed file and writes it back before posting it. iter_data (`nodes.rs`, `filesync.rs`, `graph.rs`) parses synced files, derives edges, plans paths for nodes created in the graph and renders every server-side edit for the engine to write. The engine's `local` module uses it for `iter validate`, the test runner and `iter migrate5`.
 
 ## Why it matters
 

@@ -7,14 +7,14 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_rag/src/embed.rs"]
+  codedirs:  ["{topdir}/iter_core/src/rag/embed.rs"]
   codenodes: []
   tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
 ---
 
-# Embedding model (`iter_rag::embed`)
+# Embedding model (`iter_core::rag::embed`)
 
 ## Summary
 
