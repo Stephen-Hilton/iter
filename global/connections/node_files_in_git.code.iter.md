@@ -6,7 +6,7 @@ creator: "stephen"
 teststate: inherit
 connects:
   from: ["{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/datasync.code.iter.md", "{topdir}/map/external/claude_code/claude_code.code.iter.md"]
-  to: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_local/src/migrate5.code.iter.md", "{topdir}/iter_engine/src/prompt.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md"]
+  to: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_engine/src/prompt.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md"]
 level: connection
 children:
   codedirs:  []
@@ -42,7 +42,7 @@ graph, keyed by its frontmatter `id` (format v5, `iter_core::nodefile`).
   changed, full walk every few minutes; state in `<topdir>/.iter/filesync.json`)
   (with iter_local's git-ignore aware walk), the prompt builder (the node
   file, its children list and the agentmem file for an agent's context), and
-  iter_local's validate, test runner and migrate5.
+  iter_local's validate and test runner.
 
 ## Auth
 

@@ -109,7 +109,7 @@ pub fn type_of(filename: &str) -> Option<NodeType> {
 }
 
 /// True when the filename uses an iter4 type tag (`main`, `tests`,
-/// `testgroup`, `agentmemory`) that `iter migrate5` renames.
+/// `testgroup`, `agentmemory`) that the removed iter4 → iter5 converter renamed.
 pub fn is_legacy_filename(filename: &str) -> bool {
     matches!(type_tag(filename), Some("main" | "tests" | "testgroup" | "agentmemory"))
 }

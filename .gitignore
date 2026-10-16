@@ -14,3 +14,6 @@ models/
 .ofsw.env
 *.secret
 .DS_Store
+
+# Playwright output (e2e/playwright/run.sh)
+e2e/playwright/screenshots/

@@ -26,4 +26,4 @@ Where they touch iter5:
 - **Their editor and git** — node files are ordinary files; an edit shows up
   in the graph within a few seconds.
 - **The `iter` command line** in a checkout — `validate`, `sync`,
-  `runtests`, `sweep`, `init`, `migrate5`.
+  `runtests`, `sweep`, `init`.

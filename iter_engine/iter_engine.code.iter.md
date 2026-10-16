@@ -50,15 +50,15 @@ Every tick (`src/engine.rs: tick`, about every five seconds) it:
    session.
 
 Started as `iter_engine cli …` (installed into each checkout as `.iter/bin/iter`), it is the command line:
-`iter add`, `ask`, `block`, `wait`, `doc`, `runtests`, `validate`, `sync`, `sweep`, `rag sync`, `init`,
-`migrate5` and more.
+`iter add`, `ask`, `block`, `wait`, `doc`, `runtests`, `validate`, `sync`, `sweep`, `rag sync`, `init`
+and more.
 
 ## What goes in and out
 
 In: assignments, work items, agent records and pending node writes from iter_data over HTTP JSON;
 node files and code from the checkouts. Out: heartbeats, file-sync batches, test results, spend and
 usage, closes and acks to iter_data; git commits and pushes; `claude` (or mock) agent processes with an
-MCP config pointing back at iter_data. File-side work (walking, test scripts, validate, migrate5) is
+MCP config pointing back at iter_data. File-side work (walking, test scripts, validate) is
 done through iter_local and `iter_core::nodefile`.
 
 ## Why it matters

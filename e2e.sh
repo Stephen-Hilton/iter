@@ -12,10 +12,9 @@
 # cannot continue says so and the run goes on with the next one. The tally at
 # the end lists every failure; the exit code is non-zero on any.
 #
-# Fixtures: e2e/sample5 (a small v5 project, copied twice into scratch git
-# repos) and e2e/iter4_fixture (a small iter4 tree for `iter migrate5`). Their
-# node files are stored as `*.iter.md.fixture` so iter5's own node scan never
-# reads them as nodes of iter5; the copies get the real names back.
+# Fixture: e2e/sample5 (a small v5 project, copied twice into scratch git
+# repos). Its node files are stored as `*.iter.md.fixture` so iter5's own node
+# scan never reads them as nodes of iter5; the copies get the real names back.
 set -uo pipefail
 
 LIVE=0; KEEP=0
@@ -690,35 +689,6 @@ check "status tool answers" bash -c "[ \"\$(curl -s -X POST $BASE/mcp -H 'author
 REF=$(mcp "$ENGINE_TOKEN" "$PU" '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"status","arguments":{}}}')
 check "engine token on an unserved project: refused" bash -c "echo '$(echo "$REF" | jq -c . | tr -d "'")' | jq -e '(.error != null) or (.result.isError == true)'"
 check "the refusal names the authz rule" bash -c "echo '$(echo "$REF" | jq -c . | tr -d "'")' | grep -qi 'forbidden\|serves\|403'"
-fi
-
-# =====================================================================
-section "g. iter migrate5"
-# =====================================================================
-if want g; then
-F4="$SCRATCH/iter4_src"; F5="$SCRATCH/iter4_to5"
-cp -R "$REPO/e2e/iter4_fixture" "$F4"
-find "$F4" -name '*.iter.md.fixture' | while read -r f; do mv "$f" "${f%.fixture}"; done
-git -C "$F4" init -q && git -C "$F4" add -A && git -C "$F4" -c user.email=e2e@iter -c user.name=e2e commit -qm iter4
-BEFORE=$(cd "$F4" && find . -type f -not -path './.git/*' -exec shasum {} + | sort)
-"$ENGINE_BIN" cli migrate5 --from "$F4" --to "$F5" --json > "$SCRATCH/migrate5.json" 2> "$SCRATCH/migrate5.err"
-MRC=$?
-expect "migrate5 exit code" 0 "$MRC"
-check "migrate5: --from untouched" test "$BEFORE" = "$(cd "$F4" && find . -type f -not -path './.git/*' -exec shasum {} + | sort)"
-check "migrate5: project file" test -f "$F5/global/demo_shop.project.iter.md"
-check "migrate5: main.iter.md gone" test ! -f "$F5/main.iter.md"
-check "migrate5: no interfaces left" test -z "$(find "$F5" -name '*.interface.iter.md' -not -path '*/.git/*')"
-check "migrate5: connection nodes per interface kind" bash -c "grep -l '^level: connection' -r '$F5/global/connections' | wc -l | grep -q 2"
-check "migrate5: testgroup → test node" test -f "$F5/api/tests/api.test.iter.md"
-check "migrate5: global bizreq → one file, one ## section per bullet (§2.8)" bash -c "[ \$(grep -c '^<!-- req: id=[0-9a-f-]\\{36\\} status=agreed -->' '$F5/global/requirements/demo_shop.bizreq.iter.md') -eq 2 ] && grep -q '^## SHOP-B001 — ' '$F5/global/requirements/demo_shop.bizreq.iter.md'"
-check "migrate5: original bizreq moved, project names the new file" bash -c "[ ! -f '$F5/reqs/bizreq.iter.md' ] && grep -q 'global/requirements/demo_shop.bizreq.iter.md' '$F5'/global/demo_shop.project.iter.md"
-check "migrate5: actor from actors.yaml" test -f "$F5/global/usecases/buyer.actor.iter.md"
-check "migrate5: agentmemory → agentmem" test -f "$F5/web/web.agentmem.iter.md"
-NC=$(find "$F5" -name '*.iter.md' -not -path '*/.git/*' -not -name '*.agentmem.iter.md' | while read -r f; do head -1 "$f" | grep -q '^---$' && grep -q '^id: ' "$f" && grep -q '^desc: ' "$f" && grep -q '^children:' "$f" && grep -q '^timestamps: ' "$f" || echo "$f"; done)
-check "migrate5: every node file conforming (id, desc, children, timestamps)" test -z "$NC"
-check "migrate5: no interface keys or links left (inputs/outputs/*.interface.iter.md)" bash -c "! grep -rqE '^ *(inputs|outputs|interfaces?):|interface\.iter\.md' --include='*.iter.md' '$F5'"
-check "migrate5: connects.from/to filled from the old producers/consumers" bash -c "grep -A2 '^connects:' '$F5/global/connections/api_call.code.iter.md' | grep -q 'api/api.code.iter.md' && grep -A3 '^connects:' '$F5/global/connections/api_call.code.iter.md' | grep -q 'web/web.code.iter.md'"
-check "migrate5: report says not_idempotent is empty" bash -c "jq -e '(.not_idempotent // [])|length==0' '$SCRATCH/migrate5.json'"
 fi
 
 # =====================================================================

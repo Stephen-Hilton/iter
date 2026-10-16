@@ -1,8 +1,0 @@
-actors:
-  - id: buyer
-    name: "Buyer"
-    description: "Someone who buys."
-    uses:
-      - pattern: "api-*"
-        why: "orders through the API"
-    serves: []

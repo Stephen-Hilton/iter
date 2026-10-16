@@ -1,14 +1,14 @@
 ---
 id: d189ff3e-7930-4fff-9092-ec1a0a80a006
 name: "iter_local — checkout tools"
-desc: "Works on a project checkout with no server involved: walks the tree for node files (git-ignore aware, incremental stat-based pieces for the engine's filescan), runs a test node's scripts and aggregates them into the standard result JSON, conform-checks every node file (`iter validate`) and converts an iter4 checkout into iter5 node files in a copy (`iter migrate5`)."
+desc: "Works on a project checkout with no server involved: walks the tree for node files (git-ignore aware, incremental stat-based pieces for the engine's filescan), runs a test node's scripts and aggregates them into the standard result JSON, and conform-checks every node file (`iter validate`)."
 creator: "iter migrate5"
 teststate: inherit
 level: container
 owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
-  codenodes: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md", "{topdir}/iter_local/src/migrate5.code.iter.md"]
+  codenodes: ["{topdir}/iter_local/src/walk.code.iter.md", "{topdir}/iter_local/src/runner.code.iter.md", "{topdir}/iter_local/src/validate.code.iter.md"]
   tests:     ["{thisfiledir}/test/*.test.iter.md"]
   reqs:      ["{topdir}/docs/iter5_spec.md"]
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
@@ -40,13 +40,11 @@ stamper and graph-edit writer were removed in iter5.
 - **Validate** (`src/validate.rs`): conforms every node file in memory, reports files whose text would
   change, conform's findings and duplicate ids; `--fix` rewrites them. Also holds the node-text rules
   the test sweep files `ingest` items from.
-- **migrate5** (`src/migrate5.rs`, reading iter4 registries via `src/testgroups.rs`): copies an iter4
-  checkout and converts it in the copy.
 
 ## What goes in and out
 
 Callers are iter_engine only: the engine's file sync and test sweep, and the `iter runtests`,
-`validate`, `sweep` and `migrate5` verbs. It reads and writes files and spawns `bash` and `git`
+`validate` and `sweep` verbs. It reads and writes files and spawns `bash` and `git`
 (`git check-ignore` / `ls-files` for ignore rules); it never calls iter_data.
 
 ## Why it matters

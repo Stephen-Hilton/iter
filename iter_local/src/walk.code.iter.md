@@ -1,7 +1,7 @@
 ---
 id: d33af173-f275-4eba-9f38-cc1daf025bd8
 name: "Node-file walker"
-desc: "Finds every `*.iter.md` file whose filename names a node type under a project's scan dirs, never entering `.git`, `target`, `node_modules`, `.iter` or `.claude`, dropping whatever git ignores and never following symlinks; offers one full walk for validate, migrate5 and the test sweep, plus the stat / list / walk pieces the engine's incremental filescan is built from, and maps checkout paths to and from the `{topdir}/…` form, so that every part agrees on which files are nodes and no build output copy ever becomes one."
+desc: "Finds every `*.iter.md` file whose filename names a node type under a project's scan dirs, never entering `.git`, `target`, `node_modules`, `.iter` or `.claude`, dropping whatever git ignores and never following symlinks; offers one full walk for validate and the test sweep, plus the stat / list / walk pieces the engine's incremental filescan is built from, and maps checkout paths to and from the `{topdir}/…` form, so that every part agrees on which files are nodes and no build output copy ever becomes one."
 creator: "agent.code"
 teststate: inherit
 level: component
@@ -42,7 +42,7 @@ and `now_iso`. Outside a git repository nothing is dropped.
 ## What goes in and out
 
 In: a topdir and its scan dirs. Out: node-file paths, directory stats and path conversions for
-Node-file sync, validate, the test runner, the test sweep and migrate5.
+Node-file sync, validate, the test runner, and the test sweep.
 
 ## Why it matters
 

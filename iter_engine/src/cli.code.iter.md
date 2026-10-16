@@ -1,7 +1,7 @@
 ---
 id: 01e11745-c2f8-403a-a620-7753bdf0d2ea
 name: "iter command line"
-desc: "Reads the command a person or agent typed (`iter add`, `ask`, `reject`, `block`, `wait`, `doc`, `critreview`, `capability`, `status` for the queue; `runtests`, `validate`, `sync`, `sweep`, `rag sync`, `init`, `migrate5`, `markers`, `teststate`, `usecase` for the checkout), checks its arguments and hands the work to the part that does it, so that every change to the queue or the checkout goes through one checked front door and agents never write to the database directly."
+desc: "Reads the command a person or agent typed (`iter add`, `ask`, `reject`, `block`, `wait`, `doc`, `critreview`, `capability`, `status` for the queue; `runtests`, `validate`, `sync`, `sweep`, `rag sync`, `init`, `markers`, `teststate`, `usecase` for the checkout), checks its arguments and hands the work to the part that does it, so that every change to the queue or the checkout goes through one checked front door and agents never write to the database directly."
 creator: "iter migrate5"
 teststate: inherit
 level: component
@@ -42,7 +42,6 @@ clap parses the words into the `Verb` enum. Inside an engine run, agents reach i
 - `init` (`iter_engine/src/init.rs: init_project`) scaffolds a v5 project with `iter_core::nodefile`:
   `global/<slug>.project.iter.md` and `global/requirements/{philosophy,bizreq,techreq}` files, already
   conformed, never overwriting without `--force`; no engine config is written.
-- `migrate5 --from --to [--dry-run] [--json]` runs iter_local's converter into a copy.
 - Anything else gets a plain message (`retired`): `ids` and `graph-apply` are gone in iter5.
 
 ## What goes in and out

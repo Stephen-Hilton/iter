@@ -69,7 +69,7 @@ No. The container runs ArangoDB and iter_data only. Engines — and the Claude C
 
 ### Can I run iter4 on a server or in the cloud?
 
-Yes. The same `docker/compose.yml` runs on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; see `UBUNTU.md` in the repository for a Linux engine host.
+Yes. The same `docker/compose.yml` runs on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; `linux/install.sh` installs one on a Linux host.
 
 ## Creating a new project
 

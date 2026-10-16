@@ -2,7 +2,7 @@
 name = "iter_local"
 version = "0.1.0"
 edition = "2024"
-description = "The checkout side of iter5: node-file walking, the test runner, validate and iter migrate5"
+description = "The checkout side of iter5: node-file walking, the test runner and validate"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

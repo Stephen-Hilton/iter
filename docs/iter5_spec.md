@@ -1,6 +1,6 @@
 # iter5 — spec and build contract
 
-Source brief: `requirements.md` + `requirements.png` (the architecture diagram).
+Source brief: `docs/requirements.md` + `docs/requirements.png` (the architecture diagram).
 iter5 is a fork of iter4 (the repo root is its cargo workspace). Everything iter4 does keeps working
 unless this document says it changes. Decisions taken with Stephen on 2026-10-02:
 
@@ -503,6 +503,8 @@ also reachable from the graph view's picker as "Settings graph").
 ---
 
 ## 10. Converter `iter migrate5`
+_Removed 2026-10-16 once every checkout was on iter5; the code is at tag `pre-cleanup-2026-10-16`._
+
 `iter migrate5 --from <iter4 checkout> --to <dir> [--dry-run]` (never in place):
 copies the tree, then: `main.iter.md` → `global/<slug>.project.iter.md`; `*.tests.iter.md`/`*.testgroup.iter.md` →
 `*.test.iter.md` (registry testlist → `children.tests` script paths); bizreq/techreq → the §2.8 one-file-per-attachment-point layout: one `## ` section per requirement (multi-bullet
@@ -535,7 +537,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 
 ---
 
-## 12. Diagram review (`requirements.png`)
+## 12. Diagram review (`docs/requirements.png`)
 
 ### 12.1 Deviations (update the diagram to match)
 1. **get_next claims and locks on the server** in one call (`::get_next` + `::lock` merged into `POST …/next`); the engine

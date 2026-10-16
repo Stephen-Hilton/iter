@@ -30,7 +30,7 @@ subcommand; `ITER_BIN` names it for prompts.
   `ITER_PROJECT`, `ITER_WORKID` from the environment the engine set and call
   the HTTP JSON API.
 - **Checkout verbs** (`init`, `validate`, `sync`, `runtests`, `sweep`,
-  `rag sync`, `markers`, `teststate`, `usecase`, `migrate5`) work from any
+  `rag sync`, `markers`, `teststate`, `usecase`) work from any
   shell in a checkout.
 
 ## Who supplies it

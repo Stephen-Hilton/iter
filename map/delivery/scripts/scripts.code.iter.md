@@ -35,13 +35,13 @@ The commands that switch iter5 on and prove the whole thing works.
   file edit → node, node edit → file + commit, create / delete both ways,
   conflicts, designer → build → repo + plan item, standard test results → test
   node + log, account switch/stop through the `bills` edge, deactivating a
-  `serves` edge, MCP tool calls, and `iter migrate5` on `e2e/iter4_fixture`.
-  The fixtures' node files are stored as `*.iter.md.fixture` so iter5's own
+  `serves` edge and MCP tool calls.
+  The fixture's node files are stored as `*.iter.md.fixture` so iter5's own
   scan never reads them. The database is dropped on success and failure.
   `E2E_ONLY=b,c` runs only some sections.
 - **`e2e/playwright/run.sh`.** The web suite: login, queue, project graph,
   type filters, configure lightbox, edge drag / copy / paste, settings graph,
-  designer build flow; screenshots in `e2e/playwright/screenshots/`.
+  designer build flow; screenshots in `e2e/playwright/screenshots/` (git-ignored).
 - **`tools/`** — see its component node.
 
 ## What goes in and out

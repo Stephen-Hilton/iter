@@ -11,7 +11,7 @@ children:
   codedirs:  []
   codenodes: ["{topdir}/map/orchestration/orchestration.code.iter.md", "{topdir}/map/engine/engine.code.iter.md", "{topdir}/map/shared/shared.code.iter.md", "{topdir}/map/delivery/delivery.code.iter.md", "{topdir}/map/external/external.code.iter.md"]
   tests:     ["{topdir}/e2e/e2e.test.iter.md", "{topdir}/e2e/playwright.test.iter.md"]
-  reqs:      ["{topdir}/reqs/"]
+  reqs:      ["{topdir}/docs/requirements.md"]
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
 ---
 # iter5

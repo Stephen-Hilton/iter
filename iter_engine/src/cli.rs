@@ -2,8 +2,8 @@
 //! (add, ask, reject, block, wait, doc, critreview, capability, status) and
 //! the checkout verbs (iter5): `runtests` (test nodes, standard result JSON),
 //! `validate [--fix]` (nodefile conform), `sync` (one file-sync round),
-//! `sweep`, `rag sync`, `init` (v5 scaffold), `migrate5` (iter4 → iter5 in a
-//! copy), `markers`, `teststate`, `usecase`. Agents ask for the logical
+//! `sweep`, `rag sync`, `init` (v5 scaffold), `markers`, `teststate`,
+//! `usecase`. Agents ask for the logical
 //! thing; this does the deterministic work.
 //!
 //! Environment (set by the engine for every agent session): ITER_DATA_URL,
@@ -214,18 +214,6 @@ enum Verb {
         read_only: bool,
         #[arg(long)]
         data_url: Option<String>,
-    },
-    /// Convert an iter4 checkout into iter5 node files in a COPY (never in place).
-    Migrate5 {
-        #[arg(long)]
-        from: String,
-        #[arg(long)]
-        to: String,
-        #[arg(long)]
-        dry_run: bool,
-        /// print the report as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Run the project's test nodes off the project graph (teststate per
     /// chain), record results, file fix / test / coverage / node-text items;
@@ -465,20 +453,6 @@ pub fn run(args: CliArgs) {
             }
         }
         Verb::Sync { read_only, ref data_url } => std::process::exit(crate::sync::sync_verb(&conn_of(data_url.as_deref()), read_only)),
-        Verb::Migrate5 { ref from, ref to, dry_run, json } => match iter_local::migrate5::run(std::path::Path::new(from), std::path::Path::new(to), dry_run) {
-            Ok(rep) => {
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
-                } else {
-                    rep.print();
-                }
-                std::process::exit(if rep.not_idempotent.is_empty() { 0 } else { 1 })
-            }
-            Err(e) => {
-                eprintln!("iter migrate5: {e}");
-                std::process::exit(2)
-            }
-        },
         Verb::Sweep { ref node, dry_run, no_file, timeout_min, install_schedule, ref every, text_max, tests_max, coverage_max, all, ref usecase, budget_min, ref data_url } => {
             let c = conn_of(data_url.as_deref());
             if install_schedule {
@@ -550,9 +524,9 @@ fn topdir_of(args: &CliArgs) -> std::path::PathBuf {
 fn retired(rest: &[String]) -> ! {
     let verb = rest.first().cloned().unwrap_or_default();
     die(format!(
-        "`iter {verb}` is not an iter5 verb. Checkout verbs: runtests, validate, sync, sweep, rag, init, migrate5, markers, teststate, usecase. \
+        "`iter {verb}` is not an iter5 verb. Checkout verbs: runtests, validate, sync, sweep, rag, init, markers, teststate, usecase. \
          Retired: ids and graph-apply (iter5 node files carry their own ids; graph edits reach the checkout through the engine's file sync), \
-         and the V2-only verbs (testsweep, orphans, resolve)."
+         the iter4 → iter5 converter migrate5, and the V2-only verbs (testsweep, orphans, resolve)."
     ))
 }
 

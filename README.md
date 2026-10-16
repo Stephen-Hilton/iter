@@ -1,13 +1,13 @@
 # iter5
 
-iter5 is a fork of iter4. A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter5_spec.md`](docs/iter5_spec.md), and §12 lists where iter5 departs from `requirements.png`.
+iter5 is a fork of iter4. A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter5_spec.md`](docs/iter5_spec.md), and §12 lists where iter5 departs from [`docs/requirements.png`](docs/requirements.png).
 
 | dir | what it is |
 |---|---|
 | `iter_core` | shared types: work items, projects, settings graph types, locks, dedup keys, the test result JSON, and `nodefile` (parse / conform / render / edge derivation / path planning for v5 node files) |
 | `iter_data` | the data server: axum API on ArangoDB, auth and authz, get_next (`POST …/next`), the project graph and file sync (`nodes.rs`, `filesync.rs`), the settings graph (`settings.rs`), test results (`testlogs.rs`), MCP (`mcp.rs`) and GraphRAG (`rag/`) |
 | `iter_engine` | the engine (one per machine; providers in `provider/`, file sync in `filesync.rs`) and the `iter` verbs (`cli.rs`) |
-| `iter_local` | checkout-side tools: node scan, validate, test runner, `migrate5` |
+| `iter_local` | checkout-side tools: node scan, validate, test runner |
 | `iter_rag` | GraphRAG extraction, chunking and embedding |
 | `webui/` | the web page (embedded into iter_data) |
 | `docker/` | the all-in-one image: ArangoDB CE + iter_data |
@@ -197,7 +197,6 @@ Checkout verbs work from a shell in the checkout:
 | `markers` | every node file, parsed, as JSON |
 | `teststate --omit\|--include\|--block\|--clear <path> \| --list` | set or list the test gate on node files |
 | `usecase --file F [--add\|--remove <path>] [--list]` | edit a use case's parts |
-| `migrate5 --from <iter4 checkout> --to <dir> [--dry-run] [--json]` | convert iter4 → iter5 in a copy, never in place |
 
 `sync`, `sweep` and `rag sync` connect with `--data-url` / `$ITER_DATA_URL` and `$ITER_ENGINE_TOKEN` (or `$ITER_TOKEN`), else this machine's engine key (`~/.iter/engine.key`).
 
@@ -218,18 +217,10 @@ cargo test --workspace         # every crate; iter_data's tests each get a throw
 ./e2e.sh                       # full stack, mock provider, one engine serving two projects (throwaway iter5_e2e_* database)
 E2E_ONLY=b,c ./e2e.sh          # setup + only those sections (a0, a, b, c, d, e, f, g, h)
 ./e2e.sh --live                # also one tiny item on a real claude account (needs ITER_LIVE_CLAUDE_TOKEN)
-e2e/playwright/run.sh          # webui suite; screenshots in e2e/playwright/screenshots
+e2e/playwright/run.sh          # webui suite; screenshots in e2e/playwright/screenshots (git-ignored)
 ```
 
 `ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` point the tests at another Arango.
-
-## Converting iter5's own node files
-
-iter5's own node docs (`*.code.iter.md`, `*.tests.iter.md`, `main.iter.md`, … in this directory) are still in iter4 format. Do not convert them in place. `iter migrate5` only writes a copy (`--from` / `--to`).
-
-When you do convert them, leave out `iter_core/src/nodefile/fixtures/`. Those are test fixtures with duplicate ids, and they must stay iter4-shaped. `migrate5` has no exclude flag (it skips only git-ignored paths and build folders), so remove that directory from the copy you convert from.
-
-Whether and when to convert is pending a decision.
 
 ## Licence
 

@@ -39,7 +39,7 @@ It holds two containers: **docker — all-in-one container** and
 - `./e2e.sh` runs a real iter_data (throwaway `iter5_e2e_*` database) and one
   real engine serving **two** copies of `e2e/sample5`, all on the `mock`
   provider, and checks work items, file sync both ways, designer build, test
-  results, settings edges, MCP and `iter migrate5`. `e2e/playwright/run.sh`
+  results, settings edges and MCP. `e2e/playwright/run.sh`
   drives the web page. `--live` adds one real Claude item.
 
 ## What goes in and out
