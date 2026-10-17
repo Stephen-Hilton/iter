@@ -23,3 +23,6 @@ test/e2e/playwright/screenshots/
 installers/**/iter_data-*
 installers/**/iter_engine-*
 installers/dist/
+
+# personal notes
+\!scratch.md
