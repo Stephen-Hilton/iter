@@ -38,6 +38,41 @@ installers remove `ITER_ADMIN_PASSWORD` from where they put it: linux / linux_aw
 `iter-admin-cleanup.path` systemd unit (on an aws stack also the SSM parameter), docker on the next
 `install.sh` run or `install.sh status`.
 
+## ArangoDB: iter's own user and database, or one you already run
+
+iter_data signs in to ArangoDB as its own user (`iter_user`), which holds `rw` on its own database
+(`iter_db`) and nothing else. On the first start, when either is missing, iter_data uses
+`ARANGO_ROOT_PASSWORD` once to create them and grant `rw`. iter's user never gets root's password. An
+install made before 2026-10-17 (root, database `iter5`) moves to `iter_user` on its next run and keeps
+`iter5`; the docker container detects `iter5` on its own.
+
+By default every iter_data installer runs ArangoDB beside iter_data. To use an ArangoDB you already run
+(shared with other apps, or on another machine), give it `--arango-url`:
+
+| option | linux, linux_aws, docker | aws (CloudFormation) |
+|---|---|---|
+| use an existing ArangoDB | `--arango-url URL` (or `ARANGO_URL`) | `--arango-url` / `ArangoUrl` |
+| pin its self-signed certificate | `--arango-fingerprint sha256:…` | `--arango-fingerprint` / `ArangoCertFingerprint` |
+| or trust your own CA | `--arango-ca-cert PATH` | `--arango-ca-cert` (kept in SSM) |
+| iter's database | `--arango-db NAME` [iter_db] | `--arango-db` / `ArangoDb` |
+| iter's user | `--arango-user NAME` [iter_user] | `--arango-user` / `ArangoUser` |
+| plain http on a private network | `ARANGO_ALLOW_PLAIN_HTTP=1` | `--arango-allow-plain-http` / `ArangoAllowPlainHttp` |
+| iter's user's password | `ARANGO_PASSWORD` (environment or `--env-file`) | `ARANGO_PASSWORD` in the shell (SSM SecureString) |
+| root's password, to create them | `ARANGO_ROOT_PASSWORD` (environment or `--env-file`) | `ARANGO_ROOT_PASSWORD` in the shell (SSM SecureString) |
+
+With an external ArangoDB, give either `ARANGO_PASSWORD` (a user its admin made, with `rw` on the
+database) or `ARANGO_ROOT_PASSWORD`. iter_data reaches another machine over `https://` only. The
+fingerprint is `openssl x509 -in server.crt -noout -fingerprint -sha256`. The linux and docker READMEs
+show how to serve ArangoDB over HTTPS with a self-signed certificate. linux and linux_aws then install
+only the Arango client tools, for backups. The docker container runs iter_data alone, with no Arango
+console port.
+
+**Backups are per database.** `iter-backup` (linux, linux_aws, every 6 hours) dumps only `ARANGO_DB`, as
+iter's user, from a local or remote ArangoDB. Over HTTPS it first checks the certificate the way iter_data
+does. `install.sh restore FILE` stops iter-data, loads that database back (`arangorestore --overwrite`) and
+starts iter-data. Arango's system collections are left out: iter_data recreates what it uses at start. The
+docker README has the same commands for the container.
+
 ## Engine account tokens from a secret store
 
 Every engine installer takes `--secrets-command CMD` (`-SecretsCommand` on Windows) and `--secrets-every N`

@@ -30,6 +30,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"   # the repo root
 ARANGO_URL_E2E="${ITER5_TEST_ARANGO_URL:-${ARANGO_URL_E2E:-http://127.0.0.1:8529}}"
 ARANGO_PW_E2E="${ITER5_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}"
 ARANGO_DB_E2E="iter5_e2e_$RANDOM$RANDOM"
+# iter_data signs in as its own user, which root creates on first start (and
+# cleanup removes): the same path a fresh install takes
+ARANGO_USER_E2E="$ARANGO_DB_E2E"
+ARANGO_USER_PW_E2E="e2e-$RANDOM$RANDOM$RANDOM"
 SCRATCH="${E2E_SCRATCH:-$(mktemp -d /tmp/iter5-e2e.XXXXXX)}"
 PORT=$((18400 + RANDOM % 1000))
 # TLS (2026-10-17): iter_data serves its self-signed certificate (E2E_TLS=off
@@ -67,7 +71,11 @@ tally() {
   if [ "$NFAIL" -gt 0 ]; then printf '\033[31mFAILED:\033[0m\n'; printf '  %s\n' "${FAILED[@]}"; fi
 }
 
-drop_e2e_db() { [ -n "${E2E_KEEP_DB:-}" ] && { say "database kept: $ARANGO_DB_E2E"; return 0; }; curl -s -o /dev/null -X DELETE -u "root:$ARANGO_PW_E2E" "$ARANGO_URL_E2E/_api/database/$ARANGO_DB_E2E" || true; }
+drop_e2e_db() {
+  [ -n "${E2E_KEEP_DB:-}" ] && { say "database kept: $ARANGO_DB_E2E (user $ARANGO_USER_E2E)"; return 0; }
+  curl -s -o /dev/null -X DELETE -u "root:$ARANGO_PW_E2E" "$ARANGO_URL_E2E/_api/database/$ARANGO_DB_E2E" || true
+  curl -s -o /dev/null -X DELETE -u "root:$ARANGO_PW_E2E" "$ARANGO_URL_E2E/_api/user/$ARANGO_USER_E2E" || true
+}
 cleanup() {
   [ -n "$ENGINE_PID" ] && kill "$ENGINE_PID" 2>/dev/null
   [ -n "$DATA_PID" ] && kill "$DATA_PID" 2>/dev/null
@@ -149,12 +157,15 @@ DATA_BIN="$REPO/target/debug/iter_data"
 ENGINE_BIN="$REPO/target/debug/iter_engine"
 ok "debug binaries built"
 
-ITER_ADMIN_PASSWORD=$PASS_FIRST ARANGO_URL="$ARANGO_URL_E2E" ARANGO_PASSWORD="$ARANGO_PW_E2E" "$DATA_BIN" \
+ITER_ADMIN_PASSWORD=$PASS_FIRST ARANGO_URL="$ARANGO_URL_E2E" ARANGO_ROOT_PASSWORD="$ARANGO_PW_E2E" \
+  ARANGO_USER="$ARANGO_USER_E2E" ARANGO_PASSWORD="$ARANGO_USER_PW_E2E" "$DATA_BIN" \
   --arango-db "$ARANGO_DB_E2E" --listen "127.0.0.1:$PORT" --secret-file "$SCRATCH/jwt.secret" --tls "$E2E_TLS" \
   --env-file /dev/null --webui-dir "$REPO/iter_data/webui" > "$SCRATCH/iter_data.log" 2>&1 &
 DATA_PID=$!
 wait_for 60 "curl -sf $BASE/health" || { tail -30 "$SCRATCH/iter_data.log"; fatal "iter_data did not start"; }
 ok "iter_data up on :$PORT ($(curl -sf "$BASE/health" | jq -r .backend))"
+check "Arango: root made iter_data's own user, which holds rw on its database only" bash -c \
+  "grep -q \"as user '$ARANGO_USER_E2E' ready\" '$SCRATCH/iter_data.log' && [ \"\$(curl -s -u 'root:$ARANGO_PW_E2E' '$ARANGO_URL_E2E/_api/user/$ARANGO_USER_E2E/database' | jq -c '[.result | to_entries[] | select(.value != \"none\")]')\" = '[{\"key\":\"$ARANGO_DB_E2E\",\"value\":\"rw\"}]' ]"
 if [ "$E2E_TLS" != off ]; then
   check "TLS: a self-signed certificate made, key owner-only" bash -c "[ -f '$SCRATCH/tls.crt' ] && [ \"\$(stat -f %Lp '$SCRATCH/tls.key' 2>/dev/null || stat -c %a '$SCRATCH/tls.key')\" = 600 ]"
   check "TLS: plain http is not served" bash -c "! curl -s -m 3 http://127.0.0.1:$PORT/health | grep -q ok"

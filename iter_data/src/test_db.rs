@@ -18,11 +18,11 @@ fn env2(a: &str, b: &str) -> Option<String> {
     std::env::var(a).ok().or_else(|| std::env::var(b).ok())
 }
 
-fn url() -> String {
+pub fn url() -> String {
     env2("ITER5_TEST_ARANGO_URL", "ITER4_TEST_ARANGO_URL").unwrap_or_else(|| "http://127.0.0.1:8529".into())
 }
 
-fn password() -> String {
+pub fn password() -> String {
     env2("ITER5_TEST_ARANGO_PASSWORD", "ITER4_TEST_ARANGO_PASSWORD").unwrap_or_else(|| "iter4dev".into())
 }
 
@@ -38,11 +38,25 @@ static SWEPT: OnceCell<()> = OnceCell::const_new();
 /// A fresh, empty database with every collection and index iter uses.
 pub async fn store() -> (ArangoBackend, String) {
     SWEPT.get_or_init(sweep).await;
-    let db = format!("{PREFIX}{}_{}", now_secs(), uuid::Uuid::new_v4().simple());
+    let db = fresh_name();
     let a = ArangoBackend::new(&url(), &db, "root", &password())
         .await
         .unwrap_or_else(|e| panic!("the tests need the dev ArangoDB at {} (./deploy.sh local): {e}", url()));
     (a, db)
+}
+
+/// A name no other test uses, swept like a database when it is one.
+pub fn fresh_name() -> String {
+    format!("{PREFIX}{}_{}", now_secs(), uuid::Uuid::new_v4().simple())
+}
+
+/// Remove an Arango user a test made (users are not swept).
+pub async fn drop_user(user: &str) {
+    let _ = reqwest::Client::new()
+        .delete(format!("{}/_db/_system/_api/user/{user}", url()))
+        .basic_auth("root", Some(password()))
+        .send()
+        .await;
 }
 
 pub async fn drop(db: &str) {

@@ -27,6 +27,17 @@
 #   --port N               iter_data port [8400]
 #   --ssh-cidr CIDR        also open SSH to this range (default: none; use Session Manager)
 #   --key-name NAME        EC2 key pair for SSH
+#   --arango-url URL       use this ArangoDB (https://host:8529) instead of installing one on the
+#                          instance [local]. Its passwords come from ARANGO_PASSWORD (iter_data's
+#                          own user, never root's) and, only to create that user or database,
+#                          ARANGO_ROOT_PASSWORD in this shell's environment: stored as SSM
+#                          SecureStrings /iter/<stack>/arango-password and arango-root-password,
+#                          never passed through CloudFormation
+#   --arango-fingerprint FP  pin the ArangoDB's self-signed certificate (sha256:<64 hex>)
+#   --arango-ca-cert PATH  trust this PEM CA for the ArangoDB (stored as /iter/<stack>/arango-ca-cert)
+#   --arango-db NAME       iter_data's database [iter_db]
+#   --arango-user NAME     the user iter_data signs in as, rw on its database only [iter_user]
+#   --arango-allow-plain-http  allow an http:// --arango-url on another machine (a trusted private network)
 #   --region R, --profile P   passed to the aws CLI
 #   --dry-run              print the aws commands, run nothing
 #   -h, --help             this text
@@ -42,6 +53,7 @@ TEMPLATE=iter_data.cfn.yaml
 
 CMD=deploy STACK=iter-data VPC="" SUBNET="" CIDR="" VERSION=latest ARCH=arm64 ITYPE="" VOL=50 PORT=8400
 SSH_CIDR="" KEY="" DRY=0
+A_URL="" A_FP="" A_CA="" A_DB="" A_USER="" A_PLAIN=""
 AWSARGS=()
 
 say() { echo "[iter aws] $*"; }
@@ -62,6 +74,12 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --ssh-cidr) SSH_CIDR="$2"; shift 2 ;;
     --key-name) KEY="$2"; shift 2 ;;
+    --arango-url) A_URL="$2"; shift 2 ;;
+    --arango-fingerprint) A_FP="$2"; shift 2 ;;
+    --arango-ca-cert) A_CA="$2"; shift 2 ;;
+    --arango-db) A_DB="$2"; shift 2 ;;
+    --arango-user) A_USER="$2"; shift 2 ;;
+    --arango-allow-plain-http) A_PLAIN=true; shift ;;
     --region) AWSARGS+=(--region "$2"); shift 2 ;;
     --profile) AWSARGS+=(--profile "$2"); shift 2 ;;
     --dry-run) DRY=1; shift ;;
@@ -74,6 +92,19 @@ done
 case "$ARCH" in arm64|x86_64) ;; *) die "--arch is arm64 or x86_64" ;; esac
 [ -n "$ITYPE" ] || { [ "$ARCH" = arm64 ] && ITYPE=t4g.large || ITYPE=t3.large; }
 [[ "$VERSION" =~ ^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?)$ ]] || die "--version is latest or vYYYY.MM.DD[.N]"
+url_re='^(local|https?://[][A-Za-z0-9._:-]+/?)$'  # host (or [IPv6]) and port
+[ -z "$A_URL" ] || [[ "$A_URL" =~ $url_re ]] || die "--arango-url is https://host:port (or local)"
+[ -z "$A_FP" ] || [[ "$A_FP" =~ ^(sha256:)?[0-9A-Fa-f:]{64,95}$ ]] || die "--arango-fingerprint is sha256:<64 hex>"
+[ -z "$A_DB$A_USER" ] || [[ "$A_DB$A_USER" =~ ^[A-Za-z0-9_-]+$ ]] || die "--arango-db / --arango-user: letters, digits, _ and - only"
+[ "${A_USER:-}" != root ] || die "--arango-user root: iter_data signs in as a user of its own, with rw on its database only"
+[ -z "$A_CA" ] || [ -f "$A_CA" ] || die "--arango-ca-cert $A_CA does not exist"
+EXTERNAL=0; [ -z "$A_URL" ] || [ "$A_URL" = local ] || EXTERNAL=1
+[ "$EXTERNAL" = 1 ] || [ -z "$A_FP$A_CA$A_PLAIN" ] || die "--arango-fingerprint/--arango-ca-cert/--arango-allow-plain-http need --arango-url"
+if [ "$EXTERNAL" = 1 ] && [[ "$A_URL" == http://* ]] && [ -z "$A_PLAIN" ]; then
+  die "--arango-url $A_URL is plain http: use https:// (with --arango-fingerprint or --arango-ca-cert), or add --arango-allow-plain-http on a private network"
+fi
+[ -z "${ARANGO_PASSWORD:-}" ] || [ "${ARANGO_PASSWORD}" != "${ARANGO_ROOT_PASSWORD:-}" ] \
+  || die "ARANGO_PASSWORD is root's password: give iter_data's user a password of its own"
 
 awsx() { aws ${AWSARGS[@]+"${AWSARGS[@]}"} "$@"; }  # bash 3.2: an empty array is "unbound" under set -u
 awsc() {  # print, then run unless --dry-run
@@ -85,6 +116,11 @@ command -v aws >/dev/null || [ "$DRY" = 1 ] || die "the aws CLI is required (htt
 
 param_name() { echo "/iter/$STACK/admin-password"; }
 fp_param() { echo "/iter/$STACK/tls-fingerprint"; }
+# an SSM SecureString from an environment variable; the value is never printed
+put_secret() {  # NAME VAR
+  echo "  + aws ${AWSARGS[*]+${AWSARGS[*]} }ssm put-parameter --type SecureString --overwrite --name /iter/$STACK/$1 --value <\$$2>"
+  [ "$DRY" = 1 ] || awsx ssm put-parameter --type SecureString --overwrite --name "/iter/$STACK/$1" --value "${!2}" >/dev/null
+}
 
 case "$CMD" in
   status)
@@ -104,6 +140,7 @@ case "$CMD" in
     awsc cloudformation wait stack-delete-complete --stack-name "$STACK"
     say "deleted. The parameters $(param_name) and $(fp_param) were written by the instance: remove them with"
     say "  aws ssm delete-parameters --names $(param_name) $(fp_param)"
+    say "  (with an external ArangoDB, also /iter/$STACK/arango-password, arango-root-password and arango-ca-cert)"
     exit 0 ;;
 esac
 
@@ -131,9 +168,25 @@ params=("IterVersion=$VERSION" "Architecture=$ARCH" "InstanceType=$ITYPE" "DataV
 [ -z "$VPC" ] || params+=("VpcId=$VPC")
 [ -z "$SUBNET" ] || params+=("SubnetId=$SUBNET")
 [ -z "$CIDR" ] || params+=("AllowedCidr=$CIDR")
+[ -z "$A_URL" ] || params+=("ArangoUrl=$A_URL")
+[ -z "$A_FP" ] || params+=("ArangoCertFingerprint=$A_FP")
+[ -z "$A_DB" ] || params+=("ArangoDb=$A_DB")
+[ -z "$A_USER" ] || params+=("ArangoUser=$A_USER")
+[ -z "$A_PLAIN" ] || params+=("ArangoAllowPlainHttp=true")
+
+# what the first boot reads from SSM for an external ArangoDB (before the stack, so it is there)
+if [ -n "${ARANGO_PASSWORD:-}" ]; then put_secret arango-password ARANGO_PASSWORD; fi
+if [ -n "${ARANGO_ROOT_PASSWORD:-}" ]; then put_secret arango-root-password ARANGO_ROOT_PASSWORD; fi
+if [ -n "$A_CA" ]; then
+  awsc ssm put-parameter --type String --tier Intelligent-Tiering --overwrite --name "/iter/$STACK/arango-ca-cert" --value "file://$A_CA"
+fi
+if [ "$EXTERNAL" = 1 ] && [ -z "${ARANGO_PASSWORD:-}" ]; then
+  say "no ARANGO_PASSWORD in the environment: the instance uses /iter/$STACK/arango-password if it exists, else makes one (then ARANGO_ROOT_PASSWORD must create the user)"
+fi
 
 say "stack $STACK: $ARCH $ITYPE, iter $VERSION, port $PORT open to ${CIDR:-<unchanged>}"
-say "first boot installs ArangoDB + iter_data; the stack completes when /health answers (about 10 minutes)"
+if [ "$EXTERNAL" = 1 ]; then say "ArangoDB: $A_URL (not installed on the instance)"; fi
+say "first boot installs iter_data (and ArangoDB, unless --arango-url); the stack completes when /health answers (about 10 minutes)"
 awsc cloudformation deploy --stack-name "$STACK" --template-file "$TPL" \
   --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --parameter-overrides "${params[@]}"
 awsc cloudformation describe-stacks --stack-name "$STACK" \

@@ -48,12 +48,17 @@ The binary is taken from `--binary PATH`, else from beside the script, else from
 |---|---|---|
 | `--version TAG` | latest release | release to download from |
 | `--binary PATH` | | use this `iter_data` binary |
-| `--env-file PATH` | | read `ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`, `ARANGO_ROOT_PASSWORD` from it |
+| `--env-file PATH` | | read `ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET` and the `ARANGO_*` settings ([below](#arangodb-iters-own-user-and-database-or-an-arangodb-you-already-run)) from it |
 | `--port N` | 8400 | iter_data port |
 | `--db-dir DIR` | `/var/lib/arangodb3` | ArangoDB data directory |
 | `--backup-dir DIR` | `/var/backups/iter` | backup folder |
 | `--memory MiB` | min(6144, 85% of RAM) | cap for ArangoDB + iter_data together |
 | `--arango-version V` | 3.12.12 | ArangoDB CE version |
+| `--arango-url URL` | local | use this ArangoDB instead of installing one (`https://` to another machine); `local` = install here |
+| `--arango-fingerprint FP` | | pin that ArangoDB's (self-signed) certificate, `sha256:…` |
+| `--arango-ca-cert PATH` | | or trust the CA (PEM) that signed it |
+| `--arango-db NAME` | `iter_db` | iter's database (an existing install keeps its own) |
+| `--arango-user NAME` | `iter_user` | iter's ArangoDB user, `rw` on that database only |
 | `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of the self-signed one |
 | `--tls-name NAME` | | another DNS name or IP on the self-signed certificate (repeatable); e.g. the public DNS name or Elastic IP |
 | `--tls off\|auto` | `auto` | `off` = plain HTTP behind a TLS proxy; `auto` = self-signed again |
@@ -61,16 +66,53 @@ The binary is taken from `--binary PATH`, else from beside the script, else from
 
 A fresh install without `--env-file` generates the secrets and prints the admin password once; you must change it at the first sign-in ([below](#the-first-boot-admin-password)). Keep `ITER_JWT_SECRET`, because every engine and user token is signed with it. A machine set up with the older `linux/install.sh server` keeps its secrets: the script reads the invoking user's `~/.iter/data.env` and copies `~/.iter/iter_data/{iter_data.secret,.env}`. It also keeps the database, which stays in `/var/lib/arangodb3`.
 
-Other commands: `install.sh status` (services, health, the certificate fingerprint, the last backups), `install.sh backup` (back up now), `install.sh uninstall`.
+Other commands: `install.sh status` (services, health, the certificate fingerprint, the ArangoDB in use, the last backups), `install.sh backup` (back up now), `install.sh restore FILE` ([below](#backups-iters-database-only)), `install.sh uninstall`.
 
-The Arango console is never exposed. To use it, run `ssh -L 8529:127.0.0.1:8529 <host>` and open http://127.0.0.1:8529/.
+The local Arango console is never exposed. To use it, run `ssh -L 8529:127.0.0.1:8529 <host>` and open http://127.0.0.1:8529/.
 
-Restore a backup:
+## ArangoDB: iter's own user and database, or an ArangoDB you already run
+
+iter_data signs in to ArangoDB as **its own user** (`ARANGO_USER`, default `iter_user`) and keeps everything in **its own database** (`ARANGO_DB`, default `iter_db`). That user holds `rw` (Administrate) on that one database and nothing else, so the same ArangoDB server can hold other apps' databases too. iter_data creates its collections and indexes itself, at every start and as projects grow (GraphRAG's vector indexes once a project has 1,024 chunks; arangod must run with `--vector-index`, which the local install does).
+
+On its first start iter_data signs in as that user. When it can't (the user or the database doesn't exist yet, or the user has too little access), it signs in as `root` with `ARANGO_ROOT_PASSWORD`. As root it creates the user (with `ARANGO_PASSWORD`, never root's own password) and the database, and grants the user `rw` on it. Then it tries the user again. An existing user keeps its password: a wrong `ARANGO_PASSWORD` is reported, never reset. With the local ArangoDB the script generates both passwords and keeps them in `/etc/iter/data.env`.
+
+An install made before this change signed in as `root` and used the database `iter5`. A rerun moves it to `iter_user` and **keeps `iter5`**, so no data moves. Use `--arango-db` to choose another database.
+
+**An ArangoDB you already run.** Give `--arango-url` (or `ARANGO_URL` in the environment or in `--env-file`). The script then installs neither arangod nor its service, only the Arango client tools for the backups, and `iter-data` no longer waits for a local `arangodb3`. A local ArangoDB from an earlier install is stopped and its data is kept; `--arango-url local` goes back to it. Give either:
+
+- `ARANGO_PASSWORD`, for a user the ArangoDB admin already made with `rw` on the database, or
+- `ARANGO_ROOT_PASSWORD`, so iter_data makes them itself.
+
+Both come from the environment or `--env-file`.
+
+**HTTPS to it.** iter_data refuses plain `http://` to another machine. Use `https://` and either:
+
+- `--arango-fingerprint sha256:…`, which pins a **self-signed** certificate: only that exact certificate is accepted, whatever its name or issuer. Get the value with `openssl x509 -in server.crt -noout -fingerprint -sha256`; the colons and case don't matter. Several fingerprints, separated by commas, cover a certificate change.
+- `--arango-ca-cert PATH`, for a certificate signed by a CA of your own. The CA is copied to `/etc/iter/arango-ca.crt`, and the name in the URL must match the certificate.
+- neither, for a certificate from a public CA.
+
+`ARANGO_ALLOW_PLAIN_HTTP=1` allows `http://` on a private network only. To serve ArangoDB over HTTPS, put the certificate and its key in one PEM file and start arangod with `--server.endpoint ssl://0.0.0.0:8529 --ssl.keyfile /path/server.pem`. For a self-signed certificate:
 
 ```bash
-mkdir /tmp/r && tar -xf iter5-<ts>.tar -C /tmp/r
-arangorestore --server.password "$ARANGO_PASSWORD" --server.database iter5 --create-database true --include-system-collections true --input-directory /tmp/r/db
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 825 -subj /CN=arango \
+  -addext "subjectAltName=DNS:arango.example.com" -keyout key.pem -out cert.pem
+cat cert.pem key.pem > server.pem
+openssl x509 -in cert.pem -noout -fingerprint -sha256    # for --arango-fingerprint
 ```
+
+Everything chosen here is kept in `/etc/iter/data.env`: `ARANGO_URL`, `ARANGO_USER`, `ARANGO_PASSWORD`, `ARANGO_DB`, `ARANGO_ROOT_PASSWORD` when given, `ARANGO_CERT_FINGERPRINT`, `ARANGO_CA_CERT` and `ARANGO_ALLOW_PLAIN_HTTP`. A plain rerun keeps it.
+
+## Backups: iter's database only
+
+`iter-backup` dumps only iter's database (`ARANGO_DB`), as iter's own user. Other databases on a shared ArangoDB are never touched. Arango's own system collections are left out; iter_data recreates what it needs from them (its named graph) at start. Each tar also holds `/etc/iter/data.env` and iter_data's secret and certificate files. Over HTTPS the script first checks the server's certificate against `ARANGO_CERT_FINGERPRINT` or `ARANGO_CA_CERT`, because arangodump does not check it.
+
+To load a backup back into iter's database:
+
+```bash
+sudo ./install.sh restore /var/backups/iter/iter5-<ts>.tar
+```
+
+This stops `iter-data`, replaces the collections the backup holds (`arangorestore --overwrite true` as iter's user), and starts `iter-data` again. The env and secret files in the tar are not touched; they are there for a move to a new machine.
 
 ## The first-boot admin password
 

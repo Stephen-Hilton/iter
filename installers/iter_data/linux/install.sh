@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Install iter_data natively as systemd services on Debian, Ubuntu or Arch Linux
 # (also a WSL2 distro with [boot] systemd=true): ArangoDB CE 3.12 (localhost only),
-# iter_data (API + webui on :8400) and an online backup every 6 hours.
+# iter_data (API + webui on :8400) and an online backup every 6 hours. With
+# --arango-url (or ARANGO_URL) it uses an ArangoDB you already run instead, and
+# installs only the Arango client tools here, for the backups.
 #
 #   ./install.sh [install] [options]   install or upgrade (rerun it: idempotent)
 #   ./install.sh status                services, health, the last backups
 #   ./install.sh backup                take a backup now (online, nothing stops)
+#   ./install.sh restore FILE          load a backup's database back (iter-data stops meanwhile)
 #   ./install.sh uninstall             stop + remove services and programs; data is kept
 #   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux/install.sh | bash -s -- --version vYYYY.MM.DD
 #
@@ -18,6 +21,12 @@
 #   --backup-dir DIR       where backups go [/var/backups/iter]
 #   --memory MiB           memory cap for ArangoDB + iter_data together [min(6144, 85% of RAM)]
 #   --arango-version V     ArangoDB CE version, from the official arangodb image [3.12.12]
+#   --arango-url URL       use this ArangoDB (https:// to another machine) instead of installing one;
+#                          also ARANGO_URL in the environment or --env-file; `local` = install here
+#   --arango-fingerprint FP  pin that ArangoDB's certificate (sha256:..., for a self-signed one)
+#   --arango-ca-cert PATH  or trust the CA (PEM) that signed it (copied to /etc/iter/arango-ca.crt)
+#   --arango-db NAME       iter's database [iter_db; an existing install keeps its own]
+#   --arango-user NAME     iter's ArangoDB user, given rw on that database only [iter_user]
 #   --tls-cert PATH        serve this certificate (PEM, e.g. a real one for your domain) instead of
 #                          the self-signed one; needs --tls-key; copied to /var/lib/iter (user iter)
 #   --tls-key PATH         the private key (PEM) for --tls-cert (kept mode 600)
@@ -28,6 +37,12 @@
 #   --dry-run              print every action, change nothing
 #   -h, --help             this text
 #
+# ArangoDB sign-in: iter_data works as ARANGO_USER with rw on ARANGO_DB only. Its
+# password (ARANGO_PASSWORD) is generated and kept unless given; root's password
+# (ARANGO_ROOT_PASSWORD) lets iter_data create that user and database on its first
+# start. An external ArangoDB needs ARANGO_PASSWORD (a user its admin made) or
+# ARANGO_ROOT_PASSWORD, from the environment or --env-file; plain http:// to it
+# only with ARANGO_ALLOW_PLAIN_HTTP=1 (a private network).
 # Lands in: /opt/iter/bin/iter_data, /opt/iter/models/ (embedding model),
 # /etc/iter/data.env (secrets, root:iter 640), /var/lib/iter (iter_data's files, user
 # iter), the database in --db-dir (user arangodb), /usr/sbin/arangod + clients.
@@ -61,6 +76,8 @@ BACKUP_DIR=""
 MEM_MIB=""
 ARANGO_VERSION="${ARANGO_VERSION:-3.12.12}"
 DRY=0
+A_URL_OPT="" A_FP_OPT="" A_CA_SRC="" A_DB_OPT="" A_USER_OPT="" RESTORE_FILE=""
+EXTERNAL=0
 TLS_CERT_SRC="" TLS_KEY_SRC="" TLS_OPT="" TLS_NAMES_OPT=()
 
 say() { echo "[iter_data] $*"; }
@@ -89,6 +106,7 @@ have_systemd() { [ "$(ps -p 1 -o comm= 2>/dev/null)" = systemd ]; }
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|backup|uninstall) CMD="$1"; shift ;;
+    restore) CMD=restore; RESTORE_FILE="${2:-}"; shift; [ $# = 0 ] || shift ;;
     --version) VERSION="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
     --env-file) ENV_SRC="$2"; shift 2 ;;
@@ -97,6 +115,11 @@ while [ $# -gt 0 ]; do
     --backup-dir) BACKUP_DIR="${2%/}"; shift 2 ;;
     --memory) MEM_MIB="$2"; shift 2 ;;
     --arango-version) ARANGO_VERSION="$2"; shift 2 ;;
+    --arango-url) A_URL_OPT="$2"; shift 2 ;;
+    --arango-fingerprint) A_FP_OPT="$2"; shift 2 ;;
+    --arango-ca-cert) A_CA_SRC="$2"; shift 2 ;;
+    --arango-db) A_DB_OPT="$2"; shift 2 ;;
+    --arango-user) A_USER_OPT="$2"; shift 2 ;;
     --tls-cert) TLS_CERT_SRC="$2"; shift 2 ;;
     --tls-key) TLS_KEY_SRC="$2"; shift 2 ;;
     --tls-name) TLS_NAMES_OPT+=("$2"); shift 2 ;;
@@ -111,6 +134,8 @@ case "$TLS_OPT" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate o
 { [ -n "$TLS_CERT_SRC" ] && [ -n "$TLS_KEY_SRC" ]; } || { [ -z "$TLS_CERT_SRC" ] && [ -z "$TLS_KEY_SRC" ]; } \
   || die "--tls-cert and --tls-key go together"
 [ -z "$TLS_CERT_SRC" ] || [ "$TLS_OPT" != off ] || die "--tls off and --tls-cert contradict each other"
+[ "$A_USER_OPT" != root ] || die "--arango-user root: iter_data signs in as a user of its own (rw on its database only)"
+[ "$CMD" != restore ] || [ -n "$RESTORE_FILE" ] || die "restore needs the backup file: $0 restore /var/backups/iter/iter5-<ts>.tar"
 for n in ${TLS_NAMES_OPT[@]+"${TLS_NAMES_OPT[@]}"}; do
   case "$n" in ""|*[!A-Za-z0-9.:-]*) die "--tls-name $n: a DNS name or an IP address" ;; esac
 done
@@ -258,6 +283,25 @@ fetch_arango() {  # fetch_arango DEST
 
 install_arango() {
   local have=""
+  if [ "$EXTERNAL" = 1 ]; then
+    say "ArangoDB: using $A_URL (nothing installed or run here but the client tools, for backups)"
+    stop_local_arango
+    command -v arangodump >/dev/null && have="$(arangodump --version 2>/dev/null | head -1 || true)"
+    [ "$have" = "$ARANGO_VERSION" ] && { say "Arango client tools $ARANGO_VERSION already installed"; return; }
+    local t="<arangodb:$ARANGO_VERSION>"
+    if [ "$DRY" = 1 ]; then
+      echo "  + download arangodb:$ARANGO_VERSION linux/$OCI_ARCH layers from Docker Hub, verify each sha256, unpack"
+    else
+      t="$(tmpdir)"; fetch_arango "$t"
+    fi
+    for b in "${ARANGO_CLIENTS[@]}"; do run install -m 755 "$t/root/usr/bin/$b" "/usr/bin/$b"; done
+    run install -d -m 755 /etc/arangodb3
+    for f in "$t"/root/etc/arangodb3/*.conf; do
+      [ "$DRY" = 1 ] && { echo "  + install the image's /etc/arangodb3/*.conf (client configs)"; break; }
+      [ "$(basename "$f")" = arangod.conf ] || run install -m 644 "$f" /etc/arangodb3/
+    done
+    return
+  fi
   [ -x /usr/sbin/arangod ] && have="$(/usr/sbin/arangod --version 2>/dev/null | head -1 || true)"
   if [ "$have" = "$ARANGO_VERSION" ]; then
     say "ArangoDB $ARANGO_VERSION already installed"
@@ -290,6 +334,15 @@ install_arango() {
   printf 'ARANGODB_DEFAULT_ROOT_PASSWORD=%s\n' "$ARANGO_PW" | put 600 root:root /etc/arangodb3/root.env
 }
 
+# an earlier install's local ArangoDB, now that iter uses another: stopped, its data kept
+stop_local_arango() {
+  have_systemd || return 0
+  [ -f /etc/systemd/system/arangodb3.service ] || return 0
+  say "ArangoDB: stopping the local arangodb3 service (its data in $DB_DIR is kept)"
+  run systemctl disable --now arangodb3 || true
+  run rm -f /etc/systemd/system/arangodb3.service
+}
+
 # ---------------------------------------------------------------- secrets
 # /etc/iter/data.env, kept across reinstalls. Values: --env-file, else the existing
 # /etc/iter/data.env, else an older ~/.iter/data.env (linux/install.sh server), else new.
@@ -300,15 +353,27 @@ secrets() {
   [ -n "$h" ] && [ -f "$h/.iter/data.env" ] && LEGACY="$h/.iter"
   [ -z "$ENV_SRC" ] || [ -f "$ENV_SRC" ] || die "--env-file $ENV_SRC does not exist"
   pickv() {
-    local v=""
-    [ -n "$ENV_SRC" ] && v="$(envval "$1" "$ENV_SRC")"
+    local v="${!1:-}"
+    [ -n "$v" ] || [ -z "$ENV_SRC" ] || v="$(envval "$1" "$ENV_SRC")"
     [ -n "$v" ] || v="$(rootenvval "$1" "$cur")"
     [ -n "$v" ] || [ -z "$LEGACY" ] || v="$(envval "$1" "$LEGACY/data.env")"
     printf '%s' "$v"
   }
   ADMIN_PW="$(pickv ITER_ADMIN_PASSWORD)"
   JWT="$(pickv ITER_JWT_SECRET)"
-  ARANGO_PW="$(pickv ARANGO_ROOT_PASSWORD)"; [ -n "$ARANGO_PW" ] || ARANGO_PW="$(pickv ARANGO_PASSWORD)"
+  # ArangoDB. Before 2026-10-17 iter_data signed in as root (ARANGO_USER=root,
+  # ARANGO_PASSWORD = root's); now as its own user, with rw on its database only.
+  A_URL="$A_URL_OPT"; [ -n "$A_URL" ] || A_URL="$(pickv ARANGO_URL)"
+  case "$A_URL" in ""|local|http://127.0.0.1:8529|http://localhost:8529) EXTERNAL=0; A_URL=http://127.0.0.1:8529 ;; *) EXTERNAL=1 ;; esac
+  A_USER="$A_USER_OPT"; [ -n "$A_USER" ] || A_USER="$(pickv ARANGO_USER)"
+  A_PW="$(pickv ARANGO_PASSWORD)"
+  ARANGO_PW="$(pickv ARANGO_ROOT_PASSWORD)"
+  if [ -z "$A_USER" ] || [ "$A_USER" = root ]; then
+    # an older install: its ARANGO_PASSWORD is root's
+    [ -n "$ARANGO_PW" ] || ARANGO_PW="$A_PW"
+    [ -z "$A_USER" ] || say "ArangoDB: iter_data signed in as root until now; from now on as iter_user (rw on its own database only)"
+    A_USER=iter_user; A_PW=""
+  fi
   local fresh=1; $SUDO test -f "$DB_DIR/SERVER" && fresh=0
   FRESH_ADMIN=""
   if $SUDO test -f "$MARKER"; then
@@ -322,21 +387,55 @@ secrets() {
       say "no ITER_JWT_SECRET given: iter_data keeps its iter_data.secret file"
     else JWT="$(gen 48)"; say "generated a new ITER_JWT_SECRET"; fi
   fi
-  if [ -z "$ARANGO_PW" ]; then
+  if [ -z "$ARANGO_PW" ] && [ "$EXTERNAL" = 0 ]; then
     if [ "$fresh" = 0 ]; then ARANGO_PW=iter4dev; say "existing database, no Arango password given: assuming the old default"
     else ARANGO_PW="$(gen 24)"; say "generated an Arango root password (kept in $cur)"; fi
   fi
+  arango_settings
   [ -z "$LEGACY" ] || say "found an older install's settings in $LEGACY (used where nothing newer is given)"
   {
     [ -z "$ADMIN_PW" ] || echo "ITER_ADMIN_PASSWORD=$ADMIN_PW"
     [ -z "$JWT" ] || echo "ITER_JWT_SECRET=$JWT"
-    echo "ARANGO_ROOT_PASSWORD=$ARANGO_PW"
-    echo "ARANGO_URL=http://127.0.0.1:8529"
-    echo "ARANGO_USER=root"
-    echo "ARANGO_PASSWORD=$ARANGO_PW"
-    echo "ARANGO_DB=iter5"
+    [ -z "$ARANGO_PW" ] || echo "ARANGO_ROOT_PASSWORD=$ARANGO_PW"
+    echo "ARANGO_URL=$A_URL"
+    echo "ARANGO_USER=$A_USER"
+    echo "ARANGO_PASSWORD=$A_PW"
+    echo "ARANGO_DB=$A_DB"
+    [ -z "$A_FP" ] || echo "ARANGO_CERT_FINGERPRINT=$A_FP"
+    [ -z "$A_CA" ] || echo "ARANGO_CA_CERT=$A_CA"
+    [ -z "$A_PLAIN" ] || echo "ARANGO_ALLOW_PLAIN_HTTP=$A_PLAIN"
     echo "ITER_EMBED_MODEL=/opt/iter/models/all-MiniLM-L6-v2"
   } | put 640 root:iter "$cur"
+}
+
+# iter's ArangoDB user, password and database, and how an external one is reached
+arango_settings() {
+  [ -z "$A_PW" ] || [ "$A_PW" != "$ARANGO_PW" ] || A_PW=""   # never root's password
+  if [ -z "$A_PW" ]; then
+    [ "$EXTERNAL" = 0 ] || [ -n "$ARANGO_PW" ] || die "the ArangoDB at $A_URL needs ARANGO_PASSWORD ($A_USER's password) or ARANGO_ROOT_PASSWORD (to create $A_USER), in the environment or --env-file"
+    A_PW="$(gen 24)"; say "ArangoDB: generated a password for user $A_USER (kept in /etc/iter/data.env)"
+  fi
+  A_DB="$A_DB_OPT"; [ -n "$A_DB" ] || A_DB="$(pickv ARANGO_DB)"
+  if [ -z "$A_DB" ]; then A_DB=iter_db
+  elif [ -z "$A_DB_OPT" ] && [ "$A_DB" != iter_db ]; then say "ArangoDB: keeping database $A_DB from the existing install (--arango-db to choose another)"; fi
+  A_FP="" A_CA="" A_PLAIN=""
+  [ "$EXTERNAL" = 1 ] || { say "ArangoDB: local, user $A_USER, database $A_DB"; return 0; }
+  A_FP="$A_FP_OPT"; [ -n "$A_FP" ] || A_FP="$(pickv ARANGO_CERT_FINGERPRINT)"
+  A_PLAIN="$(pickv ARANGO_ALLOW_PLAIN_HTTP)"
+  if [ -n "$A_CA_SRC" ]; then
+    [ -r "$A_CA_SRC" ] || die "--arango-ca-cert $A_CA_SRC: cannot read it"
+    put 644 root:root /etc/iter/arango-ca.crt <"$A_CA_SRC"
+    A_CA=/etc/iter/arango-ca.crt
+  else
+    A_CA="$(pickv ARANGO_CA_CERT)"
+  fi
+  case "$A_URL" in
+    https://*) [ -n "$A_FP$A_CA" ] || say "ArangoDB: $A_URL is checked against the public CAs (self-signed? give --arango-fingerprint)" ;;
+    http://*) case "$A_PLAIN" in 1|true|yes) say "ArangoDB: plain http to $A_URL (ARANGO_ALLOW_PLAIN_HTTP: a private network only)" ;;
+                *) die "--arango-url $A_URL: use https:// (or ARANGO_ALLOW_PLAIN_HTTP=1 on a private network)" ;; esac ;;
+    *) die "--arango-url $A_URL: not an http(s):// URL" ;;
+  esac
+  say "ArangoDB: $A_URL, user $A_USER, database $A_DB${A_FP:+, pinned certificate}${A_CA:+, CA $A_CA}"
 }
 
 # ---------------------------------------------------------------- iter user + units
@@ -429,8 +528,11 @@ install_units() {
   put 755 root:root /usr/local/bin/iter-backup <"$SRC/iter-backup"
   put 755 root:root /usr/local/bin/iter-admin-cleanup <"$SRC/iter-admin-cleanup"
   for u in "${UNITS[@]}"; do
+    # an external ArangoDB: no local arangodb3 unit to need or wait for
+    [ "$EXTERNAL" = 0 ] || [ "$u" != arangodb3.service ] || continue
     sed -e "s|@PORT@|$PORT|g" -e "s|@TLS_ARGS@|$TLS_ARGS|g" -e "s|@DB_DIR@|$DB_DIR|g" -e "s|@MEM_MAX@|${MEM_MIB}M|g" -e "s|@ARANGO_MEM@|${ARANGO_MIB}M|g" \
-      "$SRC/systemd/$u" | put 644 root:root "/etc/systemd/system/$u"
+      "$SRC/systemd/$u" | { if [ "$EXTERNAL" = 1 ]; then sed -e '/^Requires=arangodb3.service$/d' -e '/^After=arangodb3.service$/d' -e 's/^After=arangodb3.service /After=/'; else cat; fi; } \
+      | put 644 root:root "/etc/systemd/system/$u"
   done
 }
 
@@ -440,7 +542,7 @@ start_services() {
     say "systemd is not running here (fine for a dry run; a real install needs it)"
   fi
   run systemctl daemon-reload
-  run systemctl enable --now arangodb3
+  [ "$EXTERNAL" = 1 ] || run systemctl enable --now arangodb3
   run systemctl enable iter-data
   run systemctl restart iter-data
   run systemctl enable --now iter-backup.timer
@@ -487,7 +589,8 @@ do_install() {
     say "  the webui makes you change it at the first sign-in (a new password needs 12+ characters); then it is removed from /etc/iter/data.env"
   fi
   admin_cleanup
-  say "backups every 6h -> $BACKUP_DIR; Arango console: ssh -L 8529:127.0.0.1:8529 <this host>, then http://127.0.0.1:8529/"
+  if [ "$EXTERNAL" = 1 ]; then say "backups of database $A_DB every 6h -> $BACKUP_DIR (from $A_URL)"
+  else say "backups of database $A_DB every 6h -> $BACKUP_DIR; Arango console: ssh -L 8529:127.0.0.1:8529 <this host>, then http://127.0.0.1:8529/"; fi
 }
 
 # the first-boot admin password, once the admin has chosen their own (see iter-admin-cleanup)
@@ -512,7 +615,12 @@ tls_report() {
 do_status() {
   local s
   admin_cleanup
-  for s in arangodb3 iter-data iter-backup.timer; do printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"; done
+  local aurl; aurl="$(rootenvval ARANGO_URL /etc/iter/data.env)"
+  for s in arangodb3 iter-data iter-backup.timer; do
+    [ "$s" != arangodb3 ] || [ -f /etc/systemd/system/arangodb3.service ] || continue
+    printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"
+  done
+  printf '%-18s %s, user %s, database %s\n' arangodb "${aurl:-?}" "$(rootenvval ARANGO_USER /etc/iter/data.env)" "$(rootenvval ARANGO_DB /etc/iter/data.env)"
   printf '%-18s %s\n' iter_data "$(stat -c 'installed %y' /opt/iter/bin/iter_data 2>/dev/null | cut -c1-20 || echo "not installed")"
   TLS_MODE="$(rootenvval ITER_TLS_MODE /etc/iter/tls.env)"; TLS_MODE="${TLS_MODE:-auto}"
   local scheme=https fp; [ "$TLS_MODE" != off ] || scheme=http
@@ -522,6 +630,22 @@ do_status() {
   systemctl list-timers iter-backup.timer --no-pager 2>/dev/null | sed -n 2p || true
   local dir; dir="$(rootenvval ITER_BACKUP_DIR /etc/iter/backup.env)"
   $SUDO sh -c "ls -1t '${dir:-/var/backups/iter}'/iter5-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
+}
+
+# load a backup's database back into iter's database (only that one), with
+# iter-data stopped so nothing writes meanwhile; its env and secret files are
+# left as they are (they are in the tar, for a move to a new machine)
+do_restore() {
+  [ "$DRY" = 1 ] || $SUDO test -f "$RESTORE_FILE" || die "$RESTORE_FILE not found"
+  say "restoring database $(rootenvval ARANGO_DB /etc/iter/data.env) from $RESTORE_FILE (its collections are replaced)"
+  run systemctl stop iter-data
+  # shellcheck disable=SC2016  # expanded by the inner shell, which reads data.env
+  run bash -c 'set -a; . /etc/iter/data.env; [ ! -f /etc/iter/backup.env ] || . /etc/iter/backup.env; set +a; exec /usr/local/bin/iter-backup --restore "$1"' _ "$RESTORE_FILE" \
+    || { run systemctl start iter-data; die "restore failed; iter-data started again"; }
+  run systemctl start iter-data
+  PORT="$(sed -n 's/.*--listen 0.0.0.0:\([0-9]*\).*/\1/p' /etc/systemd/system/iter-data.service 2>/dev/null | head -1)"; PORT="${PORT:-8400}"
+  TLS_MODE="$(rootenvval ITER_TLS_MODE /etc/iter/tls.env)"; SCHEME=https; [ "${TLS_MODE:-auto}" != off ] || SCHEME=http
+  wait_health
 }
 
 do_uninstall() {
@@ -539,5 +663,6 @@ case "$CMD" in
   install) do_install ;;
   status) do_status ;;
   backup) run systemctl start iter-backup.service; [ "$DRY" = 1 ] || $SUDO journalctl -u iter-backup --no-pager -n 1 -o cat ;;
+  restore) do_restore ;;
   uninstall) do_uninstall ;;
 esac

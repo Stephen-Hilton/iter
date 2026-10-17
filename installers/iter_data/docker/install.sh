@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install iter_data as one Docker container (ArangoDB CE 3.12 + iter_data):
-# API + webui on :8400, the Arango web console on 127.0.0.1:8630.
+# API + webui on :8400, the Arango web console on 127.0.0.1:8630. With --arango-url
+# the container runs iter_data only, against an ArangoDB you already have.
 #
 #   ./install.sh [install] [options]  build the image here and (re)start the container
 #   ./install.sh status [--name NAME] the container, health, the TLS certificate fingerprint;
@@ -10,7 +11,7 @@
 # Options:
 #   --version TAG        release to download the binary (and, when piped, these files) from [latest]
 #   --binary PATH        use this iter_data linux binary instead of downloading one
-#   --env-file PATH      take ITER_ADMIN_PASSWORD, ITER_JWT_SECRET (and ARANGO_ROOT_PASSWORD) from it
+#   --env-file PATH      take ITER_ADMIN_PASSWORD, ITER_JWT_SECRET and the ARANGO_* settings below from it
 #   --port N             host port for the API + webui [8400; ITER_PORT]
 #   --arango-port N      host port for the Arango console on 127.0.0.1, 0 = not published [8630]
 #   --data-dir DIR       host folder for everything that persists [~/.iter/iter_data]
@@ -24,6 +25,23 @@
 #                        e.g. the name engines and browsers use; only read when it is first made
 #   --tls off|auto       off = plain HTTP (only behind a TLS proxy on this host); auto = the
 #                        self-signed certificate again (drops an earlier --tls-cert or --tls off)
+#   --arango-url URL     use an existing ArangoDB at URL (https://host:8529) instead of the one
+#                        in the container: no arangod runs and no console port is published.
+#                        Also read from ARANGO_URL (environment or --env-file). `local` = back to
+#                        the ArangoDB in the container [local]
+#   --arango-fingerprint FP   pin that ArangoDB's certificate (sha256:<64 hex>; comma-separated
+#                        for a rotation): the way to trust a self-signed certificate
+#   --arango-ca-cert PATH     trust this CA (PEM) for its certificate instead; copied into the
+#                        data folder. With neither, only the public CAs are trusted
+#   --arango-db NAME     iter's database [iter_db; an existing install keeps its own]
+#   --arango-user NAME   the Arango user iter_data signs in as, rw on that database only [iter_user]
+#
+# ArangoDB passwords come from the environment or --env-file: ARANGO_PASSWORD is the
+# user's own (made once when not given; never root's), ARANGO_ROOT_PASSWORD lets
+# iter_data create that user and database on first start (the container's own ArangoDB
+# always has one; an external one needs it only when the user does not exist yet).
+# Plain http:// to an external ArangoDB is refused unless ARANGO_ALLOW_PLAIN_HTTP=1
+# (a private network only).
 #   --dry-run            print every action, change nothing
 #   -h, --help           this text
 #
@@ -57,6 +75,7 @@ CMD=install
 FILES=(Dockerfile compose.yml compose.console.yml entrypoint.sh)
 MODEL_SHA="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
 TLS_CERT_SRC="" TLS_KEY_SRC="" TLS_MODE="" TLS_NAMES=()
+A_URL_OPT="" A_FP_OPT="" A_CA_SRC="" A_DB_OPT="" A_USER_OPT=""
 
 say() { echo "[iter_data/docker] $*"; }
 die() { echo "[iter_data/docker] ERROR: $*" >&2; exit 1; }
@@ -82,6 +101,11 @@ while [ $# -gt 0 ]; do
     --tls-key) TLS_KEY_SRC="$2"; shift 2 ;;
     --tls-name) TLS_NAMES+=("$2"); shift 2 ;;
     --tls) TLS_MODE="$2"; shift 2 ;;
+    --arango-url) A_URL_OPT="$2"; shift 2 ;;
+    --arango-fingerprint) A_FP_OPT="$2"; shift 2 ;;
+    --arango-ca-cert) A_CA_SRC="$2"; shift 2 ;;
+    --arango-db) A_DB_OPT="$2"; shift 2 ;;
+    --arango-user) A_USER_OPT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown option $1" ;;
@@ -94,6 +118,7 @@ case "$TLS_MODE" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate 
 [ -z "$TLS_CERT_SRC" ] || [ "$TLS_MODE" != off ] || die "--tls off and --tls-cert contradict each other"
 [ -z "$TLS_CERT_SRC" ] || [ -f "$TLS_CERT_SRC" ] || die "--tls-cert $TLS_CERT_SRC does not exist"
 [ -z "$TLS_KEY_SRC" ] || [ -f "$TLS_KEY_SRC" ] || die "--tls-key $TLS_KEY_SRC does not exist"
+[ -z "$A_CA_SRC" ] || [ -f "$A_CA_SRC" ] || die "--arango-ca-cert $A_CA_SRC does not exist"
 
 if [ -z "$DATA_DIR" ]; then
   DATA_DIR="$IHOME/iter_data"
@@ -243,8 +268,94 @@ pick() {  # pick KEY -> --env-file value, else the existing env file's, else emp
 [ -z "$ENV_SRC" ] || [ -f "$ENV_SRC" ] || die "--env-file $ENV_SRC does not exist"
 ADMIN_PW="$(pick ITER_ADMIN_PASSWORD)"
 JWT="$(pick ITER_JWT_SECRET)"
-ARANGO_PW="$(pick ARANGO_ROOT_PASSWORD)"
-[ -n "$ARANGO_PW" ] || ARANGO_PW="${ARANGO_ROOT_PASSWORD:-}"
+
+# ---- ArangoDB: the container's own (local), or an existing one at --arango-url
+# the host of a URL, without brackets or port; local = this container's own ArangoDB
+url_host() { local h="${1#*://}"; h="${h%%/*}"; case "$h" in \[*) h="${h%%]*}"; h="${h#[}" ;; *) h="${h%%:*}" ;; esac; printf '%s' "$h"; }
+is_local() { [ -z "$1" ] || [ "$1" = local ] && return 0; case "$(url_host "$1")" in 127.*|localhost|::1) return 0 ;; esac; return 1; }
+OLD_URL="$(envval ARANGO_URL "$ENV_PATH")"
+if [ -n "$A_URL_OPT" ]; then A_URL="$A_URL_OPT"
+elif [ -n "${ARANGO_URL:-}" ]; then A_URL="$ARANGO_URL"
+elif [ -n "$ENV_SRC" ] && [ -n "$(envval ARANGO_URL "$ENV_SRC")" ]; then A_URL="$(envval ARANGO_URL "$ENV_SRC")"
+else A_URL="$OLD_URL"; fi
+is_local "$A_URL" && A_URL=""
+# the existing env file's ArangoDB settings count only for the same ArangoDB
+SAME=0
+if { [ -z "$A_URL" ] && is_local "$OLD_URL"; } || [ "$A_URL" = "$OLD_URL" ]; then SAME=1; fi
+apick() {  # apick KEY -> --env-file, else the environment, else the env file (same ArangoDB only)
+  local v=""
+  [ -n "$ENV_SRC" ] && v="$(envval "$1" "$ENV_SRC")"
+  [ -n "$v" ] || v="${!1:-}"
+  [ -n "$v" ] || [ "$SAME" = 0 ] || v="$(envval "$1" "$ENV_PATH")"
+  printf '%s' "$v"
+}
+A_USER="$A_USER_OPT"; [ -n "$A_USER" ] || A_USER="$(apick ARANGO_USER)"; [ -n "$A_USER" ] || A_USER=iter_user
+[ "$A_USER" != root ] || die "ARANGO_USER root: iter_data signs in as a user of its own (rw on its database only); pick another name"
+# empty = iter_data's default iter_db, or (container ArangoDB) the database iter5 an older install made
+A_DB="$A_DB_OPT"; [ -n "$A_DB" ] || A_DB="$(apick ARANGO_DB)"
+A_ROOT="$(apick ARANGO_ROOT_PASSWORD)"
+A_PW="$(apick ARANGO_PASSWORD)"
+# the container's ArangoDB secrets, kept aside while an external one is in use
+STASH_ROOT="$(envval ITER_LOCAL_ARANGO_ROOT_PASSWORD "$ENV_PATH")"
+STASH_PW="$(envval ITER_LOCAL_ARANGO_PASSWORD "$ENV_PATH")"
+if is_local "$OLD_URL" && [ -f "$ENV_PATH" ]; then
+  STASH_ROOT="$(envval ARANGO_ROOT_PASSWORD "$ENV_PATH")"; STASH_PW="$(envval ARANGO_PASSWORD "$ENV_PATH")"
+fi
+A_FP="" A_CA="" A_PLAIN=""
+CA_DIR="$DATA_DIR/arango-ca"
+A_CA_IN=/var/lib/iter_data/arango-ca/ca.pem
+if [ -z "$A_URL" ]; then
+  [ -z "$A_FP_OPT$A_CA_SRC" ] || die "--arango-fingerprint / --arango-ca-cert are for an external ArangoDB (--arango-url)"
+  [ -n "$A_ROOT" ] || A_ROOT="$STASH_ROOT"
+  if [ -z "$A_ROOT" ]; then
+    if present "$DATA_DIR/arango/SERVER"; then
+      A_ROOT=iter4dev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
+    else
+      A_ROOT="$(gen 24)"; say "generated an Arango root password (kept in $ENV_PATH)"
+    fi
+  fi
+  [ -n "$A_PW" ] || A_PW="$STASH_PW"
+  if [ -z "$A_PW" ] || [ "$A_PW" = "$A_ROOT" ]; then A_PW="$(gen 24)"; say "generated a password for Arango user $A_USER (kept in $ENV_PATH)"; fi
+  say "ArangoDB: the container's own; iter_data signs in as $A_USER (rw on ${A_DB:-iter_db} only)"
+  STASH_ROOT="" STASH_PW=""
+else
+  case "$A_URL" in
+    https://*) ;;
+    http://*)
+      case "$(apick ARANGO_ALLOW_PLAIN_HTTP)" in
+        1|true|yes|TRUE|YES) A_PLAIN=1; say "WARNING: plain http to $A_URL (ARANGO_ALLOW_PLAIN_HTTP): passwords and data cross the network unencrypted" ;;
+        *) die "--arango-url $A_URL: plain http:// to another machine is refused; use https:// (with --arango-fingerprint or --arango-ca-cert), or set ARANGO_ALLOW_PLAIN_HTTP=1 on a private network" ;;
+      esac ;;
+    *) die "--arango-url $A_URL: must start with https:// or http://" ;;
+  esac
+  A_FP="$A_FP_OPT"; [ -n "$A_FP" ] || A_FP="$(apick ARANGO_CERT_FINGERPRINT)"
+  if [ -n "$A_FP" ]; then
+    fps=""
+    for f in ${A_FP//,/ }; do
+      h="${f#sha256:}"; h="${h#SHA256:}"; h="$(printf '%s' "${h//:/}" | tr 'A-F' 'a-f')"
+      [ ${#h} = 64 ] && [ -z "${h//[0-9a-f]/}" ] || die "--arango-fingerprint $f: not a sha256 fingerprint (sha256:<64 hex>)"
+      fps="${fps:+$fps,}sha256:$h"
+    done
+    A_FP="$fps"
+  fi
+  if [ -n "$A_CA_SRC" ]; then
+    A_CA="$A_CA_IN"
+    say "ArangoDB CA: $A_CA_SRC (copied into $CA_DIR)"
+    run mkdir -p "$CA_DIR"
+    run install -m 644 "$A_CA_SRC" "$CA_DIR/ca.pem"
+  else
+    A_CA="$(apick ARANGO_CA_CERT)"
+  fi
+  if [ -z "$A_PW" ]; then
+    [ -n "$A_ROOT" ] || die "external ArangoDB: give ARANGO_PASSWORD (user $A_USER's), or ARANGO_ROOT_PASSWORD so iter_data can create $A_USER (environment or --env-file)"
+    A_PW="$(gen 24)"; say "generated a password for Arango user $A_USER (root creates the user on first start; kept in $ENV_PATH)"
+  fi
+  [ "$A_PW" != "$A_ROOT" ] || die "ARANGO_PASSWORD is root's password: give $A_USER a password of its own"
+  trust="public CAs"; [ -z "$A_CA" ] || trust="CA $A_CA"; [ -z "$A_FP" ] || trust="pinned $A_FP"
+  case "$A_URL" in http://*) trust="none (plain http)" ;; esac
+  say "ArangoDB: $A_URL (trust: $trust), user $A_USER, database ${A_DB:-iter_db}; no arangod in the container"
+  ARANGO_PORT=0
+fi
 FRESH_ADMIN=""
 if [ -n "$ADMIN_PW" ] && admin_changed; then
   say "the admin has chosen their own password: ITER_ADMIN_PASSWORD is left out of $ENV_PATH"; ADMIN_PW=""
@@ -258,15 +369,9 @@ if [ -z "$JWT" ]; then
 fi
 if [ -z "$ADMIN_PW" ]; then
   # iter_data only reads it when it creates admin, i.e. on an empty database
-  if present "$DATA_DIR/arango/SERVER"; then say "existing database: admin keeps its password"
+  if [ -z "$A_URL" ] && present "$DATA_DIR/arango/SERVER"; then say "existing database: admin keeps its password"
+  elif [ -n "$A_URL" ] && present "$DATA_DIR/iter/iter_data.secret"; then say "iter_data has run here before: admin keeps its password"
   else ADMIN_PW="$(gen 20)"; FRESH_ADMIN=1; fi
-fi
-if [ -z "$ARANGO_PW" ]; then
-  if present "$DATA_DIR/arango/SERVER"; then
-    ARANGO_PW=iter4dev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
-  else
-    ARANGO_PW="$(gen 24)"; say "generated an Arango root password (kept in $ENV_PATH)"
-  fi
 fi
 
 # TLS: the flags given now, else what the secrets file kept from an earlier run.
@@ -294,12 +399,21 @@ if [ "$TLS_OFF" = off ]; then say "TLS: off (plain HTTP): only for iter_data beh
 elif [ -n "$TLS_CUSTOM" ]; then [ -n "$TLS_CERT_SRC" ] || say "TLS: your certificate in $CTLS_DIR (kept from the last run)"
 else say "TLS: a self-signed certificate (made on first start, kept in $DATA_DIR/iter)${NAMES:+, extra names $NAMES}"; fi
 if [ "$DRY" = 1 ]; then
-  echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_ROOT_PASSWORD, TLS settings"
+  echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_* settings, TLS settings"
 else
   ( umask 077
     { [ -z "$ADMIN_PW" ] || echo "ITER_ADMIN_PASSWORD=$ADMIN_PW"
       [ -z "$JWT" ] || echo "ITER_JWT_SECRET=$JWT"
-      echo "ARANGO_ROOT_PASSWORD=$ARANGO_PW"
+      [ -z "$A_URL" ] || echo "ARANGO_URL=$A_URL"
+      echo "ARANGO_USER=$A_USER"
+      echo "ARANGO_PASSWORD=$A_PW"
+      [ -z "$A_ROOT" ] || echo "ARANGO_ROOT_PASSWORD=$A_ROOT"
+      [ -z "$A_DB" ] || echo "ARANGO_DB=$A_DB"
+      [ -z "$A_FP" ] || echo "ARANGO_CERT_FINGERPRINT=$A_FP"
+      [ -z "$A_CA" ] || echo "ARANGO_CA_CERT=$A_CA"
+      [ -z "$A_PLAIN" ] || echo "ARANGO_ALLOW_PLAIN_HTTP=1"
+      [ -z "$STASH_ROOT" ] || echo "ITER_LOCAL_ARANGO_ROOT_PASSWORD=$STASH_ROOT"
+      [ -z "$STASH_PW" ] || echo "ITER_LOCAL_ARANGO_PASSWORD=$STASH_PW"
       [ -z "$TLS_OFF" ] || echo "ITER_TLS=off"
       [ -z "$TLS_CUSTOM" ] || printf 'ITER_TLS_CERT=%s\nITER_TLS_KEY=%s\n' "$CTLS_CERT" "$CTLS_KEY"
       [ -z "$NAMES" ] || echo "ITER_TLS_NAMES=$NAMES"
@@ -332,6 +446,7 @@ for _ in $(seq 1 180); do
     else say "webui: $SCHEME://127.0.0.1:$PORT/  (sign in as admin with the password you chose)"; fi
     if [ -n "$FRESH_ADMIN" ]; then
       say "admin password (shown once; also in $ENV_PATH until you change it): $ADMIN_PW"
+      [ -z "$A_URL" ] || say "  (used only if database ${A_DB:-iter_db} has no admin yet)"
       say "  the webui makes you change it at the first sign-in (a new password needs 12+ characters);"
       say "  then \`$0 status\` (or the next run) removes it from $ENV_PATH"
     fi

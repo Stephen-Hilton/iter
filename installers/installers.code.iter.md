@@ -23,8 +23,8 @@ straight from raw.githubusercontent.com) and it installs one program on one kind
 
 | folder | installs |
 |---|---|
-| `iter_data/docker/` | the all-in-one image (ArangoDB 3.12.12 + iter_data on https :8400, Arango console on 127.0.0.1:8630) on Debian bookworm-slim |
-| `iter_data/linux/` | ArangoDB + iter_data + backups as systemd services on Debian, Ubuntu, Arch or a WSL2 distro |
+| `iter_data/docker/` | the all-in-one image (ArangoDB 3.12.12 + iter_data on https :8400, Arango console on 127.0.0.1:8630) on Debian bookworm-slim, or iter_data alone against an existing ArangoDB (`--arango-url`) |
+| `iter_data/linux/` | ArangoDB + iter_data + per-database backups (and `restore`) as systemd services on Debian, Ubuntu, Arch or a WSL2 distro, or iter_data + backups against an existing ArangoDB (`--arango-url`) |
 | `iter_data/linux_aws/` | the same on EC2 Amazon Linux 2023 (x86_64 or Graviton), with EBS and security-group guidance |
 | `iter_data/aws/` | a CloudFormation stack (`iter_data.cfn.yaml`): an AL2023 instance whose first boot runs the release's `linux_aws/install.sh`, an encrypted EBS data volume, an Elastic IP, a port-8400-only security group, and the admin password and TLS certificate fingerprint in SSM Parameter Store |
 | `iter_engine/linux/` | the engine as the systemd service `iter-engine` |
@@ -62,6 +62,15 @@ pin the certificate with `iter_engine key trust --fingerprint` (from `--fingerpr
 after installing the binary and before the key step, and check the pinned certificate the same way in
 their own API calls (curl `--pinnedpubkey` after an openssl fingerprint check; a pinned .NET request on
 Windows).
+
+ArangoDB: iter_data signs in as `iter_user` with `rw` on `iter_db` only. The installers generate and keep
+that user's password, and keep root's password for iter_data to create the user and database on first
+start. `--arango-url` (or `ARANGO_URL`) points them at an existing ArangoDB instead, with
+`--arango-fingerprint` / `--arango-ca-cert` for its certificate and `--arango-db` / `--arango-user`.
+linux and linux_aws then install only the Arango clients and drop the `arangodb3` unit and dependency;
+docker skips arangod; aws passes them as stack parameters, with the passwords and CA in SSM. Existing
+installs keep the database `iter5`. `iter-backup` dumps only that database, as iter's user, checking an
+https certificate first; `install.sh restore FILE` loads it back.
 
 The first-boot admin password must be changed at the first sign-in; once iter_data writes
 `admin_password_changed`, the installers drop `ITER_ADMIN_PASSWORD` (linux/linux_aws: the

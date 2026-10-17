@@ -51,8 +51,8 @@ struct Args {
     /// ArangoDB server URL (ARANGO_URL env wins over the default)
     #[arg(long, default_value = "")]
     arango_url: String,
-    /// ArangoDB database name (created if missing)
-    #[arg(long, default_value = "iter5")]
+    /// ArangoDB database name (ARANGO_DB env wins; created if missing)
+    #[arg(long, default_value = arango::DEFAULT_DB)]
     arango_db: String,
     /// listen address (ITER_PORT, when set, replaces the default port 8400)
     #[arg(long, default_value = "")]
@@ -244,24 +244,51 @@ async fn main() {
     }
 }
 
+/// ArangoDB from the environment (which wins over the flags):
+/// ARANGO_URL, ARANGO_DB, ARANGO_USER [iter_user] and ARANGO_PASSWORD;
+/// ARANGO_ROOT_PASSWORD only to set that user and database up;
+/// ARANGO_CERT_FINGERPRINT (sha256:…, comma-separated) or ARANGO_CA_CERT (a
+/// PEM file) for HTTPS; ARANGO_ALLOW_PLAIN_HTTP=1 for http:// to another
+/// machine on a private network.
 async fn open_arango(args: &Args) -> arango::ArangoBackend {
-    let url = std::env::var("ARANGO_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .or_else(|| Some(args.arango_url.clone()).filter(|u| !u.trim().is_empty()))
-        .unwrap_or_else(|| "http://127.0.0.1:8529".into());
-    let db = std::env::var("ARANGO_DB").ok().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| args.arango_db.clone());
-    let user = std::env::var("ARANGO_USER").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "root".into());
-    let password = std::env::var("ARANGO_PASSWORD").unwrap_or_default();
-    match arango::ArangoBackend::new(&url, &db, &user, &password).await {
+    let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let fail = |msg: String| -> ! {
+        eprintln!("[iter_data] arango: {msg}");
+        std::process::exit(2);
+    };
+    let mut pins = Vec::new();
+    for p in env("ARANGO_CERT_FINGERPRINT").unwrap_or_default().split([',', ' ']).filter(|p| !p.is_empty()) {
+        match iter_core::enginekey::normalize_fingerprint(p) {
+            Some(fp) => pins.push(fp),
+            None => fail(format!("ARANGO_CERT_FINGERPRINT {p:?} is not a sha256 fingerprint")),
+        }
+    }
+    let ca_pem = env("ARANGO_CA_CERT").map(|path| std::fs::read(&path).unwrap_or_else(|e| fail(format!("ARANGO_CA_CERT {path}: {e}"))));
+    let cfg = arango::ArangoConfig {
+        url: env("ARANGO_URL").or_else(|| Some(args.arango_url.trim().to_string()).filter(|u| !u.is_empty())).unwrap_or_else(|| "http://127.0.0.1:8529".into()),
+        db: env("ARANGO_DB").unwrap_or_else(|| args.arango_db.clone()),
+        user: env("ARANGO_USER").unwrap_or_else(|| arango::DEFAULT_USER.into()),
+        password: std::env::var("ARANGO_PASSWORD").unwrap_or_default(),
+        root_password: std::env::var("ARANGO_ROOT_PASSWORD").unwrap_or_default(),
+        allow_plain_http: env("ARANGO_ALLOW_PLAIN_HTTP").is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+        pins,
+        ca_pem,
+    };
+    let tls = if !cfg.url.to_ascii_lowercase().starts_with("https://") {
+        "plain http"
+    } else if !cfg.pins.is_empty() {
+        "https, pinned certificate"
+    } else if cfg.ca_pem.is_some() {
+        "https, ARANGO_CA_CERT"
+    } else {
+        "https, public CAs"
+    };
+    match arango::ArangoBackend::open(&cfg).await {
         Ok(b) => {
-            println!("[iter_data] arango {url} database '{db}' ready");
+            println!("[iter_data] arango {} ({tls}) database '{}' as user '{}' ready", cfg.url, cfg.db, cfg.user);
             b
         }
-        Err(e) => {
-            eprintln!("[iter_data] arango init failed: {e}");
-            std::process::exit(2);
-        }
+        Err(e) => fail(format!("init failed: {e}")),
     }
 }
 

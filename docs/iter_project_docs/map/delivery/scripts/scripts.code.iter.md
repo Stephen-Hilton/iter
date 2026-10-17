@@ -30,8 +30,8 @@ The commands that switch iter5 on and prove the whole thing works.
   kills a binary copied over a running one), starts or reuses the dev
   ArangoDB container on :8529 and runs iter_data natively. Every mode waits
   for `/health`. `ITER_PORT` changes the port (default 8400).
-- **`test/e2e.sh [--live] [--keep]`.** Creates database `iter5_e2e_<random>` on the
-  dev ArangoDB, starts iter_data and ONE engine, copies `test/e2e/sample5` twice
+- **`test/e2e.sh [--live] [--keep]`.** Has iter_data create database `iter5_e2e_<random>`
+  and a user of the same name on the dev ArangoDB (root's password, as on a fresh install), starts iter_data and ONE engine, copies `test/e2e/sample5` twice
   into scratch git repos (two projects, both served by that engine), and
   checks, section by section: work-item round trips on the `mock` provider,
   file edit → node, node edit → file + commit, create / delete both ways,

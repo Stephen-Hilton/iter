@@ -1,6 +1,6 @@
 //! ArangoDB backend (iter4+, decided 2026-09-28): one document collection per
-//! logical table in database `--arango-db` (default "iter5"), reached over the
-//! plain HTTP API — no driver. Rows are `{_key, pk, sk, version, expires,
+//! logical table in database `--arango-db` (default "iter_db"), reached over
+//! ArangoDB's HTTP API — no driver. Rows are `{_key, pk, sk, version, expires,
 //! workid, body}`; `_key` is pk:sk with forbidden characters %-escaped, so a
 //! get is a primary-index hit, and a persistent [pk, sk] index serves query.
 //!
@@ -10,12 +10,30 @@
 //!
 //! The graph (vertex collection `node`, edge collection `link`, named graph
 //! `iter_map`) lives in the same database — see graph.rs.
+//!
+//! Sign-in (2026-10-17): iter_data works as its own Arango user (default
+//! `iter_user`) with Administrate (rw) on its own database only, so one
+//! ArangoDB server can hold other apps' databases too. `open` signs in as
+//! that user; when it cannot (no such user, no database, too little access)
+//! and ARANGO_ROOT_PASSWORD is set, root creates the user and the database
+//! and grants rw, then the user is tried again. Collections and indexes are
+//! always created by the user itself. Root's password is never stored.
+//!
+//! The connection is HTTPS to any other machine: a pinned certificate
+//! fingerprint (ARANGO_CERT_FINGERPRINT, for a self-signed certificate), a CA
+//! of your own (ARANGO_CA_CERT), or the public CAs. Plain http:// only to
+//! this machine, unless ARANGO_ALLOW_PLAIN_HTTP says the network is private.
 
 use crate::storage::{Storage, StorageError};
 use async_trait::async_trait;
 use iter_core::{VersionRow, now_utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+/// iter's own Arango user and database when ARANGO_USER / ARANGO_DB are not set.
+pub const DEFAULT_USER: &str = "iter_user";
+pub const DEFAULT_DB: &str = "iter_db";
 
 pub const GRAPH_NAME: &str = "iter_map";
 pub const NODE_COLL: &str = "node";
@@ -23,9 +41,28 @@ pub const LINK_COLL: &str = "link";
 /// seq counters; kept out of the generic row shape
 const VERSIONS_COLL: &str = "versions";
 
+/// Where and how to reach ArangoDB (main.rs: open_arango fills it in).
+#[derive(Debug, Clone, Default)]
+pub struct ArangoConfig {
+    /// http(s)://host:port
+    pub url: String,
+    pub db: String,
+    pub user: String,
+    pub password: String,
+    /// only to set up `user` and `db` when the user cannot (see `open`)
+    pub root_password: String,
+    /// pinned server certificate fingerprints (64 lowercase hex each)
+    pub pins: Vec<String>,
+    /// a PEM certificate authority trusted beside the public ones
+    pub ca_pem: Option<Vec<u8>>,
+    /// plain http:// to another machine (a private network) is allowed
+    pub allow_plain_http: bool,
+}
+
+#[derive(Clone)]
 pub struct ArangoBackend {
     http: reqwest::Client,
-    /// http://host:port
+    /// http(s)://host:port
     server: String,
     db: String,
     user: String,
@@ -49,7 +86,33 @@ impl std::fmt::Display for ArangoErr {
 pub const ERR_CONFLICT: i64 = 1200;
 pub const ERR_UNIQUE: i64 = 1210;
 const ERR_DUPLICATE_NAME: i64 = 1207;
+const ERR_DB_NOT_FOUND: i64 = 1228;
 const ERR_GRAPH_DUPLICATE: i64 = 1925;
+
+/// Arango refuses a user that does not exist, gives a wrong password, has no
+/// access to the database, or asks for a database that does not exist, all
+/// with the same 401 (and too little access with 403).
+fn denied(e: &ArangoErr) -> bool {
+    e.code == 401 || e.code == 403
+}
+
+/// Why the user could not be made ready: root may fix it, or not.
+enum Setup {
+    NeedsRoot(String),
+    Fail(StorageError),
+}
+
+/// An error with its causes (reqwest puts the TLS reason in a source).
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        cur = c.source();
+    }
+    s
+}
 
 fn berr<E: std::fmt::Display>(e: E) -> StorageError {
     StorageError::Backend(e.to_string())
@@ -93,35 +156,149 @@ pub fn doc_key(pk: &str, sk: &str) -> String {
 }
 
 impl ArangoBackend {
+    /// Open as `user` (the tests' root on a throwaway database).
+    #[cfg(test)]
     pub async fn new(server: &str, db: &str, user: &str, password: &str) -> Result<Self, StorageError> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(berr)?;
+        Self::open(&ArangoConfig { url: server.into(), db: db.into(), user: user.into(), password: password.into(), ..Default::default() }).await
+    }
+
+    /// Sign in as `cfg.user` and make its database ready. When the user
+    /// cannot (see `prepare`), root sets up the user, the database and the
+    /// grant, and the user tries once more; then the user creates every
+    /// collection and index (`ensure_schema`).
+    pub async fn open(cfg: &ArangoConfig) -> Result<Self, StorageError> {
         let b = Self {
-            http,
-            server: server.trim_end_matches('/').to_string(),
-            db: db.to_string(),
-            user: user.to_string(),
-            password: password.to_string(),
+            http: http_client(cfg)?,
+            server: cfg.url.trim().trim_end_matches('/').to_string(),
+            db: cfg.db.clone(),
+            user: cfg.user.clone(),
+            password: cfg.password.clone(),
         };
-        // arangod may still be starting (the container entrypoint races it)
-        let mut last = String::new();
-        for _ in 0..60 {
-            match b.raw("GET", "/_db/_system/_api/version", None).await {
-                Ok(_) => {
-                    last.clear();
-                    break;
-                }
-                Err(e) => last = e.to_string(),
+        b.wait_reachable().await?;
+        match b.prepare().await {
+            Ok(()) => {}
+            Err(Setup::Fail(e)) => return Err(e),
+            Err(Setup::NeedsRoot(why)) if b.user == "root" => return Err(StorageError::Backend(why)),
+            Err(Setup::NeedsRoot(why)) if cfg.root_password.is_empty() => {
+                return Err(StorageError::Backend(format!(
+                    "{why}. Set ARANGO_ROOT_PASSWORD (once) so iter_data can create user '{}' and database '{}' and grant it rw, or have the ArangoDB admin do that",
+                    b.user, b.db
+                )));
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        if !last.is_empty() {
-            return Err(StorageError::Backend(format!("arango at {server} not reachable: {last}")));
+            Err(Setup::NeedsRoot(why)) => {
+                println!("[iter_data] arango: {why}; setting it up as root");
+                let root = Self { user: "root".into(), password: cfg.root_password.clone(), ..b.clone() };
+                root.provision(&b.user, &b.password, &b.db).await?;
+                b.prepare().await.map_err(|e| match e {
+                    Setup::NeedsRoot(w) => StorageError::Backend(format!(
+                        "{w}, even after root set it up: user '{}' existed already, so ARANGO_PASSWORD must be its password",
+                        b.user
+                    )),
+                    Setup::Fail(e) => e,
+                })?;
+            }
         }
         b.ensure_schema().await?;
         Ok(b)
+    }
+
+    /// Wait for the server to answer at all (arangod may still be starting:
+    /// the container entrypoint races it). A refusal is an answer; a
+    /// certificate failure ends the wait at once.
+    async fn wait_reachable(&self) -> Result<(), StorageError> {
+        let mut last = String::new();
+        for _ in 0..60 {
+            match self.raw("GET", "/_api/version", None).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.code != 0 => return Ok(()),
+                Err(e) if e.msg.contains("certificate") => {
+                    return Err(StorageError::Backend(format!("arango at {}: {}", self.server, e.msg)));
+                }
+                Err(e) => last = e.msg,
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        Err(StorageError::Backend(format!("arango at {} not reachable: {last}", self.server)))
+    }
+
+    /// The user can open its database (creating it, when the user may) and
+    /// holds rw on it, so it can create collections and indexes as iter grows.
+    async fn prepare(&self) -> Result<(), Setup> {
+        let (user, db) = (&self.user, &self.db);
+        match self.dbcall("GET", "/_api/database/current", None).await {
+            Ok(_) => {}
+            // only a user with rights on _system learns this; it may create it
+            Err(e) if e.num == ERR_DB_NOT_FOUND => {
+                match self.raw("POST", "/_db/_system/_api/database", Some(&json!({"name": db}))).await {
+                    Ok(_) => println!("[iter_data] arango: user '{user}' created database '{db}'"),
+                    Err(e) if e.num == ERR_DUPLICATE_NAME => {}
+                    Err(e) if denied(&e) => {
+                        return Err(Setup::NeedsRoot(format!("database '{db}' does not exist and user '{user}' may not create databases")));
+                    }
+                    Err(e) => return Err(Setup::Fail(berr(e))),
+                }
+            }
+            Err(e) if denied(&e) => {
+                return Err(Setup::NeedsRoot(format!(
+                    "user '{user}' cannot open database '{db}' (no such user, a wrong ARANGO_PASSWORD, no access, or no such database)"
+                )));
+            }
+            Err(e) => return Err(Setup::Fail(berr(e))),
+        }
+        match self.raw("GET", &format!("/_db/_system/_api/user/{user}/database/{db}"), None).await {
+            Ok(v) if v["result"] == "rw" => Ok(()),
+            Ok(v) => Err(Setup::NeedsRoot(format!(
+                "user '{user}' has '{}' access to database '{db}' and needs rw (Administrate) to create collections and indexes",
+                v["result"].as_str().unwrap_or("none")
+            ))),
+            Err(e) => Err(Setup::Fail(berr(e))),
+        }
+    }
+
+    /// As root: create `user` (when missing) and `db` (when missing), and
+    /// grant the user rw on that database only. An existing user keeps its
+    /// password.
+    async fn provision(&self, user: &str, password: &str, db: &str) -> Result<(), StorageError> {
+        let root_err = |e: ArangoErr| {
+            if denied(&e) {
+                StorageError::Backend("root could not sign in to ArangoDB: is ARANGO_ROOT_PASSWORD right?".into())
+            } else {
+                berr(e)
+            }
+        };
+        match self.raw("GET", &format!("/_api/user/{user}"), None).await {
+            Ok(_) => {}
+            Err(e) if e.code == 404 => {
+                if password.is_empty() {
+                    return Err(StorageError::Backend(format!("ARANGO_PASSWORD is empty: give user '{user}' a password")));
+                }
+                if password == self.password {
+                    return Err(StorageError::Backend(format!("ARANGO_PASSWORD is root's password: give user '{user}' a password of its own")));
+                }
+                self.raw("POST", "/_api/user", Some(&json!({"user": user, "passwd": password, "active": true})))
+                    .await
+                    .map_err(root_err)?;
+                println!("[iter_data] arango: root created user '{user}'");
+            }
+            Err(e) => return Err(root_err(e)),
+        }
+        let dbs = self.raw("GET", "/_api/database", None).await.map_err(root_err)?;
+        let have = |n: &str| dbs["result"].as_array().is_some_and(|a| a.iter().any(|d| d == n));
+        if !have(db) {
+            if db == DEFAULT_DB && have("iter5") {
+                eprintln!("[iter_data] arango: NOTE database 'iter5' from an earlier iter exists; '{db}' starts empty. To keep iter5's data, set ARANGO_DB=iter5");
+            }
+            match self.raw("POST", "/_api/database", Some(&json!({"name": db}))).await {
+                Ok(_) => println!("[iter_data] arango: root created database '{db}'"),
+                Err(e) if e.num == ERR_DUPLICATE_NAME => {}
+                Err(e) => return Err(root_err(e)),
+            }
+        }
+        self.raw("PUT", &format!("/_api/user/{user}/database/{db}"), Some(&json!({"grant": "rw"})))
+            .await
+            .map_err(root_err)?;
+        println!("[iter_data] arango: root granted user '{user}' rw on database '{db}'");
+        Ok(())
     }
 
     pub fn db_name(&self) -> &str {
@@ -143,7 +320,7 @@ impl ArangoBackend {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req.send().await.map_err(|e| ArangoErr { code: 0, num: 0, msg: e.to_string() })?;
+        let resp = req.send().await.map_err(|e| ArangoErr { code: 0, num: 0, msg: chain(&e) })?;
         let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -225,12 +402,10 @@ impl ArangoBackend {
         unreachable!()
     }
 
+    /// Every collection, index and graph iter uses, created by the user
+    /// itself (rw on its database is enough); additive, so a restart changes
+    /// nothing.
     async fn ensure_schema(&self) -> Result<(), StorageError> {
-        match self.raw("POST", "/_db/_system/_api/database", Some(&json!({"name": self.db}))).await {
-            Ok(_) => {}
-            Err(e) if e.num == ERR_DUPLICATE_NAME => {}
-            Err(e) => return Err(berr(e)),
-        }
         let mut colls: Vec<(&str, u8)> = iter_core::TABLES
             .iter()
             .filter(|t| **t != VERSIONS_COLL)
@@ -322,6 +497,87 @@ impl ArangoBackend {
     /// (a server that lost or never had the database is not healthy).
     pub async fn ping(&self) -> bool {
         self.dbcall("GET", "/_api/version", None).await.is_ok()
+    }
+}
+
+/// Is `url` on this machine (127.0.0.1, ::1, localhost)?
+fn is_loopback_url(url: &str) -> bool {
+    let Some(h) = reqwest::Url::parse(url.trim()).ok().and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase())) else {
+        return false;
+    };
+    let h = h.trim_start_matches('[').trim_end_matches(']');
+    h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The HTTP client for `cfg.url`: HTTPS checked against the pinned
+/// fingerprints (when given), else the CA file plus the public CAs; plain
+/// http only to this machine unless `allow_plain_http`.
+fn http_client(cfg: &ArangoConfig) -> Result<reqwest::Client, StorageError> {
+    let lower = cfg.url.trim().to_ascii_lowercase();
+    let https = lower.starts_with("https://");
+    if !https && !lower.starts_with("http://") {
+        return Err(StorageError::Backend(format!("ARANGO_URL {} must start with https:// or http://", cfg.url)));
+    }
+    if !https && !cfg.allow_plain_http && !is_loopback_url(&cfg.url) {
+        return Err(StorageError::Backend(format!(
+            "refusing ARANGO_URL {}: ArangoDB on another machine is reached over https:// (pin its certificate with ARANGO_CERT_FINGERPRINT, or ARANGO_CA_CERT); set ARANGO_ALLOW_PLAIN_HTTP=1 only on a private network",
+            cfg.url
+        )));
+    }
+    let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60));
+    if https && !cfg.pins.is_empty() {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .map_err(berr)?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinVerifier { pins: cfg.pins.clone(), provider }))
+            .with_no_client_auth();
+        b = b.use_preconfigured_tls(tls);
+    } else if let Some(pem) = &cfg.ca_pem {
+        for c in reqwest::Certificate::from_pem_bundle(pem).map_err(|e| StorageError::Backend(format!("ARANGO_CA_CERT: {e}")))? {
+            b = b.add_root_certificate(c);
+        }
+    }
+    b.build().map_err(berr)
+}
+
+/// Accepts exactly the pinned certificates (a self-signed one needs no CA
+/// and no matching name), and checks the handshake signatures as usual.
+#[derive(Debug)]
+struct PinVerifier {
+    pins: Vec<String>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let fp = iter_core::enginekey::fingerprint_der(end_entity.as_ref());
+        if self.pins.contains(&fp) {
+            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        }
+        Err(rustls::Error::General(format!(
+            "ArangoDB presented certificate sha256:{fp}, which is not in ARANGO_CERT_FINGERPRINT"
+        )))
+    }
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &rustls::pki_types::CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -557,5 +813,79 @@ mod tests {
         let u = stamp_node("webui_user", "eng1", &json!({"role": "engine", "name": " "}));
         assert_eq!((u["user"].as_str(), u["id"].as_str(), u["name"].as_str()), (Some("eng1"), Some("eng1"), Some("eng1")));
         assert!(is_node_row("agent", "-") && !is_node_row("workitem", "-") && !is_node_row("agent", "x"));
+    }
+
+    fn cfg(url: &str) -> ArangoConfig {
+        ArangoConfig { url: url.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn plain_http_only_to_this_machine_unless_allowed() {
+        for ok in ["http://127.0.0.1:8529", "http://localhost:8529", "http://[::1]:8529", "https://arango.example.com:8529"] {
+            assert!(http_client(&cfg(ok)).is_ok(), "{ok}");
+        }
+        for refused in ["http://10.0.0.5:8529", "http://arango.example.com:8529", "tcp://127.0.0.1:8529"] {
+            assert!(http_client(&cfg(refused)).is_err(), "{refused}");
+        }
+        let private = ArangoConfig { allow_plain_http: true, ..cfg("http://10.0.0.5:8529") };
+        assert!(http_client(&private).is_ok());
+    }
+
+    /// The dev ArangoDB's root, a throwaway user and database.
+    fn setup_cfg(user: &str, db: &str, password: &str, root_password: &str) -> ArangoConfig {
+        ArangoConfig {
+            url: crate::test_db::url(),
+            db: db.into(),
+            user: user.into(),
+            password: password.into(),
+            root_password: root_password.into(),
+            ..Default::default()
+        }
+    }
+
+    async fn access(user: &str, db: &str) -> String {
+        let root = ArangoBackend::new(&crate::test_db::url(), "_system", "root", &crate::test_db::password()).await.unwrap();
+        root.raw("GET", &format!("/_api/user/{user}/database/{db}"), None).await.unwrap()["result"].as_str().unwrap_or("").to_string()
+    }
+
+    #[tokio::test]
+    async fn root_sets_up_a_missing_user_and_database_once() {
+        let (user, db, root_pw) = (crate::test_db::fresh_name(), crate::test_db::fresh_name(), crate::test_db::password());
+        // without root's password the user cannot be made, and the error says so
+        let e = ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", "")).await.err().unwrap().to_string();
+        assert!(e.contains("ARANGO_ROOT_PASSWORD"), "{e}");
+        // root's own password is never given to the user
+        let e = ArangoBackend::open(&setup_cfg(&user, &db, &root_pw, &root_pw)).await.err().unwrap().to_string();
+        assert!(e.contains("root's password"), "{e}");
+
+        let a = ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", &root_pw)).await.unwrap();
+        assert!(a.ping().await);
+        assert_eq!(access(&user, &db).await, "rw");
+        // the user made the collections itself
+        assert!(a.dbcall("GET", &format!("/_api/collection/{NODE_COLL}"), None).await.is_ok());
+        // from now on the user alone is enough
+        let again = ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", "")).await.unwrap();
+        assert!(again.ping().await);
+        // an existing user keeps its password: a wrong one is named, not reset
+        let e = ArangoBackend::open(&setup_cfg(&user, &db, "not-its-password", &root_pw)).await.err().unwrap().to_string();
+        assert!(e.contains("must be its password"), "{e}");
+        assert!(ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", "")).await.is_ok());
+
+        crate::test_db::drop(&db).await;
+        crate::test_db::drop_user(&user).await;
+    }
+
+    #[tokio::test]
+    async fn root_grants_rw_to_a_user_with_too_little_access() {
+        let (user, db, root_pw) = (crate::test_db::fresh_name(), crate::test_db::fresh_name(), crate::test_db::password());
+        ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", &root_pw)).await.unwrap();
+        let root = ArangoBackend::new(&crate::test_db::url(), "_system", "root", &root_pw).await.unwrap();
+        root.raw("PUT", &format!("/_api/user/{user}/database/{db}"), Some(&json!({"grant": "ro"}))).await.unwrap();
+        let e = ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", "")).await.err().unwrap().to_string();
+        assert!(e.contains("'ro' access"), "{e}");
+        ArangoBackend::open(&setup_cfg(&user, &db, "user-pw-1234", &root_pw)).await.unwrap();
+        assert_eq!(access(&user, &db).await, "rw");
+        crate::test_db::drop(&db).await;
+        crate::test_db::drop_user(&user).await;
     }
 }

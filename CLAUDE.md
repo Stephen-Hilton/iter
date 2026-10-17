@@ -64,3 +64,7 @@ committed) and one self-contained install script per program and platform. Insta
   secrets command's output to disk, and keep `envstore::scrub` on every child process the engine starts.
 - People: the first admin and admin-set passwords must be changed at first sign-in (`must_change_password`);
   password changes need the current password and 12+ characters and end other sessions; sign-ins are rate-limited.
+- ArangoDB: iter_data signs in as its own user (`iter_user`, rw on `iter_db` only), never as root; root's password only
+  creates that user and database when missing, and the user never gets root's password. ArangoDB on another machine
+  is HTTPS with a pinned fingerprint or CA (`ARANGO_CERT_FINGERPRINT` / `ARANGO_CA_CERT`); plain http only to this
+  machine or with `ARANGO_ALLOW_PLAIN_HTTP` on a private network (iter_data/src/arango.rs).

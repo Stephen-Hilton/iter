@@ -4,8 +4,9 @@ Description: >-
   as systemd services, installed at first boot by installers/iter_data/linux_aws/install.sh from a
   GitHub Release of Stephen-Hilton/iter (the latest unless IterVersion names one). iter_data serves
   HTTPS with a self-signed certificate whose fingerprint (what engines pin) is stored in SSM. The
-  database lives on its own encrypted EBS volume, the admin password is stored in SSM Parameter
-  Store, and only the iter_data port is reachable from AllowedCidr.
+  database lives on its own encrypted EBS volume (or, with ArangoUrl, in an ArangoDB elsewhere), the
+  admin password is stored in SSM Parameter Store, and only the iter_data port is reachable from
+  AllowedCidr.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -16,9 +17,12 @@ Metadata:
         Parameters: [Architecture, InstanceType, DataVolumeSize]
       - Label: {default: Network}
         Parameters: [VpcId, SubnetId, AllowedCidr, IterPort, SshCidr, KeyName]
+      - Label: {default: ArangoDB elsewhere (optional; empty = install ArangoDB on the instance)}
+        Parameters: [ArangoUrl, ArangoCertFingerprint, ArangoDb, ArangoUser, ArangoAllowPlainHttp]
     ParameterLabels:
       IterVersion: {default: iter release tag (or latest)}
       AllowedCidr: {default: Who may reach the web page and API}
+      ArangoUrl: {default: An existing ArangoDB to use (empty = install one here)}
 
 Parameters:
   IterVersion:
@@ -44,7 +48,9 @@ Parameters:
     Default: 50
     MinValue: 10
     MaxValue: 16384
-    Description: GiB of encrypted gp3 storage for the database and its backups (mounted at /data).
+    Description: >-
+      GiB of encrypted gp3 storage for the database and its backups (mounted at /data). With ArangoUrl it
+      holds only the backups (of iter's database alone), so the minimum is plenty.
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: The VPC to run in.
@@ -76,6 +82,41 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional EC2 key pair name for SSH. Leave empty when you use Session Manager.
+  ArangoUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^local$|^https?://[A-Za-z0-9._:\[\]-]+/?$'
+    Description: >-
+      Use this ArangoDB (https://host:8529) instead of installing one on the instance; empty or "local"
+      installs one here. Passwords never go through CloudFormation: put iter_data's user password in the
+      SSM SecureString /iter/<stack>/arango-password and, only if that user or database does not exist
+      yet, root's in /iter/<stack>/arango-root-password (aws/install.sh does this from ARANGO_PASSWORD and
+      ARANGO_ROOT_PASSWORD); a PEM CA certificate goes in the String /iter/<stack>/arango-ca-cert.
+  ArangoCertFingerprint:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^(sha256:)?[0-9A-Fa-f:]{64,95}$'
+    Description: >-
+      With an https ArangoUrl serving a self-signed certificate: its fingerprint (sha256:<64 hex>), which
+      iter_data pins. Leave empty for a certificate from a public CA or the CA in /iter/<stack>/arango-ca-cert.
+  ArangoDb:
+    Type: String
+    Default: ""
+    AllowedPattern: '^[A-Za-z0-9_-]*$'
+    Description: iter_data's database in ArangoDB (empty = iter_db).
+  ArangoUser:
+    Type: String
+    Default: ""
+    AllowedPattern: '^[A-Za-z0-9_-]*$'
+    Description: >-
+      The ArangoDB user iter_data signs in as, with rw on its database only (empty = iter_user). Not root.
+  ArangoAllowPlainHttp:
+    Type: String
+    Default: "false"
+    AllowedValues: ["false", "true"]
+    Description: >-
+      "true" allows an http:// ArangoUrl on another machine (a private network you trust, e.g. inside the
+      VPC); otherwise iter_data refuses plain http except to itself.
   LatestAmiArm64:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
@@ -125,6 +166,7 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
+        # also reads /iter/<stack>/arango-* (an external ArangoDB's passwords and CA certificate)
         - PolicyName: iter-admin-password-and-tls-fingerprint
           PolicyDocument:
             Version: "2012-10-17"
@@ -221,11 +263,42 @@ Resources:
               sleep 5
             done
 
-            echo "installing iter_data $version ($tls_names)"
-            # shellcheck disable=SC2086  # tls_names is several words on purpose
+            # ArangoDB elsewhere (ArangoUrl): its options, and its passwords and CA certificate
+            # from SSM when they are there (aws/install.sh puts them). The passwords go through
+            # an owner-only env file that is removed after the install (data.env keeps them).
+            arango_opts=""
+            envf=/root/iter-arango.env
+            trap 'rm -f "$envf"' EXIT
+            install -m 600 /dev/null "$envf"
+            ssm_get() {  # NAME -> value, or nothing when the parameter does not exist
+              aws ssm get-parameter --region '${AWS::Region}' --with-decryption --name "/iter/${AWS::StackName}/$1" \
+                --query Parameter.Value --output text 2>/dev/null || true
+            }
+            arango_url='${ArangoUrl}' arango_fp='${ArangoCertFingerprint}' arango_db='${ArangoDb}'
+            arango_user='${ArangoUser}' arango_plain='${ArangoAllowPlainHttp}'
+            if [ -n "$arango_url" ] && [ "$arango_url" != local ]; then
+              arango_opts="--arango-url $arango_url"
+              [ -z "$arango_fp" ] || arango_opts="$arango_opts --arango-fingerprint $arango_fp"
+              ca=$(ssm_get arango-ca-cert)
+              if [ -n "$ca" ]; then
+                printf '%s\n' "$ca" > /root/iter-arango-ca.pem
+                arango_opts="$arango_opts --arango-ca-cert /root/iter-arango-ca.pem"
+              fi
+              [ "$arango_plain" != true ] || echo "ARANGO_ALLOW_PLAIN_HTTP=1" >> "$envf"
+            fi
+            [ -z "$arango_db" ] || arango_opts="$arango_opts --arango-db $arango_db"
+            [ -z "$arango_user" ] || arango_opts="$arango_opts --arango-user $arango_user"
+            v=$(ssm_get arango-password); [ -z "$v" ] || echo "ARANGO_PASSWORD=$v" >> "$envf"
+            v=$(ssm_get arango-root-password); [ -z "$v" ] || echo "ARANGO_ROOT_PASSWORD=$v" >> "$envf"
+            unset v
+            env_opt=""; [ ! -s "$envf" ] || env_opt="--env-file $envf"
+
+            echo "installing iter_data $version ($tls_names${!arango_opts:+ $arango_opts})"
+            # shellcheck disable=SC2086  # tls_names, arango_opts and env_opt are several words on purpose
             curl -fsSL --retry 5 "https://raw.githubusercontent.com/Stephen-Hilton/iter/$version/installers/iter_data/linux_aws/install.sh" \
               | bash -s -- install --version "$version" --port ${IterPort} \
-                  --db-dir /data/arangodb3 --backup-dir /data/backups $tls_names
+                  --db-dir /data/arangodb3 --backup-dir /data/backups $tls_names $arango_opts $env_opt
+            rm -f "$envf"
 
             pw=$(sed -n 's/^ITER_ADMIN_PASSWORD=//p' /etc/iter/data.env | head -1)
             [ -n "$pw" ] || { echo "no ITER_ADMIN_PASSWORD in /etc/iter/data.env"; false; }

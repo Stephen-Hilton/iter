@@ -94,7 +94,11 @@ case "$MODE" in
       docker start iter4-arango-dev 2>/dev/null || docker run -d --name iter4-arango-dev -p 127.0.0.1:8529:8529 \
         -e ARANGO_ROOT_PASSWORD="$ARANGO_PW" -v iter4-arango-dev:/var/lib/arangodb3 arangodb:3.12 arangod --vector-index >/dev/null
     fi
-    ARANGO_URL=http://127.0.0.1:8529 ARANGO_PASSWORD="$ARANGO_PW" nohup "$BIN/iter_data" --backend arango \
+    # iter_data signs in as iter_user (rw on iter_db only); root sets that up on
+    # the first start. The user's password is made once and kept in run/.
+    [ -s "$RUN/arango_user.pw" ] || { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 > "$RUN/arango_user.pw"; chmod 600 "$RUN/arango_user.pw"; }
+    ARANGO_URL=http://127.0.0.1:8529 ARANGO_ROOT_PASSWORD="$ARANGO_PW" ARANGO_USER=iter_user ARANGO_DB=iter_db \
+      ARANGO_PASSWORD="$(cat "$RUN/arango_user.pw")" nohup "$BIN/iter_data" --backend arango \
       --listen "127.0.0.1:$PORT" --secret-file "$RUN/iter_data.secret" --env-file "$ENV_FILE" --tls off \
       --webui-dir "$ROOT/iter_data/webui" --embed-model "$ROOT/models/all-MiniLM-L6-v2" > "$RUN/iter_data.log" 2>&1 &
     echo $! > "$RUN/iter_data.pid"

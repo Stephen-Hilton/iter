@@ -1,25 +1,78 @@
 #!/bin/bash
 # shellcheck disable=SC2012  # the names are ours: iter5-<UTC timestamp>.tar
-# iter-backup: online backup of the iter_data database (arangodump reads a
-# consistent snapshot while arangod keeps serving; nothing is stopped), plus
-# iter_data's env and secret files (secrets, engine_session.secret, the TLS certificate), as one tar in $ITER_BACKUP_DIR; the newest
-# $ITER_BACKUP_KEEP are kept. Run by iter-backup.timer (install.sh) as user iter,
-# with /etc/iter/data.env and /etc/iter/backup.env in its environment.
-#   restore: mkdir /tmp/r && tar -xf iter5-<ts>.tar -C /tmp/r && arangorestore \
-#     --server.username root --server.password "$ARANGO_PASSWORD" \
-#     --server.database iter5 --create-database true \
-#     --include-system-collections true --input-directory /tmp/r/db
+# iter-backup: online backup of iter's own database only (ARANGO_DB, dumped as
+# ARANGO_USER: arangodump reads a consistent snapshot while arangod keeps
+# serving; nothing is stopped, and other databases on a shared ArangoDB are
+# not touched), plus iter_data's env and secret files (secrets,
+# engine_session.secret, the TLS certificate), as one tar in $ITER_BACKUP_DIR;
+# the newest $ITER_BACKUP_KEEP are kept. Run by iter-backup.timer (install.sh)
+# as user iter, with /etc/iter/data.env and /etc/iter/backup.env in its
+# environment. Works the same against a local or an external ArangoDB
+# (ARANGO_URL); over https the certificate is checked first against
+# ARANGO_CERT_FINGERPRINT or ARANGO_CA_CERT, because arangodump does not.
+#
+#   iter-backup                  take a backup
+#   iter-backup --restore TAR    load TAR's database back into ARANGO_DB, replacing
+#                                the collections it holds (stop iter-data first;
+#                                install.sh restore TAR does the stop and start)
+#
+# Arango's own system collections are left out: iter_user may not restore them,
+# and iter_data recreates what it needs from them (its named graph) at start.
 set -euo pipefail
 : "${ARANGO_PASSWORD:?ARANGO_PASSWORD is not set (run via iter-backup.service, or with /etc/iter/data.env exported)}"
 DEST="${ITER_BACKUP_DIR:-/var/backups/iter}"
 KEEP="${ITER_BACKUP_KEEP:-28}"
-ts=$(date -u +%Y%m%d-%H%M%SZ)
+URL="${ARANGO_URL:-http://127.0.0.1:8529}"
+USER_="${ARANGO_USER:-iter_user}"
+DB="${ARANGO_DB:-iter_db}"
+HOSTPORT="${URL#*://}"; HOSTPORT="${HOSTPORT%%/*}"
+case "$URL" in
+  https://*) ENDPOINT="ssl://$HOSTPORT" ;;
+  http://*) ENDPOINT="tcp://$HOSTPORT" ;;
+  *) echo "iter-backup: ARANGO_URL $URL is not http(s)://" >&2; exit 2 ;;
+esac
+
+# arangodump/arangorestore do not check the server's certificate: check it here
+# the way iter_data does, before the password is sent
+check_cert() {
+  case "$URL" in https://*) ;; *) return 0 ;; esac
+  local host="${HOSTPORT%:*}" seen fp ok=0
+  host="${host#[}"; host="${host%]}"
+  if [ -n "${ARANGO_CERT_FINGERPRINT:-}" ]; then
+    seen="$(openssl s_client -connect "$HOSTPORT" -servername "$host" </dev/null 2>/dev/null \
+      | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+    for fp in ${ARANGO_CERT_FINGERPRINT//,/ }; do
+      fp="${fp#sha256:}"; fp="${fp#SHA256:}"; fp="$(printf '%s' "${fp//:/}" | tr 'A-F' 'a-f')"
+      [ -z "$seen" ] || [ "$fp" != "$seen" ] || ok=1
+    done
+    [ "$ok" = 1 ] || { echo "iter-backup: $URL presented certificate sha256:${seen:-none}, not one in ARANGO_CERT_FINGERPRINT" >&2; exit 1; }
+  elif [ -n "${ARANGO_CA_CERT:-}" ]; then
+    local name=-verify_ip                      # an IPv4 or IPv6 address
+    case "$host" in *:*) ;; *[!0-9.]*) name=-verify_hostname ;; esac
+    openssl s_client -connect "$HOSTPORT" -servername "$host" -CAfile "$ARANGO_CA_CERT" -verify_return_error \
+      "$name" "$host" </dev/null >/dev/null 2>&1 \
+      || { echo "iter-backup: $URL's certificate does not verify against ARANGO_CA_CERT ($ARANGO_CA_CERT)" >&2; exit 1; }
+  fi
+}
+
+ARGS=(--server.endpoint "$ENDPOINT" --server.username "$USER_" --server.password "$ARANGO_PASSWORD"
+      --server.database "$DB" --include-system-collections false --log.level warning)
 tmp=$(mktemp -d)                      # dump on the local disk, then one copy out
 trap 'rm -rf "$tmp"' EXIT
-arangodump --server.endpoint tcp://127.0.0.1:8529 --server.username "${ARANGO_USER:-root}" \
-  --server.password "$ARANGO_PASSWORD" --server.database "${ARANGO_DB:-iter5}" \
-  --include-system-collections true --threads 2 --log.level warning \
-  --output-directory "$tmp/db"
+
+if [ "${1:-}" = --restore ]; then
+  tar_file="${2:?usage: iter-backup --restore iter5-<ts>.tar}"
+  [ -f "$tar_file" ] || { echo "iter-backup: $tar_file not found" >&2; exit 2; }
+  tar -xf "$tar_file" -C "$tmp" ./db 2>/dev/null || tar -xf "$tar_file" -C "$tmp" db
+  check_cert
+  arangorestore "${ARGS[@]}" --overwrite true --threads 2 --input-directory "$tmp/db"
+  echo "iter-backup: restored $tar_file into database $DB at $URL (the env and secret files in it were not touched)"
+  exit 0
+fi
+
+ts=$(date -u +%Y%m%d-%H%M%SZ)
+check_cert
+arangodump "${ARGS[@]}" --threads 2 --output-directory "$tmp/db"
 cp -a /etc/iter/data.env "$tmp/"
 for f in iter_data.secret engine_session.secret tls.crt tls.key custom-tls.crt custom-tls.key .env; do
   if [ -f "/var/lib/iter/$f" ]; then cp -a "/var/lib/iter/$f" "$tmp/"; fi
@@ -28,4 +81,4 @@ mkdir -p "$DEST"
 tar -C "$tmp" -cf "$DEST/.iter5-$ts.tar.part" .
 mv "$DEST/.iter5-$ts.tar.part" "$DEST/iter5-$ts.tar"
 ls -1t "$DEST"/iter5-*.tar | tail -n +$((KEEP + 1)) | xargs -r rm -f
-echo "iter-backup: $DEST/iter5-$ts.tar ($(du -h "$DEST/iter5-$ts.tar" | cut -f1)), $(ls "$DEST"/iter5-*.tar | wc -l) kept"
+echo "iter-backup: $DEST/iter5-$ts.tar ($(du -h "$DEST/iter5-$ts.tar" | cut -f1)) of database $DB, $(ls "$DEST"/iter5-*.tar | wc -l) kept"

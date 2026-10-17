@@ -29,7 +29,8 @@ script per program and platform).
 
 - `./deploy.sh docker` builds `iter_data-linux-<arch>` and runs
   `installers/iter_data/docker/install.sh`, which starts container `iter5`: API and web page on **:8400**,
-  the Arango console on **127.0.0.1:8630**, database `iter5`.
+  the Arango console on **127.0.0.1:8630**, database `iter_db` as `iter_user` (`iter5` when it already
+  holds one). Every iter_data installer takes `--arango-url` for an ArangoDB you already run.
   `./deploy.sh local` builds release binaries into `bin/` and runs iter_data
   natively against the dev ArangoDB container on **:8529** (the fast loop).
   Both wait for `/health` to say `"ok":true`.

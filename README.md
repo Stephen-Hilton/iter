@@ -44,6 +44,38 @@ edge the topdir `~/dev/<project>`, then run the installer's `projects` verb to c
 To compile it yourself, clone the repo and run `cargo build --release -p iter_engine -p iter_data`;
 `installers/build.sh` builds all seven release binaries and `installers/build.sh --release` publishes them.
 
+## ArangoDB
+
+iter_data keeps everything in ArangoDB, signed in as **its own user** (`iter_user`) with `rw` on **its own
+database** (`iter_db`) and nothing else, so one ArangoDB server can also hold other apps' databases. On the
+first start, when that user or database is missing (or the user lacks `rw`), iter_data signs in once as
+root with `ARANGO_ROOT_PASSWORD`, creates them and grants `rw`. iter's user never gets root's password, and
+iter_data creates its own collections and indexes as projects grow. Installs from before 2026-10-17 keep
+their database `iter5` and move from root to `iter_user`.
+
+Every iter_data installer installs ArangoDB beside iter_data unless you point it at one you already run:
+
+```bash
+ARANGO_ROOT_PASSWORD=… ./install.sh --arango-url https://arango.example.com:8529 --arango-fingerprint sha256:…
+```
+
+| setting | installer option | |
+|---|---|---|
+| `ARANGO_URL` | `--arango-url URL` | an existing ArangoDB (`local` = install one here) |
+| `ARANGO_CERT_FINGERPRINT` | `--arango-fingerprint FP` | pin its self-signed certificate (`sha256:…`, comma-separated for a change-over) |
+| `ARANGO_CA_CERT` | `--arango-ca-cert PATH` | or trust the CA (PEM) that signed it; with neither, the public CAs |
+| `ARANGO_DB` | `--arango-db NAME` | iter's database [`iter_db`] |
+| `ARANGO_USER` | `--arango-user NAME` | iter's user, `rw` on that database only [`iter_user`] |
+| `ARANGO_PASSWORD` | environment / `--env-file` | that user's own password (generated and kept when not given) |
+| `ARANGO_ROOT_PASSWORD` | environment / `--env-file` | only to create the user and database; not needed once they exist |
+| `ARANGO_ALLOW_PLAIN_HTTP` | environment / `--env-file` | `1` allows `http://` to another machine, on a private network only |
+
+ArangoDB on another machine is reached over HTTPS only: plain `http://` goes only to this machine unless
+`ARANGO_ALLOW_PLAIN_HTTP=1`. The [linux installer README](installers/iter_data/linux/README.md#arangodb-iters-own-user-and-database-or-an-arangodb-you-already-run)
+shows how to serve ArangoDB over HTTPS. Backups (`iter-backup`, every 6 hours) dump iter's database only, as
+iter's user, local or remote. `install.sh restore FILE` (linux, linux_aws) loads one back. The CloudFormation
+stack takes the same settings as parameters, with the passwords in SSM ([aws/](installers/iter_data/aws/README.md)).
+
 ## Signing in to the web app
 
 The first admin (`admin`) is made on an empty database with `ITER_ADMIN_PASSWORD`, or a generated password printed once, and must choose their own password at the first sign-in: until then the API refuses everything else. A password an admin sets for someone (a new user, or a reset) must also be changed at that person's next sign-in. Passwords need 12+ characters; changing one needs the current one and signs out every other session; sign-ins are limited to 5 failures a minute per user and per address. Once the first admin has chosen theirs, iter_data leaves `admin_password_changed` beside its secret file and the installers remove `ITER_ADMIN_PASSWORD` from their env file (and from SSM on AWS).
@@ -55,7 +87,7 @@ The first admin (`admin`) is made on an empty database with `ITER_ADMIN_PASSWORD
 ./deploy.sh local    # native release iter_data on :8400 against the dev Arango container on :8529 (fast dev loop)
 ```
 
-Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). `deploy.sh` puts its native release binaries in `bin/<os>-<arch>/`.
+Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). `deploy.sh local` runs iter_data as `iter_user` on `iter_db`. That user's password is made once and kept in `run/arango_user.pw`, and root creates the user and database on the first start. `deploy.sh` puts its native release binaries in `bin/<os>-<arch>/`.
 
 ### Windows
 
@@ -230,7 +262,7 @@ test/e2e.sh --live                # also one tiny item on a real claude account 
 test/e2e/playwright/run.sh          # webui suite; screenshots in test/e2e/playwright/screenshots (git-ignored)
 ```
 
-`ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` point the tests at another Arango.
+`ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` point the tests at another Arango (they need its root password: each test makes its own database, and `test/e2e.sh` also makes its own user).
 
 ## Licence
 

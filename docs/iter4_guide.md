@@ -41,7 +41,7 @@ From the `iter4/` directory of the repository:
 ### Which ports does iter4 use?
 
 - **8300** — the API and the web page (`ITER_PORT` changes the host port).
-- **127.0.0.1:8530** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; the database is `iter4`.
+- **127.0.0.1:8530** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; iter's database is `iter_db` (`iter5` on installs from before 2026-10-17).
 - **127.0.0.1:8529** — the dev ArangoDB used by `./deploy.sh local`, the unit tests and the end-to-end tests.
 
 ### What is the admin password, and how do I log in the first time?
@@ -52,8 +52,9 @@ On first start, when there are no users, iter_data creates the user `admin` with
 
 - `ITER_ADMIN_PASSWORD` — the first admin's password.
 - `ITER_JWT_SECRET` — the secret that signs login and API tokens; if unset, iter_data reads or creates `--secret-file`.
-- `ARANGO_ROOT_PASSWORD` — the ArangoDB root password (default `iter4dev`, fine for local use only).
-- `ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER`, `ARANGO_PASSWORD` — where iter_data finds ArangoDB (defaults `http://127.0.0.1:8529`, `iter4`, `root`).
+- `ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER`, `ARANGO_PASSWORD` — where iter_data finds ArangoDB and who it signs in as (defaults `http://127.0.0.1:8529`, `iter_db`, `iter_user`). That user needs `rw` on that database only, so one ArangoDB can serve other apps too.
+- `ARANGO_ROOT_PASSWORD` — the ArangoDB root password, used only when iter's user or database is missing or the user lacks `rw`: root then creates them and grants `rw`. Not needed once they exist.
+- `ARANGO_CERT_FINGERPRINT` (`sha256:…`, comma-separated) or `ARANGO_CA_CERT` (a PEM file) — how an `https://` ArangoDB's certificate is checked: pinned, or against your own CA (else the public CAs). Plain `http://` is refused to anything but this machine unless `ARANGO_ALLOW_PLAIN_HTTP=1` (a private network only).
 - `ITER_EMBED_MODEL` — the embedding model directory (the container has it at `/opt/iter/models/all-MiniLM-L6-v2`).
 - `ITER_ENV_FILE` — which `.env` `deploy.sh` reads (default the repo root `.env`).
 
