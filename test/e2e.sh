@@ -32,8 +32,14 @@ ARANGO_PW_E2E="${ITER5_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}"
 ARANGO_DB_E2E="iter5_e2e_$RANDOM$RANDOM"
 SCRATCH="${E2E_SCRATCH:-$(mktemp -d /tmp/iter5-e2e.XXXXXX)}"
 PORT=$((18400 + RANDOM % 1000))
-BASE="http://127.0.0.1:$PORT"
-PASS_ADMIN="e2e-admin-pw"
+# TLS (2026-10-17): iter_data serves its self-signed certificate (E2E_TLS=off
+# for plain http); curl trusts it as a CA bundle, the engine pins it
+E2E_TLS="${E2E_TLS:-auto}"
+if [ "$E2E_TLS" = off ]; then BASE="http://127.0.0.1:$PORT"; else BASE="https://127.0.0.1:$PORT"; export CURL_CA_BUNDLE="$SCRATCH/tls.crt"; fi
+# the engine's own files (keys, trusted certificates) stay in the scratch dir
+export ITER_HOME="$SCRATCH/iterhome"
+PASS_FIRST="e2e-first-boot-pw"      # ITER_ADMIN_PASSWORD: must be changed at the first sign-in
+PASS_ADMIN="e2e-admin-own-pw"
 ENGINE=E2E                       # the one real engine
 PA=e2e5_alpha; PB=e2e5_beta      # the two projects it serves
 PN=e2e5_next                     # get_next probe project (served by the never-running engine "Probe")
@@ -116,7 +122,7 @@ ENVF="$SCRATCH/engine.env"
 ENGINE_LOG="$SCRATCH/engine.log"
 engine_start() {
   : >> "$ENGINE_LOG"; echo "---- engine start $(date -u +%H:%M:%S) ----" >> "$ENGINE_LOG"
-  "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --name "$ENGINE" >> "$ENGINE_LOG" 2>&1 &
+  "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --key-file "$SCRATCH/e2e.key" --name "$ENGINE" >> "$ENGINE_LOG" 2>&1 &
   ENGINE_PID=$!
 }
 engine_stop() {
@@ -143,28 +149,63 @@ DATA_BIN="$REPO/target/debug/iter_data"
 ENGINE_BIN="$REPO/target/debug/iter_engine"
 ok "debug binaries built"
 
-ITER_ADMIN_PASSWORD=$PASS_ADMIN ARANGO_URL="$ARANGO_URL_E2E" ARANGO_PASSWORD="$ARANGO_PW_E2E" "$DATA_BIN" \
-  --arango-db "$ARANGO_DB_E2E" --listen "127.0.0.1:$PORT" --secret-file "$SCRATCH/jwt.secret" \
+ITER_ADMIN_PASSWORD=$PASS_FIRST ARANGO_URL="$ARANGO_URL_E2E" ARANGO_PASSWORD="$ARANGO_PW_E2E" "$DATA_BIN" \
+  --arango-db "$ARANGO_DB_E2E" --listen "127.0.0.1:$PORT" --secret-file "$SCRATCH/jwt.secret" --tls "$E2E_TLS" \
   --env-file /dev/null --webui-dir "$REPO/iter_data/webui" > "$SCRATCH/iter_data.log" 2>&1 &
 DATA_PID=$!
 wait_for 60 "curl -sf $BASE/health" || { tail -30 "$SCRATCH/iter_data.log"; fatal "iter_data did not start"; }
 ok "iter_data up on :$PORT ($(curl -sf "$BASE/health" | jq -r .backend))"
+if [ "$E2E_TLS" != off ]; then
+  check "TLS: a self-signed certificate made, key owner-only" bash -c "[ -f '$SCRATCH/tls.crt' ] && [ \"\$(stat -f %Lp '$SCRATCH/tls.key' 2>/dev/null || stat -c %a '$SCRATCH/tls.key')\" = 600 ]"
+  check "TLS: plain http is not served" bash -c "! curl -s -m 3 http://127.0.0.1:$PORT/health | grep -q ok"
+fi
 
-TOKEN=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d "{\"user\":\"admin\",\"password\":\"$PASS_ADMIN\"}" | jq -r .token)
-[ -n "$TOKEN" ] && [ "$TOKEN" != null ] || fatal "admin login"
-ok "admin login"
+FIRST=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d "{\"user\":\"admin\",\"password\":\"$PASS_FIRST\"}")
+expect "the first admin must change the first-boot password" true "$(echo "$FIRST" | jq -r .must_change_password)"
+T1=$(echo "$FIRST" | jq -r .token)
+expect "until then every call is refused (403)" 403 "$(code "$T1" GET /api/projects)"
+# (bodies built outside "$(…)": bash 3.2 keeps the \" escapes inside a quoted command substitution)
+PWB="{\"current_password\":\"wrong-wrong-wrong\",\"new_password\":\"$PASS_ADMIN\"}"
+expect "the change needs the current password" 401 "$(code "$T1" POST /api/users/admin/password "$PWB")"
+PWB="{\"current_password\":\"$PASS_FIRST\",\"new_password\":\"short\"}"
+expect "a new password of 12+ characters" 400 "$(code "$T1" POST /api/users/admin/password "$PWB")"
+TOKEN=$(curl -sf -X POST "$BASE/api/users/admin/password" -H "authorization: Bearer $T1" -H content-type:application/json -d "{\"current_password\":\"$PASS_FIRST\",\"new_password\":\"$PASS_ADMIN\"}" | jq -r .token)
+[ -n "$TOKEN" ] && [ "$TOKEN" != null ] || fatal "admin password change"
+check "the first-boot password marker is written" test -f "$SCRATCH/admin_password_changed"
+expect "the old session ended" 401 "$(code "$T1" GET /api/projects)"
+LB="{\"user\":\"admin\",\"password\":\"$PASS_FIRST\"}"
+expect "the first-boot password no longer signs in" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H content-type:application/json -d "$LB")"
+ok "admin login (own password)"
 expect "bad password rejected" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"admin","password":"wrong"}')"
 expect "unauthenticated request rejected" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects")"
 check "webui static page served" bash -c "curl -sf $BASE/ | grep -qi '<html'"
 
-api PUT /api/users/engine01 '{"role":"engine","password":"unused-login-pw","email":""}' >/dev/null || fatal "create engine user"
-ENGINE_TOKEN=$(api POST /api/users/engine01/token '{"ttl_days":365}' | jq -r .token)
-[ -n "$ENGINE_TOKEN" ] && [ "$ENGINE_TOKEN" != null ] || fatal "mint engine token"
-ok "engine user + long-lived token"
+# engines sign in with their own keys (no engine users): the real engine and
+# the probe engine that never runs
+newkey() { "$ENGINE_BIN" key new --key-file "$SCRATCH/$1.key" --name "$2" | sed -n 's/^  \(iter_[0-9a-f]*\)$/\1/p'; }
+for k in e2e:$ENGINE probe:Probe; do
+  PUB=$(newkey "${k%%:*}" "${k#*:}")
+  api POST /api/keys "{\"public_key\":\"$PUB\",\"engine\":\"${k#*:}\"}" >/dev/null || fatal "register key of ${k#*:}"
+done
+ENGINE_TOKEN=$("$ENGINE_BIN" key session --key-file "$SCRATCH/e2e.key" --data-url "$BASE") || fatal "engine session"
+PROBE_TOKEN=$("$ENGINE_BIN" key session --key-file "$SCRATCH/probe.key" --data-url "$BASE") || fatal "probe session"
+ok "engine keys registered, sessions signed in"
+expect "a role-engine user is refused" 400 "$(code "$TOKEN" PUT /api/users/engine01 '{"role":"engine","password":"unused-login-pw-1"}')"
+api PUT /api/users/e2euser '{"role":"user","password":"e2e-user-pw-123","email":""}' >/dev/null || fatal "create user"
+if [ "$E2E_TLS" != off ]; then
+  FP=$(curl -sf -H "authorization: Bearer $TOKEN" "$BASE/api/server/tls" | jq -r .fingerprint)
+  check "TLS: the first signed sign-in pinned iter_data's certificate" bash -c "jq -e --arg u 'https://127.0.0.1:$PORT' --arg f '$FP' '.servers[\$u].pins==[\$f]' '$ITER_HOME/server_trust.json'"
+  check "TLS: the trust file is owner-only" bash -c "[ \"\$(stat -f %Lp '$ITER_HOME/server_trust.json' 2>/dev/null || stat -c %a '$ITER_HOME/server_trust.json')\" = 600 ]"
+  check "TLS: key trust with the right fingerprint" "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "sha256:$FP"
+  check "TLS: key trust with a wrong fingerprint refuses" bash -c "! '$ENGINE_BIN' key trust --data-url '$BASE' --fingerprint $(printf 'ab%.0s' $(seq 32))"
+  "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "$FP" >/dev/null
+  check "plain http to another machine is refused" bash -c "'$ENGINE_BIN' key status --key-file '$SCRATCH/e2e.key' --data-url http://192.0.2.1:8400 2>&1 | grep -q 'must be reached over https'"
+fi
 
 # agents first: a project created afterwards gets a `runs` edge per agent
 for ag in code plan test; do
-  api PUT "/api/agents/$ag" "{\"desc\":\"e2e $ag\",\"max\":4,\"timeoutsec\":120,\"model\":\"\",\"promptbody\":\"You are the $ag agent.\"}" >/dev/null || fatal "agent $ag"
+  # the permission guard (2026-10-08) starts no agent without a permission mode; the mock provider ignores it
+  api PUT "/api/agents/$ag" "{\"desc\":\"e2e $ag\",\"max\":4,\"timeoutsec\":120,\"model\":\"\",\"flags\":\"--dangerously-skip-permissions\",\"promptbody\":\"You are the $ag agent.\"}" >/dev/null || fatal "agent $ag"
 done
 ok "agents code/plan/test created"
 
@@ -189,9 +230,9 @@ done
 ok "projects $PA $PB $PN $PU created"
 
 # engine records: the real one (ticks every second) and the probe engine that
-# never runs — both owned by engine01, so the engine token speaks for both
+# never runs; each signs in as itself
 for e in $ENGINE Probe; do
-  api PUT "/api/engines/$e" "{\"host\":\"e2e\",\"state\":\"Stopped\",\"ticksec\":1,\"full_refresh_minutes\":360,\"probe_stale_min\":0,\"queuelock\":{\"retryms\":50,\"breaksec\":60},\"user\":\"engine01\"}" >/dev/null || fatal "engine record $e"
+  api PUT "/api/engines/$e" "{\"host\":\"e2e\",\"state\":\"Stopped\",\"ticksec\":1,\"full_refresh_minutes\":360,\"probe_stale_min\":0,\"queuelock\":{\"retryms\":50,\"breaksec\":60}}" >/dev/null || fatal "engine record $e"
 done
 edge() { api POST /api/settings/edges "$1" | jq -r .id; }
 SERVE_A=$(edge "{\"from\":\"iter_engine:$ENGINE\",\"to\":\"project:$PA\",\"tag\":\"alpha_default\",\"settings\":{\"topdir\":\"$RA\",\"read_only\":false}}")
@@ -216,7 +257,6 @@ expect "settings graph: allows edges (one per work-item state) on $PA" 8 "$(echo
 expect "settings graph: placeholders for every stored node type" "account agent agent_tools iter_engine project provider user workitem_type" "$(echo "$SG" | jq -r '[.nodes[]|select(.placeholder)|.type]|unique|join(" ")')"
 
 cat > "$ENVF" <<EOF
-ITER_ENGINE_TOKEN=$ENGINE_TOKEN
 ACCT_A_TOKEN=mock-token-a
 ACCT_A2_TOKEN=mock-token-a2
 ACCT_B_TOKEN=mock-token-b
@@ -226,8 +266,15 @@ expect "assignments: $ENGINE serves both projects" "$PA $PB" "$(echo "$AS" | jq 
 expect "assignments: $PA bills acct_a then acct_a2, provider mock" "acct_a:mock:80:95 acct_a2:mock:80:95" "$(echo "$AS" | jq -r --arg p "$PA" '[.projects[]|select(.project==$p)|.accounts[]|"\(.name):\(.provider):\(.switch):\(.stop)"]|join(" ")')"
 expect "assignments: topdir from the serves edge" "$RA" "$(echo "$AS" | jq -r --arg p "$PA" '.projects[]|select(.project==$p)|.topdir')"
 api PUT /api/engines/Other '{"host":"x","state":"Stopped","ticksec":5,"user":"admin"}' >/dev/null
-expect "assignments: another user's engine is refused" 403 "$(code "$ENGINE_TOKEN" GET /api/engines/Other/assignments)"
+expect "assignments: another engine's are refused" 403 "$(code "$ENGINE_TOKEN" GET /api/engines/Other/assignments)"
 
+# token sources (2026-10-17): a secrets command's output beats nothing-in-the-file, is named, never printed
+SRC=$("$ENGINE_BIN" --data-url "$BASE" --key-file "$SCRATCH/e2e.key" --env-file /dev/null --name "$ENGINE" \
+  --secrets-command 'printf "ACCT_A_TOKEN=from-the-secret-store\n"' --accounts 2>&1)
+echo "$SRC" > "$SCRATCH/accounts.txt"
+check "secrets command: its token is used and named as its source" grep -q 'ACCT_A_TOKEN = SET (secrets command)' "$SCRATCH/accounts.txt"
+check "secrets command: an account with no token is flagged" grep -q 'ACCT_B_TOKEN = NOT SET' "$SCRATCH/accounts.txt"
+check "secrets command: values never printed" bash -c "! grep -q 'from-the-secret-store' '$SCRATCH/accounts.txt'"
 engine_start
 say "engine $ENGINE started (pid $ENGINE_PID)"
 
@@ -235,8 +282,8 @@ say "engine $ENGINE started (pid $ENGINE_PID)"
 section "a0. server-side get_next"
 # =====================================================================
 if want a0; then
-# the probe engine never runs: every claim below is made by hand with the engine token
-NX() { eapi POST "/api/projects/$PN/next" "{\"engine\":\"${1:-Probe}\",\"lease_ttl_sec\":120}"; }
+# the probe engine never runs: every claim below is made by hand with its session
+NX() { curl -sf -X POST -H "authorization: Bearer $PROBE_TOKEN" -H content-type:application/json "$BASE/api/projects/$PN/next" -d "{\"engine\":\"Probe\",\"lease_ttl_sec\":120}"; }
 X=$(wi_new $PN '{"name":"x p5","agent":"exec","exec_shell":"true","priority":5}')
 Y=$(wi_new $PN '{"name":"y p2","agent":"exec","exec_shell":"true","priority":2}')
 Z=$(wi_new $PN "{\"name\":\"z p1 after y\",\"agent\":\"exec\",\"exec_shell\":\"true\",\"priority\":1,\"blockedby\":[\"$Y\"]}")
@@ -253,7 +300,8 @@ L2=$(wi_new $PN '{"name":"lock waiter","agent":"exec","exec_shell":"true","prior
 R=$(NX); expect "next #5: the lock holder" "$L1" "$(echo "$R" | jq -r .item.id)"
 expect "the claim took its lock row" "$L1" "$(api GET "/api/projects/$PN/locks" | jq -r '[.[]|select(.path=="{topdir}/s/" and .kind!="reserve")][0].workid')"
 R=$(NX); expect "next #6: overlapping scope is locked" "null locked" "$(echo "$R" | jq -r '"\(.item) \(.reason)"')"
-R=$(NX "$ENGINE"); expect "next for an engine that does not serve the project" "null not-served" "$(echo "$R" | jq -r '"\(.item) \(.reason)"')"
+expect "next as an engine that does not serve the project: 403" 403 "$(code "$ENGINE_TOKEN" POST "/api/projects/$PN/next" "{\"engine\":\"$ENGINE\"}")"
+expect "next naming another engine than the session's: 403" 403 "$(code "$PROBE_TOKEN" POST "/api/projects/$PN/next" "{\"engine\":\"$ENGINE\"}")"
 NB="{\"engine\":\"$ENGINE\"}"
 expect "engine token on an unserved project: 403" 403 "$(code "$ENGINE_TOKEN" POST "/api/projects/$PU/next" "$NB")"
 expect "engine token reading an unserved project's queue: 403" 403 "$(code "$ENGINE_TOKEN" GET "/api/projects/$PU/workitems")"
@@ -296,12 +344,12 @@ check "response detail row written" bash -c "curl -sf -H 'authorization: Bearer 
 check "spend: a spend detail row with tokens" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/workitems/$WA1/details | jq -e '[.[]|select(.key==\"spend\" and .value.input_tokens>0)]|length>=1'"
 check "spend: project rows recorded" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/spend | jq -e 'length>=1'"
 expect "locks released in $PA" 0 "$(api GET "/api/projects/$PA/locks" | jq '[.[]|select(.kind!="reserve")]|length')"
-# renames mid-run: the engine, a project, an account and the engine's user get new display names; their ids —
+# renames mid-run: the engine, a project, an account and a user get new display names; their ids —
 # and so the edges, the engine token, its claims and every URL — stay, and the engine keeps working
 api PATCH "/api/settings/nodes/iter_engine:$ENGINE" '{"name":"E2E box"}' >/dev/null || ko "rename the engine"
 api PATCH "/api/settings/nodes/project:$PA" '{"name":"Alpha shop"}' >/dev/null || ko "rename a project"
 api PATCH "/api/settings/nodes/account:acct_a" '{"name":"Alpha account"}' >/dev/null || ko "rename an account"
-api PATCH "/api/settings/nodes/user:engine01" '{"name":"e2e engine user"}' >/dev/null || ko "rename the engine's user"
+api PATCH "/api/settings/nodes/user:e2euser" '{"name":"e2e person"}' >/dev/null || ko "rename a user"
 WR=$(wi_new $PA '{"name":"after the renames","agent":"code","priority":3,"lockdirs":["{topdir}/out/"],"request":"mock: write renamed.txt <<<still-works>>>"}')
 wait_for 30 "[ \"\$(wi_state $PA $WR)\" = complete ]"
 expect "renamed engine, project, account and user: work still runs" still-works "$(cat "$RA/out/renamed.txt" 2>/dev/null)"
@@ -309,11 +357,11 @@ expect "the item was claimed under the engine's id" "$ENGINE" "$(wi $PA "$WR" | 
 expect "the renamed project keeps its id" "$PA Alpha shop" "$(api GET "/api/projects/$PA" | jq -r '"\(.id) \(.name)"')"
 expect "a display name in a URL path resolves to the id" "$PA" "$(api GET "/api/projects/Alpha%20shop" | jq -r .id)"
 expect "the engine's assignments still name the project by id" "$PA" "$(curl -sf -H "authorization: Bearer $ENGINE_TOKEN" "$BASE/api/engines/E2E%20box/assignments" | jq -r --arg p "$PA" '[.projects[].project|select(.==$p)]|first')"
-expect "sign-in by display name gives the id's token" engine01 "$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"e2e engine user","password":"unused-login-pw"}' | jq -r .user)"
-for n in "iter_engine:$ENGINE" "project:$PA" "account:acct_a" "user:engine01"; do api PATCH "/api/settings/nodes/$n" "{\"name\":\"${n#*:}\"}" >/dev/null; done
+expect "sign-in by display name gives the id's token" e2euser "$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"e2e person","password":"e2e-user-pw-123"}' | jq -r .user)"
+for n in "iter_engine:$ENGINE" "project:$PA" "account:acct_a" "user:e2euser"; do api PATCH "/api/settings/nodes/$n" "{\"name\":\"${n#*:}\"}" >/dev/null; done
 EJ=$(api GET "/api/engines/$ENGINE")
 check "heartbeat: last_seen set" test -n "$(echo "$EJ" | jq -r '.last_seen // empty')"
-expect "heartbeat: engine record owned by engine01" engine01 "$(echo "$EJ" | jq -r .user)"
+expect "heartbeat: the engine record belongs to no user" "" "$(echo "$EJ" | jq -r '.user // ""')"
 check "engine created one paused test sweep per project" bash -c "for p in $PA $PB; do curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/\$p/workitems | jq -e '[.[]|select(.system==\"test-sweep\" and .state==\"paused\")]|length==1' || exit 1; done"
 
 # ---- deep / shallow / failed blockers ----
@@ -383,16 +431,19 @@ expect "reopen: ran again and closed" complete "$(wi_state $PA "$WA1")"
 # ---- approval (signed) ----
 WD=$(wi_new $PA '{"name":"sensitive change","agent":"exec","exec_shell":"echo approved-ran > out_approved.txt","state":"question","needs_approval":true,"lockdirs":["{topdir}/ap/"]}')
 mkdir -p "$SCRATCH/keys"
-(cd "$SCRATCH/keys" && "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --adduser steve > "$SCRATCH/adduser.log" 2>&1)
+(cd "$SCRATCH/keys" && "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --key-file "$SCRATCH/e2e.key" --adduser steve > "$SCRATCH/adduser.log" 2>&1)
 check "--adduser wrote the key and registered the pubkey" test -f "$SCRATCH/keys/.iter/users/steve.pem"
-(cd "$SCRATCH/keys" && ITER_APPROVE_KEYPATH="$SCRATCH/keys/.iter/users/steve.pem" "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --approve "${WD:0:13}" > "$SCRATCH/approve.log" 2>&1)
+(cd "$SCRATCH/keys" && ITER_APPROVE_KEYPATH="$SCRATCH/keys/.iter/users/steve.pem" "$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --key-file "$SCRATCH/e2e.key" --approve "${WD:0:13}" > "$SCRATCH/approve.log" 2>&1)
 wait_for 20 "[ -f '$RA/out_approved.txt' ]"
 check "signed approval re-queued the item and it ran" test -f "$RA/out_approved.txt"
 
 # ---- viewer role ----
 api PUT /api/users/gerald '{"role":"viewer","password":"view-only-pw","email":""}' >/dev/null
 api POST /api/settings/edges "{\"from\":\"user:gerald\",\"to\":\"project:$PA\",\"settings\":{\"role\":\"viewer\"}}" >/dev/null
-VTOK=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"gerald","password":"view-only-pw"}' | jq -r .token)
+# a password an admin set must be changed first
+VT0=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d '{"user":"gerald","password":"view-only-pw"}' | jq -r .token)
+expect "viewer: must change the admin-set password first" 403 "$(code "$VT0" GET "/api/projects/$PA/workitems")"
+VTOK=$(curl -sf -X POST "$BASE/api/users/gerald/password" -H "authorization: Bearer $VT0" -H content-type:application/json -d '{"current_password":"view-only-pw","new_password":"geralds-own-pw"}' | jq -r .token)
 expect "viewer member: reads the queue" 200 "$(code "$VTOK" GET "/api/projects/$PA/workitems")"
 expect "viewer member: queue write refused" 403 "$(code "$VTOK" POST "/api/projects/$PA/workitems" '{"name":"viewer write","agent":"exec","exec_shell":"true"}')"
 expect "viewer: a project it is no member of is refused" 403 "$(code "$VTOK" GET "/api/projects/$PB/workitems")"

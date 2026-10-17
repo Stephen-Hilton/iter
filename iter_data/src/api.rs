@@ -23,7 +23,25 @@ pub(crate) const NOSK: &str = "-";
 
 pub struct AppState {
     pub store: Arc<dyn Storage>,
+    /// signs people's sign-in tokens (auth.rs)
     pub secret: Vec<u8>,
+    /// signs engine sessions (keys.rs): a separate secret, so neither kind
+    /// of token can be minted with the other's
+    pub engine_secret: Vec<u8>,
+    pub tls: Arc<crate::tls::TlsState>,
+    /// where iter_data keeps its files (the secret file's folder): the
+    /// marker that the first-boot admin password was replaced goes here
+    pub state_dir: std::path::PathBuf,
+}
+
+impl AppState {
+    /// A state for tests: no TLS, fixed secrets.
+    #[cfg(test)]
+    pub fn for_tests(store: Arc<dyn Storage>, secret: &[u8]) -> AppState {
+        let mut engine_secret = secret.to_vec();
+        engine_secret.extend_from_slice(b"-engine");
+        AppState { store, secret: secret.to_vec(), engine_secret, tls: Arc::new(crate::tls::TlsState::off()), state_dir: std::path::PathBuf::new() }
+    }
 }
 
 type Ctx = State<Arc<AppState>>;
@@ -109,21 +127,38 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
 /// Who a bearer token signs in as: an engine session (keys.rs) or a signed
 /// login token. The one check every request goes through (the
-/// extractor above and the project authz layer).
+/// extractor above and the project authz layer). A person whose password
+/// must change first is refused everything (only `user_password` admits
+/// them, through `authenticate_any`).
 pub(crate) async fn authenticate(state: &AppState, token: &str) -> Result<AuthUser, ApiError> {
+    let (user, must_change) = authenticate_any(state, token).await?;
+    if must_change {
+        return Err(ApiError::Status(StatusCode::FORBIDDEN, PASSWORD_CHANGE_REQUIRED.into()));
+    }
+    Ok(user)
+}
+
+/// The refusal a person gets until they choose their own password.
+pub(crate) const PASSWORD_CHANGE_REQUIRED: &str = "password change required: choose your own password first (POST /api/users/<you>/password)";
+
+/// `authenticate`, and whether that person must change their password first.
+pub(crate) async fn authenticate_any(state: &AppState, token: &str) -> Result<(AuthUser, bool), ApiError> {
     if token.is_empty() {
         return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "missing bearer token".into()));
     }
-    // an engine session (`iter_` + JWT naming its key, keys.rs) or a
-    // person's (or an older engine user's) signed token
-    let session = iter_core::enginekey::session_jwt(token);
-    let claims: Claims = auth::verify_token(&state.secret, session.unwrap_or(token))
-        .map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
-    if session.is_some() != !claims.kid.is_empty() {
-        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "bad engine session".into()));
+    // an engine session (`iter_` + JWT naming its key, signed with the
+    // engine session secret: keys.rs) or a person's token (the user secret);
+    // engines only ever sign in with their key, never as a user
+    if let Some(jwt) = iter_core::enginekey::session_jwt(token) {
+        let claims: Claims = auth::verify_token(&state.engine_secret, jwt).map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
+        if claims.kid.is_empty() {
+            return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "bad engine session".into()));
+        }
+        return Ok((crate::keys::check_session(state, &claims).await?, false));
     }
-    if session.is_some() {
-        return crate::keys::check_session(state, &claims).await;
+    let claims: Claims = auth::verify_token(&state.secret, token).map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
+    if !claims.kid.is_empty() || claims.role == "engine" {
+        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "engines sign in with their engine key (iter_engine key new), not a user token".into()));
     }
     // tokenver check: the row is the revocation authority
     let row = state
@@ -135,7 +170,8 @@ pub(crate) async fn authenticate(state: &AppState, token: &str) -> Result<AuthUs
     if body_u64(&row, "tokenver") != claims.tokenver {
         return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "token revoked".into()));
     }
-    Ok(AuthUser { sub: claims.sub, role: claims.role })
+    let must_change = row.get("must_change_password").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok((AuthUser { sub: claims.sub, role: claims.role }, must_change))
 }
 
 // ---------- router ----------
@@ -155,6 +191,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/users", get(users_list))
         .route("/api/users/{user}", put(user_put).get(user_get))
         .route("/api/users/{user}/token", post(user_token))
+        .route("/api/users/{user}/password", post(user_password))
         .route("/api/users/{user}/pubkey", post(user_pubkey))
         // agents
         .route("/api/agents", get(agents_list))
@@ -237,20 +274,136 @@ struct LoginReq {
     password: String,
 }
 
-async fn login(State(st): Ctx, Json(req): Json<LoginReq>) -> Result<Json<Value>, ApiError> {
+/// Failed sign-ins allowed per user, and per address, in LOGIN_WINDOW_SECS.
+pub(crate) const LOGIN_MAX_FAILURES: usize = 5;
+const LOGIN_WINDOW_SECS: u64 = 60;
+/// The shortest password a person may choose.
+pub(crate) const MIN_PASSWORD_LEN: usize = 12;
+
+/// Recent failed sign-ins per key ("user:<id>", "ip:<addr>"), in this process.
+fn login_failures() -> &'static std::sync::Mutex<HashMap<String, Vec<std::time::Instant>>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<std::time::Instant>>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Are any of `keys` over the limit? (Drops entries older than the window.)
+fn login_limited(keys: &[String]) -> bool {
+    let mut m = login_failures().lock().unwrap_or_else(|p| p.into_inner());
+    let window = std::time::Duration::from_secs(LOGIN_WINDOW_SECS);
+    m.retain(|_, v| {
+        v.retain(|t| t.elapsed() < window);
+        !v.is_empty()
+    });
+    keys.iter().any(|k| m.get(k).is_some_and(|v| v.len() >= LOGIN_MAX_FAILURES))
+}
+
+fn login_failed(keys: &[String]) {
+    let mut m = login_failures().lock().unwrap_or_else(|p| p.into_inner());
+    for k in keys {
+        m.entry(k.clone()).or_default().push(std::time::Instant::now());
+    }
+}
+
+/// The caller's address: the connection's peer, or the first X-Forwarded-For
+/// hop when the peer is a proxy on this machine.
+fn client_ip(headers: &axum::http::HeaderMap, ext: &axum::http::Extensions) -> String {
+    let peer = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    match (peer, forwarded) {
+        (Some(p), Some(f)) if p.is_loopback() => f,
+        (Some(p), _) => p.to_string(),
+        (None, Some(f)) => f,
+        (None, None) => "unknown".into(),
+    }
+}
+
+/// A new password a person chooses: long enough, and not the one it replaces.
+pub(crate) fn check_new_password(new: &str, old: Option<&str>) -> Result<(), ApiError> {
+    if new.chars().count() < MIN_PASSWORD_LEN {
+        return Err(bad(format!("a password needs at least {MIN_PASSWORD_LEN} characters")));
+    }
+    if old == Some(new) {
+        return Err(bad("choose a password different from the current one"));
+    }
+    Ok(())
+}
+
+async fn login(State(st): Ctx, headers: axum::http::HeaderMap, ext: axum::http::Extensions, Json(req): Json<LoginReq>) -> Result<Json<Value>, ApiError> {
     // sign in by id or by display name; the token always carries the id
     let unknown = || ApiError::Status(StatusCode::UNAUTHORIZED, "bad credentials".into());
-    let uid = crate::settings::resolve_key(st.store.as_ref(), "webui_user", req.user.trim()).await?.ok_or_else(unknown)?;
-    let row = st.store.get("webui_user", &uid, NOSK).await?.ok_or_else(unknown)?;
-    let pwhash = body_str(&row, "pwhash");
+    let ip = client_ip(&headers, &ext);
+    let uid = crate::settings::resolve_key(st.store.as_ref(), "webui_user", req.user.trim()).await?;
+    let mut keys = vec![format!("user:{}", uid.clone().unwrap_or_else(|| req.user.trim().to_ascii_lowercase()))];
+    // per address only when the address is known (a real connection always has one)
+    if ip != "unknown" {
+        keys.push(format!("ip:{ip}"));
+    }
+    if login_limited(&keys) {
+        return Err(ApiError::Status(StatusCode::TOO_MANY_REQUESTS, format!("too many failed sign-ins: wait a minute ({LOGIN_MAX_FAILURES} per minute per user and per address)")));
+    }
+    let row = match &uid {
+        Some(u) => st.store.get("webui_user", u, NOSK).await?,
+        None => None,
+    };
+    let pwhash = row.as_ref().map(|r| body_str(r, "pwhash")).unwrap_or_default();
     if pwhash.is_empty() || !auth::verify_password(&req.password, &pwhash) {
+        login_failed(&keys);
         return Err(unknown());
     }
+    let (uid, row) = (uid.unwrap_or_default(), row.unwrap_or_default());
     let role = body_str(&row, "role");
     let tokenver = body_u64(&row, "tokenver").max(1);
     let token = auth::mint_token(&st.secret, &uid, &role, tokenver, 24 * 3600)
         .map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({"token": token, "role": role, "user": uid, "name": body_str(&row, "name"), "timezone": body_str(&row, "timezone")})))
+    let must_change = row.get("must_change_password").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok(Json(json!({"token": token, "role": role, "user": uid, "name": body_str(&row, "name"), "timezone": body_str(&row, "timezone"), "must_change_password": must_change})))
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordReq {
+    current_password: String,
+    new_password: String,
+}
+
+/// A person changes their own password: the current one is required, the
+/// new one is checked, every other session ends (tokenver), and a fresh
+/// token for this one is returned. Allowed while a change is required.
+/// Replacing the first admin's first-boot password leaves a marker file for
+/// the installers to remove that password from the env file (and SSM).
+async fn user_password(State(st): Ctx, headers: axum::http::HeaderMap, Path(name): Path<String>, Json(req): Json<PasswordReq>) -> Result<Json<Value>, ApiError> {
+    let bearer = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").strip_prefix("Bearer ").unwrap_or("").to_string();
+    let (user, _) = authenticate_any(&st, &bearer).await?;
+    if user.sub != name || user.role == "engine" {
+        return Err(ApiError::Status(StatusCode::FORBIDDEN, "you change only your own password (an admin resets someone else's with PUT /api/users/<user>)".into()));
+    }
+    let mut row = st.store.get("webui_user", &name, NOSK).await?.ok_or_else(notfound)?;
+    let keys = vec![format!("user:{name}"), format!("pw:{name}")];
+    if login_limited(&keys) {
+        return Err(ApiError::Status(StatusCode::TOO_MANY_REQUESTS, "too many wrong current passwords: wait a minute".into()));
+    }
+    let pwhash = body_str(&row, "pwhash");
+    if pwhash.is_empty() || !auth::verify_password(&req.current_password, &pwhash) {
+        login_failed(&keys);
+        return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "the current password is wrong".into()));
+    }
+    check_new_password(&req.new_password, Some(&req.current_password))?;
+    let was_required = row.get("must_change_password").and_then(|v| v.as_bool()).unwrap_or(false);
+    let tokenver = body_u64(&row, "tokenver").max(1) + 1;
+    row["pwhash"] = json!(auth::hash_password(&req.new_password).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?);
+    row["must_change_password"] = json!(false);
+    row["tokenver"] = json!(tokenver);
+    st.store.put("webui_user", &name, NOSK, &row).await?;
+    st.store.bump_seq(GLOBAL, "webui_user").await?;
+    if was_required && name == crate::BOOTSTRAP_ADMIN && !st.state_dir.as_os_str().is_empty() {
+        let marker = st.state_dir.join(crate::ADMIN_PASSWORD_CHANGED);
+        if let Err(e) = std::fs::write(&marker, format!("{}\n", iter_core::now_utc())) {
+            eprintln!("[iter_data] could not write {}: {e}", marker.display());
+        }
+        println!("[iter_data] the first admin chose their own password: the first-boot ITER_ADMIN_PASSWORD is no longer used and can be removed");
+    }
+    let role = body_str(&row, "role");
+    let token = auth::mint_token(&st.secret, &name, &role, tokenver, 24 * 3600).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({"token": token, "role": role, "user": name, "name": body_str(&row, "name"), "timezone": body_str(&row, "timezone"), "must_change_password": false})))
 }
 
 // ---------- users ----------
@@ -289,6 +442,11 @@ async fn user_put(
         return Err(forbidden());
     }
     let existing = st.store.get("webui_user", &name, NOSK).await?;
+    // the password hash and the must-change flag are never taken from a client
+    if let Some(o) = body.as_object_mut() {
+        o.remove("pwhash");
+        o.remove("must_change_password");
+    }
     // ':' marks an engine token's subject (iter_engine:<id>, keys.rs)
     if existing.is_none() && name.contains(':') {
         return Err(bad("a user id may not contain ':'"));
@@ -311,24 +469,39 @@ async fn user_put(
     }
     crate::settings::settle_name(st.store.as_ref(), "webui_user", &name, &mut body).await?;
     body["user"] = json!(name);
-    // password (plaintext, TLS-transported) -> pwhash; else preserve existing
-    if let Some(pw) = body.get("password").and_then(|v| v.as_str()).map(String::from) {
-        let hash = auth::hash_password(&pw).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        body["pwhash"] = json!(hash);
-        body.as_object_mut().unwrap().remove("password");
-    } else if body.get("pwhash").map(|v| v.as_str().unwrap_or("").is_empty()).unwrap_or(true) {
-        if let Some(ex) = &existing {
-            body["pwhash"] = ex.get("pwhash").cloned().unwrap_or(json!(""));
+    // a password here (plaintext over TLS) is an admin setting someone
+    // else's: it must be changed at their next sign-in, and their sessions
+    // end. A person changes their own with POST …/password (it needs the
+    // current one).
+    let prior_tokenver = existing.as_ref().map(|e| body_u64(e, "tokenver")).unwrap_or(0).max(1);
+    let new_pw = body.get("password").and_then(|v| v.as_str()).map(String::from);
+    if let Some(o) = body.as_object_mut() {
+        o.remove("password");
+    }
+    match new_pw.filter(|p| !p.is_empty()) {
+        Some(_) if user.sub == name => {
+            return Err(bad(format!("change your own password with POST /api/users/{name}/password: it needs your current one")));
+        }
+        Some(pw) => {
+            check_new_password(&pw, None)?;
+            body["pwhash"] = json!(auth::hash_password(&pw).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?);
+            body["must_change_password"] = json!(true);
+            body["tokenver"] = json!(if existing.is_some() { prior_tokenver + 1 } else { 1 });
+        }
+        None => {
+            if let Some(ex) = &existing {
+                body["pwhash"] = ex.get("pwhash").cloned().unwrap_or(json!(""));
+                body["must_change_password"] = ex.get("must_change_password").cloned().unwrap_or(json!(false));
+            }
         }
     }
     if body.get("tokenver").and_then(|v| v.as_u64()).unwrap_or(0) == 0 {
-        let prior = existing.as_ref().map(|e| body_u64(e, "tokenver")).unwrap_or(0);
-        body["tokenver"] = json!(prior.max(1));
+        body["tokenver"] = json!(prior_tokenver);
     }
     let parsed: WebuiUser =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("user does not parse: {e}")))?;
-    if !["user", "engine", "admin", "viewer"].contains(&parsed.role.as_str()) {
-        return Err(bad("role must be user|engine|admin|viewer"));
+    if !["user", "admin", "viewer"].contains(&parsed.role.as_str()) {
+        return Err(bad("role must be user|admin|viewer (engines sign in with engine keys, not as users)"));
     }
     st.store.put("webui_user", &name, NOSK, &body).await?;
     st.store.bump_seq(GLOBAL, "webui_user").await?;
@@ -2515,7 +2688,7 @@ mod tests {
     // Handlers called directly on a throwaway ArangoDB database: no server, no model.
 
     async fn mem() -> Arc<AppState> {
-        Arc::new(AppState { store: Arc::new(crate::test_db::store().await.0), secret: b"test".to_vec() })
+        Arc::new(AppState::for_tests(Arc::new(crate::test_db::store().await.0), b"test"))
     }
     fn admin() -> AuthUser {
         AuthUser { sub: "tester".into(), role: "admin".into() }

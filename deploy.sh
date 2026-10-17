@@ -53,10 +53,13 @@ stop_native() {
   fi
 }
 
+# SCHEME: local mode is plain http on loopback (--tls off); docker serves its
+# self-signed certificate (installers/iter_data/docker)
+SCHEME=http
 wait_health() {
   for i in $(seq 1 120); do
-    if curl -sf "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
-      echo "[deploy] iter_data up: http://127.0.0.1:$PORT  $(curl -s "http://127.0.0.1:$PORT/health")"
+    if curl -sfk "$SCHEME://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok":true'; then
+      echo "[deploy] iter_data up: $SCHEME://127.0.0.1:$PORT  $(curl -sk "$SCHEME://127.0.0.1:$PORT/health")"
       return 0
     fi
     sleep 1
@@ -81,6 +84,7 @@ case "$MODE" in
     ARANGO_ROOT_PASSWORD="$ARANGO_PW" "$ROOT/installers/iter_data/docker/install.sh" \
       --env-file "$ENV_FILE" --port "$PORT" --data-dir "$DATA_DIR" --name iter5 \
       --arango-port "${ARANGO_HOST_PORT:-8630}" --model-dir "$ROOT/models/all-MiniLM-L6-v2"
+    SCHEME=https
     ;;
   local)
     build_native
@@ -91,7 +95,7 @@ case "$MODE" in
         -e ARANGO_ROOT_PASSWORD="$ARANGO_PW" -v iter4-arango-dev:/var/lib/arangodb3 arangodb:3.12 arangod --vector-index >/dev/null
     fi
     ARANGO_URL=http://127.0.0.1:8529 ARANGO_PASSWORD="$ARANGO_PW" nohup "$BIN/iter_data" --backend arango \
-      --listen "127.0.0.1:$PORT" --secret-file "$RUN/iter_data.secret" --env-file "$ENV_FILE" \
+      --listen "127.0.0.1:$PORT" --secret-file "$RUN/iter_data.secret" --env-file "$ENV_FILE" --tls off \
       --webui-dir "$ROOT/iter_data/webui" --embed-model "$ROOT/models/all-MiniLM-L6-v2" > "$RUN/iter_data.log" 2>&1 &
     echo $! > "$RUN/iter_data.pid"
     wait_health || { tail -20 "$RUN/iter_data.log"; exit 1; }
@@ -99,4 +103,4 @@ case "$MODE" in
   *)
     echo "usage: $0 docker|local"; exit 2 ;;
 esac
-echo "[deploy] webui: http://127.0.0.1:$PORT/  (login: admin / ITER_ADMIN_PASSWORD)"
+echo "[deploy] webui: $SCHEME://127.0.0.1:$PORT/  (login: admin / ITER_ADMIN_PASSWORD)"

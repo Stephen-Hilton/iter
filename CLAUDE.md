@@ -52,3 +52,15 @@ committed) and one self-contained install script per program and platform. Insta
   step with that script's options and lint it with `cfn-lint`.
 - `installers/README.md` and `installers/installers.code.iter.md` describe the layout; update them when a
   folder is added or removed.
+
+## Secrets and sign-in (do not weaken)
+
+- Engines sign in only with their own Ed25519 key (`iter_engine key new|show|rotate`); never add a user-token
+  path for engines. Engine sessions and people's tokens use separate signing secrets.
+- iter_data serves HTTPS (`--tls auto` by default); engines pin its certificate fingerprint (`~/.iter/server_trust.json`,
+  `iter_engine key trust`) and refuse plain `http://` except to this machine. Tests and the local dev loop use `--tls off`
+  on 127.0.0.1 only.
+- Account tokens: process environment > `--secrets-command` > `~/.iter/.env`. Never log a value, never write the
+  secrets command's output to disk, and keep `envstore::scrub` on every child process the engine starts.
+- People: the first admin and admin-set passwords must be changed at first sign-in (`must_change_password`);
+  password changes need the current password and 12+ characters and end other sessions; sign-ins are rate-limited.

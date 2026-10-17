@@ -97,6 +97,7 @@ fn env_of<'a>(ctx: &'a AgentContext, key: &str) -> Option<&'a str> {
 fn shell(ctx: &AgentContext, cwd: &Path, script: &str, s: &DispatchSettings, deadline: Instant) -> Result<String, String> {
     let mut cmd = iter_core::platform::bash();
     cmd.arg("-c").arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::envstore::scrub(&mut cmd);
     for (k, v) in &ctx.env {
         cmd.env(k, v);
     }

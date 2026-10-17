@@ -46,11 +46,11 @@ served by iter_data (default `0.0.0.0:8400`; `ITER_PORT` / `ITER_LISTEN`).
 
 ## Auth
 
-`Authorization: Bearer <token>`, HS256 JWTs signed with `ITER_JWT_SECRET`
-(`iter_data/src/auth.rs`). People get one from `/auth/login` (the web page
-keeps it for the session); an engine uses `ITER_ENGINE_TOKEN` from its env
-file, minted by an admin (`POST /api/users/<user>/token`) and bound to the
-owning user. Authorization per call (`authz.rs`): admins see everything; an
+`Authorization: Bearer <token>` over HTTPS, HS256 JWTs: people's signed with
+`ITER_JWT_SECRET` (`iter_data/src/auth.rs`), from `/auth/login` (the web page
+keeps it for the session); an engine's session (`iter_` + JWT) signed with a
+separate engine secret, from its signed key sign-in (`iter_data/src/keys.rs`),
+and handed to the agents it starts as `ITER_ENGINE_TOKEN`. Authorization per call (`authz.rs`): admins see everything; an
 engine token reaches a project only through an active `serves` edge from one
 of its user's engines; a user through a `member` edge (`user` or `viewer`).
 Settings-graph writes are admin only.

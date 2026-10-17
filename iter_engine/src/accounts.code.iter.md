@@ -35,8 +35,10 @@ next account to free up.
 **Env store** (`iter_engine/src/envstore.rs`): one process-wide map of the env file. `init` seeds it,
 `get` serves token reads (never `std::env`, which is unsafe to mutate under running threads), and
 `reload_if_changed` re-reads the file when it moved, refreshing only `*_TOKEN` keys and the served
-projects' `token_envar`s. Keys the process environment supplied win; `ITER_ENGINE_TOKEN` is pinned;
-values are never logged.
+projects' `token_envar`s. Keys the process environment supplied win, then the secrets command's
+(`set_command`, run at startup and every few minutes, values in memory only), then the file's;
+`scrub` removes every account's token from a child process's environment, so a Claude session holds
+only its own (as `CLAUDE_CODE_OAUTH_TOKEN`); values are never logged, missing tokens by name only.
 
 ## What goes in and out
 

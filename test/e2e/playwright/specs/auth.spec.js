@@ -23,6 +23,40 @@ test.describe('login / logout', () => {
     expect(await page.evaluate(() => localStorage.getItem('iter5.token'))).toBeNull();
   });
 
+  test.describe('a password set by an admin', () => {
+    test.use({ allowConsole: [/40[03]/] });
+    test('must be changed at the first sign-in, and the change needs the current one', async ({ page, state, admin }) => {
+      const who = 'pwnew' + Date.now().toString(36);
+      await admin.put(`/api/users/${who}`, { role: 'user', password: 'set-by-admin-123', email: '', settings: {}, authz: {} });
+      await page.goto('/');
+      await page.fill('#li-user', who);
+      await page.fill('#li-pass', 'set-by-admin-123');
+      await page.click('#li-go');
+      await expect(page.locator('#pwchange')).toBeVisible();
+      await expect(page.locator('#top')).toBeHidden();
+      // until it is changed, the session is good for nothing else
+      const held = await page.evaluate(() => localStorage.getItem('iter5.token'));
+      expect((await new Api(state.base, held).call('GET', '/api/projects', undefined, [403])).status).toBe(403);
+      // too short, then mismatched, then right
+      await page.fill('#pc-new', 'short');
+      await page.fill('#pc-new2', 'short');
+      await page.click('#pc-go');
+      await expect(page.locator('#pc-err')).toContainText('12');
+      await page.fill('#pc-new', 'my-own-password-1');
+      await page.fill('#pc-new2', 'my-own-password-2');
+      await page.click('#pc-go');
+      await expect(page.locator('#pc-err')).toContainText('differ');
+      await page.fill('#pc-new2', 'my-own-password-1');
+      await page.click('#pc-go');
+      await expect(page.locator('#top')).toBeVisible();
+      await expect(page.locator('#pwchange')).toBeHidden();
+      // the old session ended; the new password signs in with no change asked
+      expect((await new Api(state.base, held).call('GET', '/api/projects', undefined, [401])).status).toBe(401);
+      const again = await Api.login(state.base, who, 'my-own-password-1');
+      expect(again.mustChange).toBe(false);
+    });
+  });
+
   test.describe('bad password', () => {
     test.use({ allowConsole: [/401/] });
     test('is refused with a message', async ({ page }) => {

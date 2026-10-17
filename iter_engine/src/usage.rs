@@ -349,6 +349,8 @@ pub fn accounts_json(accounts: &[iter_core::Account], in_use: &[String], now: Da
                 // is the account's token set in the engine's env_file right now
                 // (spec: account hot reload, 2026-09-11) — the webui marks "unset"
                 "token": if crate::envstore::get(&a.token_envar).is_some() { "set" } else { "unset" },
+                // where it came from: env | command | file ("" = unset); never the value
+                "token_source": crate::envstore::source_of(&a.token_envar),
                 "five_hour_pct": u.as_ref().map(|u| (u.five_hour_pct * 10.0).round() / 10.0),
                 "seven_day_pct": u.as_ref().map(|u| (u.seven_day_pct * 10.0).round() / 10.0),
                 "five_hour_resets_at": u.as_ref().and_then(|u| u.five_hour_resets_at),

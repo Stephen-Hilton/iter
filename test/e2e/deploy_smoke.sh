@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # deploy_smoke.sh — prove a DEPLOYED iter5 works end to end, then clean up.
 #
-#   ./e2e/deploy_smoke.sh [--url http://127.0.0.1:8400]
+#   ./test/e2e/deploy_smoke.sh [--url https://127.0.0.1:8400]
 #
 # Against the running server it: logs in as admin (ITER_ADMIN_PASSWORD from
-# the repo .env or the environment), creates a throwaway engine user, agent, mock
+# the repo .env or the environment), registers a throwaway engine key, agent, mock
 # account and DESIGNED project, designs two nodes in the graph, starts a real
 # engine (target/debug/iter_engine, mock provider) that builds the project into
 # a scratch repo, runs one work item, checks file → node and node → file sync,
@@ -12,19 +12,25 @@
 # (records via the API; the scratch repo is moved to the scratch dir's trash).
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-BASE="http://127.0.0.1:8400"
+BASE="https://127.0.0.1:8400"
 [ "${1:-}" = "--url" ] && BASE="${2%/}"
 ENV_FILE="${ITER_ENV_FILE:-$REPO/.env}"
 envval() { [ -f "$ENV_FILE" ] && grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//' || true; }
 PASS_ADMIN="${ITER_ADMIN_PASSWORD:-$(envval ITER_ADMIN_PASSWORD)}"
 ENGINE_BIN="${ITER_ENGINE_BIN:-$REPO/target/debug/iter_engine}"
-TS=$(date +%s); P="smoke5_$TS"; ENG="smoke5_eng_$TS"; EUSER="smoke5_engine_$TS"; AG="smoke5_agent_$TS"; ACCT="smoke5_acct_$TS"
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/iter5-smoke.XXXXXX")"; TOP="$SCRATCH/repo"; ENVF="$SCRATCH/engine.env"
+TS=$(date +%s); P="smoke5_$TS"; ENG="smoke5_eng_$TS"; AG="smoke5_agent_$TS"; ACCT="smoke5_acct_$TS"
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/iter5-smoke.XXXXXX")"; TOP="$SCRATCH/repo"; ENVF="$SCRATCH/engine.env"; KEYF="$SCRATCH/engine.key"
+# the engine's trusted-certificate file stays in the scratch dir; curl skips
+# verification (-k): the engine pins the certificate itself, and the check
+# below compares what it pinned with what iter_data says it serves
+export ITER_HOME="$SCRATCH/iterhome"
+KID=""
 PASS=0; FAIL=0; FAILED=()
 ok()     { PASS=$((PASS+1)); printf '\033[32mPASS\033[0m %s\n' "$1"; }
 bad()    { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '\033[31mFAIL\033[0m %s\n' "$1"; }
 check()  { local n="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$n"; else bad "$n"; fi; }
 expect() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi; }
+curl() { command curl -k "$@"; }
 api()  { local b=(); [ $# -ge 3 ] && b=(-d "$3"); curl -sf -X "$1" -H "authorization: Bearer $TOKEN" -H content-type:application/json "$BASE$2" ${b[@]+"${b[@]}"}; }
 wait_for() { local t=$1; shift; local i=0; while [ $i -lt $((t*2)) ]; do eval "$*" >/dev/null 2>&1 && return 0; sleep 0.5; i=$((i+1)); done; return 1; }
 ENGINE_PID=""
@@ -36,7 +42,10 @@ cleanup() {
     curl -s -X DELETE -H "authorization: Bearer $TOKEN" "$BASE/api/agents/$AG" >/dev/null
     curl -s -X DELETE -H "authorization: Bearer $TOKEN" "$BASE/api/engines/$ENG?force=true" >/dev/null
     curl -s -X DELETE -H "authorization: Bearer $TOKEN" "$BASE/api/settings/nodes/iter_engine:$ENG" >/dev/null
-    curl -s -X DELETE -H "authorization: Bearer $TOKEN" "$BASE/api/settings/nodes/user:$EUSER" >/dev/null
+    if [ -n "$KID" ]; then
+      curl -s -X POST -H "authorization: Bearer $TOKEN" "$BASE/api/keys/$KID/revoke" >/dev/null
+      curl -s -X DELETE -H "authorization: Bearer $TOKEN" "$BASE/api/keys/$KID" >/dev/null
+    fi
   fi
   echo "scratch kept for inspection: $SCRATCH"
 }
@@ -50,9 +59,14 @@ TOKEN=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d 
 [ -n "$TOKEN" ] && [ "$TOKEN" != null ] && ok "admin login" || { bad "admin login"; exit 1; }
 [ -x "$ENGINE_BIN" ] || { bad "engine binary $ENGINE_BIN (cargo build -p iter_engine)"; exit 1; }
 
-api PUT "/api/users/$EUSER" '{"role":"engine","password":"unused-smoke-pw","email":""}' >/dev/null
-ETOKEN=$(api POST "/api/users/$EUSER/token" '{"ttl_days":1}' | jq -r .token)
-[ -n "$ETOKEN" ] && [ "$ETOKEN" != null ] && ok "engine user + token" || bad "engine user + token"
+PUB=$("$ENGINE_BIN" key new --key-file "$KEYF" --name "$ENG" | sed -n 's/^  \(iter_[0-9a-f]*\)$/\1/p')
+KID=$(api POST /api/keys "{\"public_key\":\"$PUB\",\"engine\":\"$ENG\",\"label\":\"deploy smoke\"}" | jq -r .id)
+[ -n "$KID" ] && [ "$KID" != null ] && ok "engine key registered" || bad "engine key registered"
+"$ENGINE_BIN" key status --key-file "$KEYF" --data-url "$BASE" >/dev/null 2>&1 && ok "engine key signs in" || bad "engine key signs in"
+case "$BASE" in https://*)
+  FP=$(api GET /api/server/tls | jq -r .fingerprint)
+  check "the engine pinned the certificate iter_data serves" bash -c "jq -e --arg f '$FP' '[.servers[].pins[]]|index(\$f)!=null' '$ITER_HOME/server_trust.json'" ;;
+esac
 api PUT "/api/agents/$AG" "{\"desc\":\"deploy smoke\",\"max\":2,\"timeoutsec\":60,\"model\":\"\",\"promptbody\":\"smoke agent\"}" >/dev/null && ok "agent created" || bad "agent created"
 
 # designed project: no engine yet
@@ -65,12 +79,12 @@ REQ=$(api POST "/api/projects/$P/graph/nodes" "{\"nodetype\":\"techreq\",\"name\
 expect "designed nodes are 'designed' (no repo yet)" designed "$(api GET "/api/projects/$P/graph/nodes/$CTX" | jq -r .file_state)"
 
 # engine + mock account wired in the settings graph, then build
-api PUT "/api/engines/$ENG" "{\"host\":\"smoke\",\"state\":\"Stopped\",\"ticksec\":1,\"user\":\"$EUSER\"}" >/dev/null
+api PUT "/api/engines/$ENG" "{\"host\":\"smoke\",\"state\":\"Stopped\",\"ticksec\":1}" >/dev/null
 api POST /api/settings/nodes "{\"type\":\"account\",\"name\":\"$ACCT\",\"settings\":{\"provider\":\"mock\",\"token_envar\":\"SMOKE_ACCT_TOKEN\"}}" >/dev/null
 api POST /api/settings/edges "{\"from\":\"iter_engine:$ENG\",\"to\":\"account:$ACCT\"}" >/dev/null
 api POST /api/settings/edges "{\"from\":\"account:$ACCT\",\"to\":\"project:$P\",\"settings\":{\"order\":1,\"switch\":80,\"stop\":95}}" >/dev/null
-printf 'ITER_ENGINE_TOKEN=%s\nSMOKE_ACCT_TOKEN=mock-token\n' "$ETOKEN" > "$ENVF"
-"$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --name "$ENG" > "$SCRATCH/engine.log" 2>&1 &
+printf 'SMOKE_ACCT_TOKEN=mock-token\n' > "$ENVF"
+"$ENGINE_BIN" --data-url "$BASE" --env-file "$ENVF" --key-file "$KEYF" --name "$ENG" > "$SCRATCH/engine.log" 2>&1 &
 ENGINE_PID=$!
 wait_for 20 "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/engines/$ENG | jq -e '.last_seen|length>0'" && ok "engine checked in" || bad "engine checked in"
 api POST "/api/projects/$P/build" "{\"engine\":\"$ENG\",\"topdir\":\"$TOP\",\"queue_plan\":false}" >/dev/null && ok "build requested" || bad "build requested"

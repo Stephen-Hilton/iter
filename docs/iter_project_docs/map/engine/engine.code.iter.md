@@ -27,8 +27,10 @@ module **iter_engine::local — checkout tools** does the things done to files o
 ## How it works
 
 `iter_engine --data-url <url> --env-file <path> [--name <engine>]` reads
-nothing else from disk. The env file holds `ITER_ENGINE_TOKEN` and each
-account's token, and is re-read while the engine runs. On each tick
+nothing else from disk but its key (`~/.iter/engine.key`) and the server
+certificate it pins (`~/.iter/server_trust.json`). Account tokens come from
+the process environment, an optional secrets command and the env file,
+which is re-read while the engine runs. On each tick
 (`iter_engine/src/engine.rs`) the engine heartbeats, refreshes its
 **assignments** (`GET /api/engines/{name}/assignments`: the projects it serves
 with their `topdir`, the accounts it holds that bill each project), and then,

@@ -52,7 +52,8 @@ COPY models/all-MiniLM-L6-v2 /opt/iter/models/all-MiniLM-L6-v2
 
 # Everything that persists lives under one mount, /var/lib/iter_data:
 # arango/ (the database), arango-apps/ (Arango's Foxx app dir), iter/ (iter_data's
-# secret and .env files). The paths arangod and its entrypoint hardcode are links
+# secret files, engine_session.secret, the TLS certificate tls.crt/tls.key and the .env
+# file; custom-tls/ holds a certificate of your own). The paths arangod and its entrypoint hardcode are links
 # into it; the entrypoint creates the subdirectories.
 RUN chmod +x /usr/local/bin/iter-entrypoint.sh /usr/local/bin/arango-entrypoint.sh \
  && ln -s arangod /usr/sbin/arango-init-database \
@@ -69,6 +70,9 @@ ENV ARANGO_VERSION=3.12.12 \
     ITER_LISTEN=0.0.0.0:8400
 VOLUME ["/var/lib/iter_data"]
 EXPOSE 8400 8529
+# iter_data serves HTTPS with a self-signed certificate (-k: this only asks "up?");
+# with ITER_TLS=off it is plain http
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:8400/health | grep -q '"ok":true' || exit 1
+  CMD curl -fsSk https://127.0.0.1:8400/health 2>/dev/null | grep -q '"ok":true' \
+   || curl -fsS http://127.0.0.1:8400/health 2>/dev/null | grep -q '"ok":true' || exit 1
 ENTRYPOINT ["/usr/local/bin/iter-entrypoint.sh"]

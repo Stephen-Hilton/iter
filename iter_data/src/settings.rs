@@ -1126,12 +1126,17 @@ async fn assignments_get(user: AuthUser, State(st): Ctx, Path(name): Path<String
     let store = st.store.as_ref();
     let rec = store.get("engine", &name, NOSK).await?.ok_or_else(notfound)?;
     if user.role != "admin" {
-        let owner = body_str(&rec, "user");
-        let edges = load_edges(store).await?;
-        let owned = owner == user.sub || engines_of_user(store, &edges, &user.sub).await?.contains(&name);
-        // an unowned (iter4) record may be read by any engine token until
-        // its first heartbeat claims it
-        if !owned && !(owner.is_empty() && user.role == "engine") {
+        // an engine session reads only its own engine's assignments; a person
+        // those of an engine they own
+        let allowed = match machine_engine(&user.sub) {
+            Some(me) => me == name,
+            None => {
+                let owner = body_str(&rec, "user");
+                let edges = load_edges(store).await?;
+                !owner.is_empty() && (owner == user.sub || engines_of_user(store, &edges, &user.sub).await?.contains(&name))
+            }
+        };
+        if !allowed {
             return Err(forbidden());
         }
     }

@@ -17,9 +17,11 @@ The steps are the same as `../linux`, plus these WSL specifics:
 - **Keepalive**: WSL stops a distro, and its services with it, once no Windows program holds it open. The script offers to register a hidden Windows logon task, `iter WSL keepalive (<distro>)`, that runs `wsl.exe -d <distro> --exec /bin/sleep infinity` through `powershell.exe`. To do it by hand, create that task in Task Scheduler.
 - **Checkouts** belong on the distro's own disk (`~/dev/<project>`), never on `/mnt/c`, where git and builds are slow. The script warns about topdirs under `/mnt/`.
 - **No laptop-suspend step**. Windows' power settings decide sleep. On a laptop, run `powercfg /change standby-timeout-ac 0` in Windows.
-- If iter_data runs in the same distro (the iter_data Linux installer), its URL is `http://127.0.0.1:8400`.
+- If iter_data runs in the same distro (the iter_data Linux installer), its URL is `https://127.0.0.1:8400` (iter_data serves HTTPS; `http://` only if it runs with `--tls off`).
+- **HTTPS**: as in `../linux`, the URL must be `https://` unless iter_data runs in this distro, and the engine pins iter_data's certificate fingerprint in `~/.iter/server_trust.json`: `--fingerprint sha256:…` (from the iter_data installer or the webui's 🔑 Engine keys screen), or paste it when asked, or let the first sign-in trust it and compare with `iter_engine key status`. `--trust-ca` for a TLS proxy with a real certificate. See [../linux](../linux/README.md#https-and-iter_datas-certificate) for `key trust`, `key show` and `key rotate`.
+- **Account tokens from a secret store**: `--secrets-command CMD` (and `--secrets-every N`), as in [../linux](../linux/README.md#account-tokens-from-a-secret-store), with the recipes there (AWS SSM / Secrets Manager, 1Password). It goes on the unit's `ExecStart`; the accounts step then asks for no tokens.
 
-Options, verbs, files and the binary lookup are the same as `../linux`: `--data-url`, `--name`, `--version`, `--binary`, `--yes`, `--dry-run`; `install`, `status`, `update`, `accounts`, `projects`, `logs`, `uninstall`.
+Options, verbs, files and the binary lookup are the same as `../linux`: `--data-url`, `--name`, `--version`, `--binary`, `--fingerprint`, `--trust-ca`, `--secrets-command`, `--secrets-every`, `--yes`, `--dry-run`; `install`, `status`, `update`, `accounts`, `projects`, `logs`, `uninstall`.
 
 ## Upgrade
 

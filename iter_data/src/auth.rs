@@ -51,10 +51,12 @@ pub fn verify_token(secret: &[u8], token: &str) -> Result<Claims, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Load the JWT secret: ITER_JWT_SECRET env wins; else read/create a sidecar
-/// file so restarts keep sessions valid.
-pub fn load_secret(secret_file: &str) -> Vec<u8> {
-    if let Ok(s) = std::env::var("ITER_JWT_SECRET") {
+/// Load a signing secret: the `env` variable wins; else read (and narrow to
+/// its owner) or create the sidecar file, so restarts keep sessions valid.
+/// Two of them: ITER_JWT_SECRET / iter_data.secret signs people's tokens,
+/// ITER_ENGINE_SESSION_SECRET / engine_session.secret engine sessions.
+pub fn load_secret(env: &str, secret_file: &str) -> Vec<u8> {
+    if let Ok(s) = std::env::var(env) {
         if !s.trim().is_empty() {
             return s.trim().as_bytes().to_vec();
         }
@@ -62,6 +64,7 @@ pub fn load_secret(secret_file: &str) -> Vec<u8> {
     if let Ok(s) = std::fs::read_to_string(secret_file) {
         let t = s.trim().to_string();
         if !t.is_empty() {
+            crate::tls::restrict(std::path::Path::new(secret_file));
             return t.into_bytes();
         }
     }
@@ -71,8 +74,10 @@ pub fn load_secret(secret_file: &str) -> Vec<u8> {
         .take(48)
         .map(char::from)
         .collect();
-    let _ = std::fs::write(secret_file, &generated);
-    eprintln!("[iter_data] generated new JWT secret -> {secret_file}");
+    if let Err(e) = crate::tls::write_private(std::path::Path::new(secret_file), generated.as_bytes()) {
+        eprintln!("[iter_data] could not keep the new secret in {secret_file}: {e} (sessions end at restart)");
+    }
+    eprintln!("[iter_data] generated a new signing secret -> {secret_file}");
     generated.into_bytes()
 }
 

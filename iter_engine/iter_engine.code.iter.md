@@ -24,8 +24,9 @@ The worker program: one per machine, it keeps every assigned project's files in 
 
 iter_engine is the only part of iter that touches a repository. It is started as
 `iter_engine --data-url <url> --env-file <path> [--name <engine name>]` (`src/main.rs`); the name
-defaults to the short hostname. The env file holds `ITER_ENGINE_TOKEN` (its iter_data credential) and
-the LLM account tokens; nothing else is read from disk. Which projects it serves, where each checkout
+defaults to the short hostname. It signs in with its own key (`~/.iter/engine.key`) over HTTPS it pins
+(`src/trust.rs`); the LLM account tokens come from the process environment, the optional
+`--secrets-command` and the env file; nothing else is read from disk. Which projects it serves, where each checkout
 lives and which accounts each may bill come from `GET /api/engines/{name}/assignments`, derived on the
 server from the settings graph (`serves`, `bills`, `holds`, `of` edges).
 

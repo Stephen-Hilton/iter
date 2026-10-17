@@ -61,6 +61,8 @@ pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettin
     let mut cmd = Command::new(claude_bin());
     let (args, input) = args_and_stdin(model, ctx, s, cfg!(windows).then_some(WINDOWS_ARGV_PROMPT_MAX));
     cmd.args(args);
+    // no account token but this session's own: the process may hold others
+    crate::envstore::scrub(&mut cmd);
     // route billing to the account's token; a named account without one never
     // reaches here (provider::call / work::resolve_account_token refuse it)
     if let Some(tok) = &s.token {

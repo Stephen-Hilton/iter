@@ -18,12 +18,24 @@
 #   --backup-dir DIR       where backups go [/var/backups/iter]
 #   --memory MiB           memory cap for ArangoDB + iter_data together [min(6144, 85% of RAM)]
 #   --arango-version V     ArangoDB CE version, from the official arangodb image [3.12.12]
+#   --tls-cert PATH        serve this certificate (PEM, e.g. a real one for your domain) instead of
+#                          the self-signed one; needs --tls-key; copied to /var/lib/iter (user iter)
+#   --tls-key PATH         the private key (PEM) for --tls-cert (kept mode 600)
+#   --tls-name NAME        an extra DNS name or IP on the self-signed certificate (repeatable), e.g.
+#                          the instance's public DNS name or Elastic IP;
+#                          only read when the certificate is first made
+#   --tls off|auto         off = plain HTTP, only behind a TLS proxy on this host; auto = the
+#                          self-signed certificate again (drops an earlier --tls-cert or --tls off)
 #   --dry-run              print every action, change nothing
 #   -h, --help             this text
 #
 # Lands in: /opt/iter/bin/iter_data, /opt/iter/models/ (embedding model),
 # /etc/iter/data.env (secrets, root:iter 640), /var/lib/iter (iter_data's files, user
 # iter), the database in --db-dir (user arangodb), /usr/sbin/arangod + clients.
+# HTTPS by default: iter_data makes a self-signed certificate on first start
+# (/var/lib/iter/tls.crt, kept across reinstalls); the script prints its fingerprint,
+# to give to each engine installer (--fingerprint) or compare with `iter_engine key
+# status`. The TLS choices are kept in /etc/iter/tls.env, so a plain rerun keeps them.
 # Logs: journalctl -u iter-data -u arangodb3. Run as ec2-user (sudo) or root. Needs
 # no instance metadata (IMDS) and no AWS credentials.
 set -euo pipefail
@@ -32,9 +44,12 @@ REPO="Stephen-Hilton/iter"
 FOLDER="installers/iter_data/linux_aws"
 # shellcheck disable=SC2015  # piped from curl there is no script dir: fall back to the cwd
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
-SUPPORT=(arangod.conf iter-backup systemd/iter.slice systemd/arangodb3.service systemd/iter-data.service
-         systemd/iter-backup.service systemd/iter-backup.timer)
-UNITS=(iter.slice arangodb3.service iter-data.service iter-backup.service iter-backup.timer)
+SUPPORT=(arangod.conf iter-backup iter-admin-cleanup systemd/iter.slice systemd/arangodb3.service systemd/iter-data.service
+         systemd/iter-backup.service systemd/iter-backup.timer systemd/iter-admin-cleanup.path systemd/iter-admin-cleanup.service)
+UNITS=(iter.slice arangodb3.service iter-data.service iter-backup.service iter-backup.timer
+       iter-admin-cleanup.path iter-admin-cleanup.service)
+# iter_data writes this once the first admin has chosen their own password
+MARKER=/var/lib/iter/admin_password_changed
 MODEL_SHA="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
 ARANGO_CLIENTS=(arangosh arangodump arangorestore arangobackup arangoexport arangoimport)
 
@@ -48,10 +63,11 @@ BACKUP_DIR=""
 MEM_MIB=""
 ARANGO_VERSION="${ARANGO_VERSION:-3.12.12}"
 DRY=0
+TLS_CERT_SRC="" TLS_KEY_SRC="" TLS_OPT="" TLS_NAMES_OPT=()
 
 say() { echo "[iter_data] $*"; }
 die() { echo "[iter_data] ERROR: $*" >&2; exit 1; }
-usage() { sed -n '2,28p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//' || echo "see $FOLDER/README.md"; }
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed -e '$d' -e 's/^# \{0,1\}//' || echo "see $FOLDER/README.md"; }
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
 # run a command as root (printed; skipped in a dry run)
 run() { echo "  + $*"; [ "$DRY" = 1 ] || $SUDO "$@"; }
@@ -83,12 +99,23 @@ while [ $# -gt 0 ]; do
     --backup-dir) BACKUP_DIR="${2%/}"; shift 2 ;;
     --memory) MEM_MIB="$2"; shift 2 ;;
     --arango-version) ARANGO_VERSION="$2"; shift 2 ;;
+    --tls-cert) TLS_CERT_SRC="$2"; shift 2 ;;
+    --tls-key) TLS_KEY_SRC="$2"; shift 2 ;;
+    --tls-name) TLS_NAMES_OPT+=("$2"); shift 2 ;;
+    --tls) TLS_OPT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown option $1" ;;
   esac
 done
 [ "$DRY" = 1 ] && say "dry run: nothing is changed"
+case "$TLS_OPT" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate of your own: --tls-cert/--tls-key)" ;; esac
+{ [ -n "$TLS_CERT_SRC" ] && [ -n "$TLS_KEY_SRC" ]; } || { [ -z "$TLS_CERT_SRC" ] && [ -z "$TLS_KEY_SRC" ]; } \
+  || die "--tls-cert and --tls-key go together"
+[ -z "$TLS_CERT_SRC" ] || [ "$TLS_OPT" != off ] || die "--tls off and --tls-cert contradict each other"
+for n in ${TLS_NAMES_OPT[@]+"${TLS_NAMES_OPT[@]}"}; do
+  case "$n" in ""|*[!A-Za-z0-9.:-]*) die "--tls-name $n: a DNS name or an IP address" ;; esac
+done
 
 case "$(uname -m)" in x86_64|amd64) ARCH=x86_64; OCI_ARCH=amd64 ;; aarch64|arm64) ARCH=aarch64; OCI_ARCH=arm64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
 ASSET="iter_data-linux-$ARCH"
@@ -118,14 +145,15 @@ ensure_tools() {
   # the curl package over it conflicts), so it is only added when no curl exists at all.
   local missing=() c p pair
   for pair in curl:curl-minimal jq:jq tar:tar gzip:gzip sha256sum:coreutils useradd:shadow-utils sysctl:procps-ng \
-              install:coreutils ps:procps-ng getent:glibc-common hostname:hostname nologin:util-linux; do
+              install:coreutils ps:procps-ng getent:glibc-common hostname:hostname nologin:util-linux \
+              openssl:openssl; do
     c="${pair%%:*}"; p="${pair##*:}"
     command -v "$c" >/dev/null || missing+=("$p")
   done
   # the iter_data binary links libstdc++.so.6 and libgcc_s.so.1
   { ldconfig -p 2>/dev/null || true; } | grep -q 'libstdc++\.so\.6' || missing+=(libstdc++)
   [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/pki/tls/certs/ca-bundle.crt ] || missing+=(ca-certificates)
-  if [ ${#missing[@]} = 0 ]; then say "tools: curl jq tar gzip sha256sum useradd sysctl present"; return; fi
+  if [ ${#missing[@]} = 0 ]; then say "tools: curl jq tar gzip sha256sum useradd sysctl openssl present"; return; fi
   mapfile -t missing < <(printf '%s\n' "${missing[@]}" | sort -u)
   say "installing ${missing[*]}"
   run dnf install -y -q "${missing[@]}"
@@ -284,6 +312,11 @@ secrets() {
   ARANGO_PW="$(pickv ARANGO_ROOT_PASSWORD)"; [ -n "$ARANGO_PW" ] || ARANGO_PW="$(pickv ARANGO_PASSWORD)"
   local fresh=1; $SUDO test -f "$DB_DIR/SERVER" && fresh=0
   FRESH_ADMIN=""
+  if $SUDO test -f "$MARKER"; then
+    # the admin chose their own password: the first-boot one is not written back
+    [ -z "$ADMIN_PW" ] || say "the admin has chosen their own password: ITER_ADMIN_PASSWORD is left out of $cur"
+    ADMIN_PW=""
+  fi
   if [ -z "$ADMIN_PW" ] && [ "$fresh" = 1 ]; then ADMIN_PW="$(gen 20)"; FRESH_ADMIN=1; fi
   if [ -z "$JWT" ]; then
     if $SUDO test -s /var/lib/iter/iter_data.secret || { [ -n "$LEGACY" ] && [ -s "$LEGACY/iter_data/iter_data.secret" ]; }; then
@@ -318,12 +351,65 @@ setup_iter_user() {
   # an older ~/.iter install: bring iter_data's own files over once
   local f
   if [ -n "$LEGACY" ]; then
-    for f in iter_data.secret .env; do
+    for f in iter_data.secret engine_session.secret tls.crt tls.key .env; do
       if [ -f "$LEGACY/iter_data/$f" ] && ! $SUDO test -f "/var/lib/iter/$f"; then
         run install -o iter -g iter -m 600 "$LEGACY/iter_data/$f" "/var/lib/iter/$f"
       fi
     done
   fi
+}
+
+# ---------------------------------------------------------------- TLS
+# iter_data serves HTTPS (--tls auto): a self-signed certificate it makes on first start
+# beside its secret file (/var/lib/iter/tls.crt + tls.key, user iter, 600), kept across
+# reinstalls like iter_data.secret and engine_session.secret. The choice made here is
+# kept in /etc/iter/tls.env, so a rerun without TLS options leaves it as it was.
+CUSTOM_CRT=/var/lib/iter/custom-tls.crt
+CUSTOM_KEY=/var/lib/iter/custom-tls.key
+tls_setup() {
+  local names
+  TLS_MODE="$(rootenvval ITER_TLS_MODE /etc/iter/tls.env)"; TLS_MODE="${TLS_MODE:-auto}"
+  names="$(rootenvval ITER_TLS_NAMES /etc/iter/tls.env)"
+  [ -z "$TLS_OPT" ] || TLS_MODE="$TLS_OPT"
+  [ -z "$TLS_CERT_SRC" ] || TLS_MODE=custom
+  if [ ${#TLS_NAMES_OPT[@]} -gt 0 ]; then names="$(IFS=,; echo "${TLS_NAMES_OPT[*]}")"; fi
+  TLS_NAMES="$names"
+  if [ -n "$TLS_CERT_SRC" ]; then
+    [ -r "$TLS_CERT_SRC" ] && [ -r "$TLS_KEY_SRC" ] || die "--tls-cert / --tls-key: cannot read $TLS_CERT_SRC or $TLS_KEY_SRC"
+    say "TLS: serving your certificate $TLS_CERT_SRC (copied to $CUSTOM_CRT)"
+    run install -o iter -g iter -m 644 "$TLS_CERT_SRC" "$CUSTOM_CRT"
+    run install -o iter -g iter -m 600 "$TLS_KEY_SRC" "$CUSTOM_KEY"
+  elif [ "$TLS_MODE" = custom ]; then
+    $SUDO test -f "$CUSTOM_CRT" || [ "$DRY" = 1 ] || die "/etc/iter/tls.env says custom, but $CUSTOM_CRT is gone: rerun with --tls-cert/--tls-key (or --tls auto)"
+    say "TLS: your certificate $CUSTOM_CRT (kept from the last install)"
+  fi
+  TLS_ARGS=""
+  case "$TLS_MODE" in
+    off) TLS_ARGS="--tls off"
+         say "TLS: off (plain HTTP): only for iter_data behind a TLS proxy on this host; engines refuse plain http across a network" ;;
+    custom) TLS_ARGS="--tls-cert $CUSTOM_CRT --tls-key $CUSTOM_KEY" ;;
+    *) TLS_MODE=auto
+       local n
+       for n in ${names//,/ }; do TLS_ARGS="$TLS_ARGS --tls-name $n"; done
+       TLS_ARGS="${TLS_ARGS# }"
+       say "TLS: a self-signed certificate (made on first start, kept in /var/lib/iter)${names:+, extra names $names}" ;;
+  esac
+  [ -z "$TLS_ARGS" ] || say "TLS: iter-data runs with $TLS_ARGS"
+  SCHEME=https; [ "$TLS_MODE" != off ] || SCHEME=http
+  printf 'ITER_TLS_MODE=%s\nITER_TLS_NAMES=%s\n' "$TLS_MODE" "$names" | put 644 root:root /etc/iter/tls.env
+}
+
+# the certificate's fingerprint (sha256:<hex> of its DER, what engines pin): openssl on
+# the certificate file, else the line iter_data logs at every start
+fingerprint() {
+  local crt=/var/lib/iter/tls.crt fp=""
+  [ "${TLS_MODE:-auto}" != custom ] || crt="$CUSTOM_CRT"
+  if command -v openssl >/dev/null && $SUDO test -f "$crt"; then
+    fp="$($SUDO openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+    [ -z "$fp" ] || fp="sha256:$fp"
+  fi
+  [ -n "$fp" ] || fp="$($SUDO journalctl -u iter-data --no-pager -o cat 2>/dev/null | sed -n 's/.*TLS certificate fingerprint.*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1 || true)"
+  printf '%s' "$fp"
 }
 
 memory() {
@@ -343,8 +429,9 @@ install_units() {
   printf 'ITER_BACKUP_DIR=%s\nITER_BACKUP_KEEP=%s\n' "$BACKUP_DIR" "$(rootenvval ITER_BACKUP_KEEP /etc/iter/backup.env | grep . || echo 28)" \
     | put 644 root:root /etc/iter/backup.env
   put 755 root:root /usr/local/bin/iter-backup <"$SRC/iter-backup"
+  put 755 root:root /usr/local/bin/iter-admin-cleanup <"$SRC/iter-admin-cleanup"
   for u in "${UNITS[@]}"; do
-    sed -e "s|@PORT@|$PORT|g" -e "s|@DB_DIR@|$DB_DIR|g" -e "s|@MEM_MAX@|${MEM_MIB}M|g" -e "s|@ARANGO_MEM@|${ARANGO_MIB}M|g" \
+    sed -e "s|@PORT@|$PORT|g" -e "s|@TLS_ARGS@|$TLS_ARGS|g" -e "s|@DB_DIR@|$DB_DIR|g" -e "s|@MEM_MAX@|${MEM_MIB}M|g" -e "s|@ARANGO_MEM@|${ARANGO_MIB}M|g" \
       "$SRC/systemd/$u" | put 644 root:root "/etc/systemd/system/$u"
   done
 }
@@ -359,13 +446,15 @@ start_services() {
   run systemctl enable iter-data
   run systemctl restart iter-data
   run systemctl enable --now iter-backup.timer
+  # removes the first-boot ITER_ADMIN_PASSWORD once the admin has chosen their own
+  run systemctl enable --now iter-admin-cleanup.path
 }
 
 wait_health() {
-  if [ "$DRY" = 1 ]; then echo "  + wait for http://127.0.0.1:$PORT/health to answer {\"ok\":true}"; return; fi
+  if [ "$DRY" = 1 ]; then echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is self-signed)')"; return; fi
   local h
   for _ in $(seq 1 180); do
-    if h="$(curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null)" && grep -q '"ok":true' <<<"$h"; then say "iter_data up: $h"; return 0; fi
+    if h="$(curl -fsSk "$SCHEME://127.0.0.1:$PORT/health" 2>/dev/null)" && grep -q '"ok":true' <<<"$h"; then say "iter_data up: $h"; return 0; fi
     sleep 1
   done
   $SUDO journalctl -u iter-data -u arangodb3 --no-pager -n 30 || true
@@ -382,6 +471,7 @@ do_install() {
   memory
   setup_iter_user
   secrets
+  tls_setup
   install_arango
   install_binary
   install_model
@@ -390,17 +480,48 @@ do_install() {
   wait_health
   [ "$DRY" = 1 ] && { say "dry run done"; return; }
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  say "webui: http://${ip:-127.0.0.1}:$PORT/ inside the VPC, or http://<the instance's public DNS or IP>:$PORT/ (open :$PORT in its security group)"
-  say "login: admin / ITER_ADMIN_PASSWORD in /etc/iter/data.env"
-  [ -z "$FRESH_ADMIN" ] || say "admin password (shown once; also in /etc/iter/data.env): $ADMIN_PW"
+  say "webui: $SCHEME://${ip:-127.0.0.1}:$PORT/ inside the VPC, or $SCHEME://<the instance's public DNS or IP>:$PORT/ (open :$PORT in its security group)"
+  if $SUDO grep -q '^ITER_ADMIN_PASSWORD=' /etc/iter/data.env 2>/dev/null; then say "first sign-in: admin / ITER_ADMIN_PASSWORD in /etc/iter/data.env"
+  else say "sign in as admin with the password you chose"; fi
+  tls_report
+  if [ -n "$FRESH_ADMIN" ]; then
+    say "admin password (shown once; also in /etc/iter/data.env until you change it): $ADMIN_PW"
+    say "  the webui makes you change it at the first sign-in (a new password needs 12+ characters); then it is removed from /etc/iter/data.env"
+  fi
+  admin_cleanup
   say "backups every 6h -> $BACKUP_DIR; Arango console: ssh -L 8529:127.0.0.1:8529 <this host>, then http://127.0.0.1:8529/"
+}
+
+# the first-boot admin password, once the admin has chosen their own (see iter-admin-cleanup)
+admin_cleanup() {
+  [ "$DRY" = 0 ] || { echo "  + /usr/local/bin/iter-admin-cleanup (when $MARKER exists)"; return 0; }
+  $SUDO test -f "$MARKER" || return 0
+  $SUDO test -x /usr/local/bin/iter-admin-cleanup || return 0
+  $SUDO /usr/local/bin/iter-admin-cleanup | sed 's/^iter-admin-cleanup: /[iter_data] /' || true
+}
+
+tls_report() {
+  if [ "$TLS_MODE" = off ]; then
+    say "TLS is off: put a TLS proxy in front; engines refuse plain http to another machine"; return
+  fi
+  local fp; fp="$(fingerprint)"
+  say "TLS certificate fingerprint: ${fp:-(not found: journalctl -u iter-data | grep fingerprint)}"
+  say "  give it to each engine installer (--fingerprint ${fp:-sha256:...}), or compare it with \`iter_engine key status\` on the engine"
+  say "  (also in the webui's Engine keys screen, and: $0 status)"
+  [ "$TLS_MODE" = custom ] || say "  browsers warn about this self-signed certificate: accept it once, or rerun with --tls-cert/--tls-key (or put a TLS proxy in front)"
+    [ -n "$TLS_NAMES" ] || say "  (engines pin the fingerprint, so names do not matter to them; for browsers, rerun with --tls-name <public DNS or Elastic IP> before the first start, or use --tls-cert)"
 }
 
 do_status() {
   local s
+  admin_cleanup
   for s in arangodb3 iter-data iter-backup.timer; do printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"; done
   printf '%-18s %s\n' iter_data "$(stat -c 'installed %y' /opt/iter/bin/iter_data 2>/dev/null | cut -c1-20 || echo "not installed")"
-  curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null && echo || echo "iter_data: no answer on :$PORT"
+  TLS_MODE="$(rootenvval ITER_TLS_MODE /etc/iter/tls.env)"; TLS_MODE="${TLS_MODE:-auto}"
+  local scheme=https fp; [ "$TLS_MODE" != off ] || scheme=http
+  curl -fsSk "$scheme://127.0.0.1:$PORT/health" 2>/dev/null && echo || echo "iter_data: no answer on $scheme://127.0.0.1:$PORT"
+  if [ "$TLS_MODE" = off ]; then printf '%-18s %s\n' tls "off (plain HTTP, behind a TLS proxy)"
+  else fp="$(fingerprint)"; printf '%-18s %s\n' tls "$TLS_MODE, certificate fingerprint ${fp:-unknown (not started yet?)}"; fi
   systemctl list-timers iter-backup.timer --no-pager 2>/dev/null | sed -n 2p || true
   local dir; dir="$(rootenvval ITER_BACKUP_DIR /etc/iter/backup.env)"
   $SUDO sh -c "ls -1t '${dir:-/var/backups/iter}'/iter5-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
@@ -409,10 +530,10 @@ do_status() {
 do_uninstall() {
   local u
   say "stopping and removing the services and programs; the database ($DB_DIR, or the --db-dir it was given), /var/lib/iter, /etc/iter and the backups are kept"
-  run systemctl disable --now iter-backup.timer iter-data arangodb3 || true
+  run systemctl disable --now iter-backup.timer iter-admin-cleanup.path iter-admin-cleanup.service iter-data arangodb3 || true
   for u in "${UNITS[@]}"; do run rm -f "/etc/systemd/system/$u"; done
   run systemctl daemon-reload || true
-  run rm -f /opt/iter/bin/iter_data /usr/local/bin/iter-backup /usr/sbin/arangod /etc/sysctl.d/60-arangodb.conf
+  run rm -f /opt/iter/bin/iter_data /usr/local/bin/iter-backup /usr/local/bin/iter-admin-cleanup /usr/sbin/arangod /etc/sysctl.d/60-arangodb.conf
   for u in "${ARANGO_CLIENTS[@]}"; do run rm -f "/usr/bin/$u"; done
   say "to remove the data too: /var/lib/arangodb3 (or your --db-dir and its -apps), /var/lib/iter, /etc/iter, /etc/arangodb3, /opt/iter, the backup folder; users iter and arangodb"
 }

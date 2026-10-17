@@ -13,8 +13,8 @@ const newKey = () => {
 // the engine's signed login: 200 with a session, or the refusal
 const signsIn = async (state, k) => {
   const ts = Math.floor(Date.now() / 1000), nonce = crypto.randomBytes(16).toString('hex');
-  const signature = crypto.sign(null, Buffer.from(`iter-engine-login\n${k.id}\n${ts}\n${nonce}`), k.privateKey).toString('hex');
-  const r = await new Api(state.base).call('POST', '/auth/engine', { key_id: k.id, ts, nonce, signature }, [401]);
+  const signature = crypto.sign(null, Buffer.from(`iter-engine-login\n${k.id}\n${ts}\n${nonce}\n`), k.privateKey).toString('hex');
+  const r = await new Api(state.base).call('POST', '/auth/engine', { key_id: k.id, ts, nonce, tls_fp: '', signature }, [401]);
   return r.status === 200;
 };
 const keys = (page) => page.locator('#settings[open] .keys');
@@ -44,9 +44,9 @@ test.describe('engine keys', () => {
     await expect(rowOf(page, k1.id)).toContainText('active');
     await expect(rowOf(page, k1.id)).toContainText('attic laptop');
     expect(await signsIn(state, k1)).toBe(true);
-    // the seeded engine user (pwbot) is an older engine login, offered for removal
-    await expect(keys(page)).toContainText('Older engine logins');
-    await expect(keys(page).locator('[data-ksig="pwbot"]')).toBeVisible();
+    // there are no engine users any more, and the server's TLS is shown (off in this suite)
+    await expect(keys(page)).not.toContainText('Older engine logins');
+    await expect(keys(page).locator('#k-tls')).toContainText('plain HTTP');
     await shot(page, 'keys');
 
     // rotate, the old one stopping now

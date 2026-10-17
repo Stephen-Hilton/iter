@@ -13,6 +13,9 @@ const ROOT = path.resolve(__dirname, '../../..');
 const STATE = path.join(__dirname, '.state.json');
 const ARANGO = process.env.ITER5_TEST_ARANGO_URL || 'http://127.0.0.1:8529';
 const ARANGO_PW = process.env.ITER5_TEST_ARANGO_PASSWORD || 'iter4dev';
+// the first-boot password, and the one the setup changes it to (the first
+// admin must choose their own before anything else works)
+const FIRST_PW = 'pw-first-' + Math.random().toString(36).slice(2, 10);
 const ADMIN_PW = 'pw-admin-' + Math.random().toString(36).slice(2, 10);
 
 const freePort = () => new Promise((res, rej) => {
@@ -44,16 +47,19 @@ module.exports = async () => {
   const log = fs.openSync(logFile, 'w');
   const child = spawn(path.join(ROOT, 'target/debug/iter_data'), [
     '--arango-url', ARANGO, '--arango-db', db, '--listen', `127.0.0.1:${port}`,
-    '--webui-dir', path.join(ROOT, 'iter_data', 'webui'), '--secret-file', path.join(tmp, 'secret'), '--env-file', path.join(tmp, 'none.env'),
+    '--webui-dir', path.join(ROOT, 'iter_data', 'webui'), '--secret-file', path.join(tmp, 'secret'), '--env-file', path.join(tmp, 'none.env'), '--tls', 'off',
   ], {
-    env: Object.assign({}, process.env, { ARANGO_URL: ARANGO, ARANGO_DB: db, ARANGO_USER: 'root', ARANGO_PASSWORD: ARANGO_PW, ITER_ADMIN_PASSWORD: ADMIN_PW, ITER_PORT: '' }),
+    env: Object.assign({}, process.env, { ARANGO_URL: ARANGO, ARANGO_DB: db, ARANGO_USER: 'root', ARANGO_PASSWORD: ARANGO_PW, ITER_ADMIN_PASSWORD: FIRST_PW, ITER_PORT: '' }),
     stdio: ['ignore', log, log], detached: false,
   });
   const state = { db, port, base, pid: child.pid, tmp, logFile, adminPassword: ADMIN_PW, arango: ARANGO };
   fs.writeFileSync(STATE, JSON.stringify(state, null, 2));
   await waitHealthy(base, child, logFile);
 
-  const { api: admin, token } = await Api.login(base, 'admin', ADMIN_PW);
+  const first = await Api.login(base, 'admin', FIRST_PW);
+  if (!first.mustChange) throw new Error('the first admin was not asked to change the first-boot password');
+  const changed = await first.api.post('/api/users/admin/password', { current_password: FIRST_PW, new_password: ADMIN_PW });
+  const admin = new Api(base, changed.token), token = changed.token;
   const sys = await seedSystem(admin);
   const shop = await seedProject(admin, sys.eng, 'shop');
   Object.assign(state, { adminToken: token, engineToken: sys.engineToken, shop: { ids: shop.ids, items: shop.items } });

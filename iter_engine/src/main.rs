@@ -2,10 +2,10 @@
 //! serving every project the settings graph assigns to it (spec §4).
 //!
 //! Startup: `iter_engine --data-url <url> --env-file <path> [--name <name>]`.
-//! The env file holds `ITER_ENGINE_TOKEN` (the iter_data credential) plus the
-//! LLM tokens (`token_envar`s) and other secrets; nothing else is read from
-//! disk — projects, checkouts and accounts come from
-//! `GET /api/engines/{name}/assignments`.
+//! The engine signs in with its own key (`~/.iter/engine.key`, key.rs) over
+//! TLS it pins (trust.rs); the env file holds the LLM tokens (`token_envar`s)
+//! and other secrets. Nothing else is read from disk: projects, checkouts
+//! and accounts come from `GET /api/engines/{name}/assignments`.
 
 mod assign;
 mod client;
@@ -24,6 +24,8 @@ mod rag;
 mod sweep;
 mod sync;
 mod key;
+mod mcprelay;
+mod trust;
 mod local;
 mod usage;
 mod work;
@@ -60,6 +62,15 @@ struct Args {
     /// engine name (default: this machine's short hostname)
     #[arg(long)]
     name: Option<String>,
+    /// a shell command that prints KEY=value lines (account tokens from a
+    /// secret store: aws ssm / secretsmanager, op, vault, security…), run at
+    /// startup and every --secrets-every minutes; its values stay in memory
+    /// and beat the env file [$ITER_SECRETS_COMMAND]
+    #[arg(long)]
+    secrets_command: Option<String>,
+    /// minutes between secrets-command runs
+    #[arg(long, default_value_t = 5)]
+    secrets_every: u64,
     /// run N ticks then drain and exit (0 = forever); used by tests
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -97,9 +108,6 @@ struct Args {
     file: Option<String>,
 }
 
-/// An engine set up before engine keys: its fixed bearer token, read from
-/// the env file (used only when there is no key file).
-pub const ENGINE_TOKEN_VAR: &str = "ITER_ENGINE_TOKEN";
 
 fn main() {
     let args = Args::parse();
@@ -117,19 +125,24 @@ fn main() {
     // is re-read while running (account hot reload)
     let env_file = args.env_file.clone().unwrap_or_else(|| key::iter_home().join(".env").to_string_lossy().into_owned());
     let key_file = args.key_file.clone().map(std::path::PathBuf::from).unwrap_or_else(key::default_key_file);
-    envstore::init(&env_file, &[ENGINE_TOKEN_VAR]);
+    envstore::init(&env_file, &[]);
+    let secrets_command = args.secrets_command.clone().or_else(|| std::env::var("ITER_SECRETS_COMMAND").ok()).unwrap_or_default();
+    envstore::set_command(&secrets_command, std::time::Duration::from_secs(args.secrets_every.max(1) * 60));
     // SAFETY: still single-threaded (see envstore::init); Git Bash in every
     // child makes real symlinks instead of copying (iter_core::platform)
     unsafe { iter_core::platform::init_child_env() };
-    let legacy_token = envstore::get(ENGINE_TOKEN_VAR).unwrap_or_default();
     let Some(data_url) = resolve_data_url(args.data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref()) else {
         eprintln!("usage: iter_engine --data-url <iter_data url> [--env-file <path>] [--key-file <path>] [--name <engine name>]");
         eprintln!("(no --data-url given and $ITER_DATA_URL is not set)");
         std::process::exit(2);
     };
-    // the machine's key; an engine set up before keys runs on its fixed token
+    if let Some(why) = trust::refuse_reason(&data_url) {
+        eprintln!("{why}");
+        std::process::exit(2);
+    }
+    // the machine's key: the only way an engine signs in
     let has_key = key_file.exists();
-    let api = if has_key { Api::with_key(&data_url, &key_file) } else { Api::new(&data_url, &legacy_token) };
+    let api = Api::with_key(&data_url, &key_file);
     let name = args.name.clone().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(short_hostname);
 
     if let Some(user) = &args.adduser {
@@ -145,7 +158,7 @@ fn main() {
         return doc(&api, prefix, args.text.as_deref(), args.file.as_deref());
     }
 
-    if !has_key && legacy_token.is_empty() {
+    if !has_key {
         eprintln!("no engine key at {}: run `iter_engine key new`, then add its public key in the webui's Engine keys screen", key_file.display());
         std::process::exit(2);
     }
@@ -154,8 +167,7 @@ fn main() {
     if args.ticks > 0 {
         rt.max_ticks = Some(args.ticks);
     }
-    let how = if has_key { format!("key {}", key_file.display()) } else { format!("the older token in {env_file}") };
-    println!("[engine] {name} starting against {data_url} (iter_data backend: {backend}, signs in with {how}, env file {env_file})");
+    println!("[engine] {name} starting against {data_url} (iter_data backend: {backend}, signs in with key {}, env file {env_file})", key_file.display());
     rt.run();
 }
 
@@ -425,7 +437,12 @@ fn accounts(api: &Api, engine: &str, probe: bool) {
             println!(
                 "  {} [{}]: {} = {}",
                 a.name, a.provider, a.token_envar,
-                if tok.is_some() { "SET" } else { "NOT SET (add to your env file)" }
+                match envstore::source_of(&a.token_envar) {
+                    "env" => "SET (process environment)",
+                    "command" => "SET (secrets command)",
+                    "file" => "SET (env file)",
+                    _ => "NOT SET (add it to the env file, the process environment or the secrets command's output)",
+                }
             );
             if probe && tok.is_some() {
                 match provider::record_usage(&a.provider, &a.name, tok.as_deref(), None) {

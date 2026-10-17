@@ -1171,10 +1171,12 @@ pub(crate) fn mcp_config(api: &Api, project: &str, workid: &str) -> Option<McpCo
     if api.base.is_empty() || api.token().is_empty() {
         return None;
     }
+    // iter_data's /mcp, or the engine's local relay to it over pinned TLS
+    let url = crate::mcprelay::mcp_url(api)?;
     let dir = std::env::temp_dir().join("iter-mcp");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{}-{}.json", workid.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>(), uuid::Uuid::new_v4().simple()));
-    let cfg = json!({"mcpServers": {"iter": {"type": "http", "url": format!("{}/mcp", api.base.trim_end_matches('/')),
+    let cfg = json!({"mcpServers": {"iter": {"type": "http", "url": url,
         "headers": {"Authorization": format!("Bearer {}", api.token()), "X-Iter-Project": project, "X-Iter-Workid": workid}}}});
     #[cfg(unix)]
     {
@@ -1358,6 +1360,7 @@ pub(crate) fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<Str
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::envstore::scrub(&mut cmd);
     wait_with_timeout(cmd, timeout_sec)
 }
 
@@ -1382,6 +1385,7 @@ fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::envstore::scrub(&mut cmd);
     if let Ok(shim) = write_iter_shim(topdir) {
         cmd.env("ITER_BIN", &shim);
         if let Some(dir) = std::path::Path::new(&shim).parent() {

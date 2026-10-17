@@ -2,11 +2,16 @@
 # Launch an iter_data server on AWS with CloudFormation (iter_data.cfn.yaml beside this
 # script): one EC2 Amazon Linux 2023 instance that installs ArangoDB + iter_data at first
 # boot from a GitHub Release (installers/iter_data/linux_aws/install.sh), an encrypted EBS
-# data volume, an Elastic IP, and the admin password in SSM Parameter Store.
+# data volume, an Elastic IP, and the admin password and iter_data's TLS certificate
+# fingerprint in SSM Parameter Store. iter_data serves HTTPS with a self-signed
+# certificate: engines pin its fingerprint, browsers warn until you accept it.
 #
 #   ./install.sh --vpc vpc-… --subnet subnet-… --allowed-cidr 203.0.113.0/24 [options]
 #   ./install.sh status [--stack-name NAME]     the stack's state and outputs
-#   ./install.sh password [--stack-name NAME]   print the admin password from SSM
+#   ./install.sh password [--stack-name NAME]   print the first-boot admin password from SSM (gone
+#                                               once the admin has chosen their own)
+#   ./install.sh fingerprint [--stack-name NAME]  print iter_data's TLS certificate fingerprint from SSM
+#                                               (for engine installers: --fingerprint sha256:...)
 #   ./install.sh delete [--stack-name NAME]     delete the stack (the data volume is kept as a snapshot)
 #   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/aws/install.sh | bash -s -- --vpc … --subnet … --allowed-cidr …
 #
@@ -43,7 +48,7 @@ say() { echo "[iter aws] $*"; }
 die() { echo "[iter aws] error: $*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]:-/dev/null}" 2>/dev/null | sed -e '$d' -e 's/^# \{0,1\}//' || true; }
 
-case "${1:-}" in deploy|status|password|delete) CMD="$1"; shift ;; esac
+case "${1:-}" in deploy|status|password|fingerprint|delete) CMD="$1"; shift ;; esac
 while [ $# -gt 0 ]; do
   case "$1" in
     --stack-name) STACK="$2"; shift 2 ;;
@@ -60,7 +65,7 @@ while [ $# -gt 0 ]; do
     --region) AWSARGS+=(--region "$2"); shift 2 ;;
     --profile) AWSARGS+=(--profile "$2"); shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    deploy|status|password|delete) CMD="$1"; shift ;;
+    deploy|status|password|fingerprint|delete) CMD="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option $1 (--help)" ;;
   esac
@@ -79,6 +84,7 @@ awsc() {  # print, then run unless --dry-run
 command -v aws >/dev/null || [ "$DRY" = 1 ] || die "the aws CLI is required (https://aws.amazon.com/cli/)"
 
 param_name() { echo "/iter/$STACK/admin-password"; }
+fp_param() { echo "/iter/$STACK/tls-fingerprint"; }
 
 case "$CMD" in
   status)
@@ -86,14 +92,18 @@ case "$CMD" in
       --query 'Stacks[0].[StackStatus, Outputs[].[OutputKey, OutputValue]]' --output text
     exit 0 ;;
   password)
-    awsc ssm get-parameter --with-decryption --name "$(param_name)" --query Parameter.Value --output text
+    awsc ssm get-parameter --with-decryption --name "$(param_name)" --query Parameter.Value --output text \
+      || die "no $(param_name): the admin has already chosen their own password (the instance then deletes the first-boot one), or the stack is not up yet"
+    exit 0 ;;
+  fingerprint)
+    awsc ssm get-parameter --name "$(fp_param)" --query Parameter.Value --output text
     exit 0 ;;
   delete)
     say "deleting stack $STACK (the database volume is kept as an EBS snapshot)"
     awsc cloudformation delete-stack --stack-name "$STACK"
     awsc cloudformation wait stack-delete-complete --stack-name "$STACK"
-    say "deleted. The admin password parameter $(param_name) was written by the instance: remove it with"
-    say "  aws ssm delete-parameter --name $(param_name)"
+    say "deleted. The parameters $(param_name) and $(fp_param) were written by the instance: remove them with"
+    say "  aws ssm delete-parameters --names $(param_name) $(fp_param)"
     exit 0 ;;
 esac
 
@@ -129,5 +139,10 @@ awsc cloudformation deploy --stack-name "$STACK" --template-file "$TPL" \
 awsc cloudformation describe-stacks --stack-name "$STACK" \
   --query 'Stacks[0].Outputs[].[OutputKey, OutputValue]' --output text
 say "admin password: $0 password --stack-name $STACK   (or the AdminPasswordParameter output in SSM)"
+say "  you must change it at the first sign-in (the webui asks; a new password needs 12+ characters);"
+say "  the instance then deletes it from SSM and from /etc/iter/data.env"
+say "TLS certificate fingerprint: $0 fingerprint --stack-name $STACK   (the TlsFingerprintParameter output)"
+say "  give it to each engine installer (--fingerprint sha256:...) or compare it with \`iter_engine key status\`;"
+say "  the Url is https:// with a self-signed certificate, so browsers warn until you accept it (or put a TLS proxy in front)"
 say "note: the stack's parameters only apply at first boot; to move to a newer iter release, run"
 say "  sudo installers/iter_data/linux_aws/install.sh install --version <tag> on the instance (Session Manager)."

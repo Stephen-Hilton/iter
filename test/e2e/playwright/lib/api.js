@@ -31,7 +31,7 @@ class Api {
   static async login(base, user, password) {
     const a = new Api(base);
     const r = await a.post('/auth/login', { user, password });
-    return { api: a.as(r.token), token: r.token, role: r.role, user: r.user };
+    return { api: a.as(r.token), token: r.token, role: r.role, user: r.user, mustChange: !!r.must_change_password };
   }
 
   // ---- project graph helpers

@@ -12,6 +12,8 @@ if [ $# -eq 0 ]; then
   h="${ITER_HOME_DIR:-$HOME}"
   set -- iter_engine --data-url "$ITER_DATA_URL" --name "$ITER_ENGINE" \
     --env-file "$h/.iter/.env" --key-file "$h/.iter/engine.key"
+  # ITER_SECRETS_COMMAND is read by iter_engine itself; the interval is a flag
+  [ -z "${ITER_SECRETS_EVERY:-}" ] || set -- "$@" --secrets-every "$ITER_SECRETS_EVERY"
 fi
 
 if [ -n "${ITER_UID:-}" ] && [ "$(id -u)" = 0 ] && [ "$ITER_UID" != 0 ]; then

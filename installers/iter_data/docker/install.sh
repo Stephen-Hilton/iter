@@ -2,7 +2,9 @@
 # Install iter_data as one Docker container (ArangoDB CE 3.12 + iter_data):
 # API + webui on :8400, the Arango web console on 127.0.0.1:8630.
 #
-#   ./install.sh [options]          build the image here and (re)start the container
+#   ./install.sh [install] [options]  build the image here and (re)start the container
+#   ./install.sh status [--name NAME] the container, health, the TLS certificate fingerprint;
+#                                     removes the first-boot admin password once it is changed
 #   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/docker/install.sh | bash -s -- --version vYYYY.MM.DD
 #
 # Options:
@@ -15,12 +17,26 @@
 #   --name NAME          container, compose project and image name [iter5]
 #   --model-dir DIR      an all-MiniLM-L6-v2 folder to use instead of downloading it
 #   --memory SIZE        container memory cap, e.g. 6g [6g]; Arango is told 1G less
+#   --tls-cert PATH      serve this certificate (PEM, e.g. a real one for your domain) instead of
+#                        the self-signed one; needs --tls-key. Copied into the data folder.
+#   --tls-key PATH       the private key (PEM) for --tls-cert
+#   --tls-name NAME      an extra DNS name or IP on the self-signed certificate (repeatable),
+#                        e.g. the name engines and browsers use; only read when it is first made
+#   --tls off|auto       off = plain HTTP (only behind a TLS proxy on this host); auto = the
+#                        self-signed certificate again (drops an earlier --tls-cert or --tls off)
 #   --dry-run            print every action, change nothing
 #   -h, --help           this text
 #
 # Secrets live in ~/.iter/<name>.docker.env (mode 600); a fresh install without
 # --env-file generates them and prints the admin password once. Keep the JWT
 # secret: every engine and user token is signed with it. Rerun to upgrade.
+#
+# HTTPS: iter_data makes a self-signed certificate on first start (tls.crt beside
+# its secrets in <data-dir>/iter, kept across reinstalls) and the script prints its
+# fingerprint. Give that fingerprint to each engine installer (--fingerprint) or
+# compare it with `iter_engine key status`. Browsers warn about a self-signed
+# certificate; use --tls-cert/--tls-key or a TLS proxy for one they trust. The TLS
+# choices are remembered in the secrets file, so a plain rerun keeps them.
 set -euo pipefail
 
 REPO="Stephen-Hilton/iter"
@@ -37,12 +53,14 @@ NAME="iter5"
 MODEL_SRC=""
 MEM="${ITER_MEM_LIMIT:-6g}"
 DRY=0
+CMD=install
 FILES=(Dockerfile compose.yml compose.console.yml entrypoint.sh)
 MODEL_SHA="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
+TLS_CERT_SRC="" TLS_KEY_SRC="" TLS_MODE="" TLS_NAMES=()
 
 say() { echo "[iter_data/docker] $*"; }
 die() { echo "[iter_data/docker] ERROR: $*" >&2; exit 1; }
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//' || echo "see installers/iter_data/docker/README.md"; }
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed -e '$d' -e 's/^# \{0,1\}//' || echo "see installers/iter_data/docker/README.md"; }
 run() { echo "  + $*"; [ "$DRY" = 1 ] || "$@"; }
 envval() { [ -f "$2" ] && grep -E "^\s*(export\s+)?$1=" "$2" | tail -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//' | tr -d '\r' || true; }
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
@@ -50,6 +68,7 @@ gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    install|status) CMD="$1"; shift ;;
     --version) VERSION="$2"; shift 2 ;;
     --binary) BINARY="$2"; shift 2 ;;
     --env-file) ENV_SRC="$2"; shift 2 ;;
@@ -59,17 +78,79 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift 2 ;;
     --model-dir) MODEL_SRC="$2"; shift 2 ;;
     --memory) MEM="$2"; shift 2 ;;
+    --tls-cert) TLS_CERT_SRC="$2"; shift 2 ;;
+    --tls-key) TLS_KEY_SRC="$2"; shift 2 ;;
+    --tls-name) TLS_NAMES+=("$2"); shift 2 ;;
+    --tls) TLS_MODE="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; die "unknown option $1" ;;
   esac
 done
 [ "$DRY" = 1 ] && say "dry run: nothing is changed"
+case "$TLS_MODE" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate of your own: --tls-cert/--tls-key)" ;; esac
+{ [ -n "$TLS_CERT_SRC" ] && [ -n "$TLS_KEY_SRC" ]; } || { [ -z "$TLS_CERT_SRC" ] && [ -z "$TLS_KEY_SRC" ]; } \
+  || die "--tls-cert and --tls-key go together"
+[ -z "$TLS_CERT_SRC" ] || [ "$TLS_MODE" != off ] || die "--tls off and --tls-cert contradict each other"
+[ -z "$TLS_CERT_SRC" ] || [ -f "$TLS_CERT_SRC" ] || die "--tls-cert $TLS_CERT_SRC does not exist"
+[ -z "$TLS_KEY_SRC" ] || [ -f "$TLS_KEY_SRC" ] || die "--tls-key $TLS_KEY_SRC does not exist"
+
+if [ -z "$DATA_DIR" ]; then
+  DATA_DIR="$IHOME/iter_data"
+  # a machine set up before ~/.iter5 became ~/.iter keeps its data where it is
+  [ -e "$DATA_DIR" ] || [ ! -d "$HOME/.iter5/iter_data" ] || DATA_DIR="$HOME/.iter5/iter_data"
+fi
+ENV_PATH="$IHOME/$NAME.docker.env"
+CTLS_DIR="$DATA_DIR/custom-tls"
+TLS_CUSTOM=""
+
+# the certificate's fingerprint: the line iter_data logs at every start, else openssl
+# on the file (readable on Docker Desktop; on a Linux host the folder is root's)
+fingerprint() {
+  local fp crt="$DATA_DIR/iter/tls.crt"
+  fp="$(docker logs "$NAME" 2>&1 | sed -n 's/.*TLS certificate fingerprint.*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)"
+  [ -z "$TLS_CUSTOM" ] || crt="$CTLS_DIR/tls.crt"
+  if [ -z "$fp" ] && [ -r "$crt" ] && command -v openssl >/dev/null; then
+    fp="$(openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+    [ -z "$fp" ] || fp="sha256:$fp"
+  fi
+  printf '%s' "$fp"
+}
+
+# iter_data writes <data-dir>/iter/admin_password_changed once the first admin has
+# chosen their own password; then the first-boot ITER_ADMIN_PASSWORD leaves the env file
+admin_changed() {
+  [ -f "$DATA_DIR/iter/admin_password_changed" ] \
+    || docker exec "$NAME" test -f /var/lib/iter/admin_password_changed >/dev/null 2>&1
+}
+admin_cleanup() {
+  [ -f "$ENV_PATH" ] && grep -q '^ITER_ADMIN_PASSWORD=' "$ENV_PATH" || return 0
+  admin_changed || return 0
+  if [ "$DRY" = 1 ]; then echo "  + remove ITER_ADMIN_PASSWORD from $ENV_PATH (the admin has chosen their own password)"; return 0; fi
+  ( umask 077; { grep -v '^ITER_ADMIN_PASSWORD=' "$ENV_PATH" || true; } > "$ENV_PATH.tmp" && mv -f "$ENV_PATH.tmp" "$ENV_PATH" )
+  say "removed ITER_ADMIN_PASSWORD from $ENV_PATH: the admin has chosen their own password"
+}
+
+do_status() {
+  local st port scheme=https h fp
+  st="$(docker inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}} since {{.State.StartedAt}}' "$NAME" 2>/dev/null || echo "missing")"
+  printf '%-12s %s\n' container "$NAME: $st"
+  port="$(docker port "$NAME" 8400/tcp 2>/dev/null | head -1 | sed 's/.*://')"
+  [ "$(envval ITER_TLS "$ENV_PATH")" != off ] || scheme=http
+  TLS_CUSTOM="$(envval ITER_TLS_CERT "$ENV_PATH")"
+  if [ -n "$port" ] && h="$(curl -fsSk "$scheme://127.0.0.1:$port/health" 2>/dev/null)"; then printf '%-12s %s\n' health "$scheme://127.0.0.1:$port/ $h"
+  else printf '%-12s %s\n' health "no answer${port:+ on $scheme://127.0.0.1:$port}"; fi
+  if [ "$scheme" = http ]; then printf '%-12s %s\n' tls "off (plain HTTP, behind a TLS proxy)"
+  else fp="$(fingerprint)"; printf '%-12s %s\n' tls "$([ -n "$TLS_CUSTOM" ] && echo custom || echo auto), certificate fingerprint ${fp:-unknown}"; fi
+  printf '%-12s %s\n' data "$DATA_DIR   secrets: $ENV_PATH"
+  admin_cleanup
+}
 
 # ---- 1. docker
 command -v docker >/dev/null || die "docker is not installed (https://docs.docker.com/engine/install/)"
 docker info >/dev/null 2>&1 || die "docker is installed but the daemon does not answer (start Docker, or add yourself to the docker group)"
 docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing (docker-compose-plugin)"
+if [ "$CMD" = status ]; then do_status; exit 0; fi
 DARCH="$(docker info --format '{{.Architecture}}')"
 case "$DARCH" in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; *) die "unsupported docker architecture $DARCH" ;; esac
 ASSET="iter_data-linux-$ARCH"
@@ -144,15 +225,15 @@ else
 fi
 
 # ---- 5. data folder and secrets
-if [ -z "$DATA_DIR" ]; then
-  DATA_DIR="$IHOME/iter_data"
-  # a machine set up before ~/.iter5 became ~/.iter keeps its data where it is
-  [ -e "$DATA_DIR" ] || [ ! -d "$HOME/.iter5/iter_data" ] || DATA_DIR="$HOME/.iter5/iter_data"
-fi
-ENV_PATH="$IHOME/$NAME.docker.env"
 say "data: $DATA_DIR   secrets: $ENV_PATH"
 run mkdir -p "$DATA_DIR" "$IHOME"
+# owner-only: iter_data's secrets, engine_session.secret and tls.key live in it
+run chmod 700 "$DATA_DIR"
+# true when PATH exists, or might: on a Linux host the container makes iter/ owner-only
+# as root, so this user cannot look inside it
+present() { [ -e "$1" ] || { [ -d "$(dirname "$1")" ] && ! [ -x "$(dirname "$1")" ]; }; }
 
+admin_cleanup
 pick() {  # pick KEY -> --env-file value, else the existing env file's, else empty
   local v=""
   [ -n "$ENV_SRC" ] && v="$(envval "$1" "$ENV_SRC")"
@@ -165,8 +246,11 @@ JWT="$(pick ITER_JWT_SECRET)"
 ARANGO_PW="$(pick ARANGO_ROOT_PASSWORD)"
 [ -n "$ARANGO_PW" ] || ARANGO_PW="${ARANGO_ROOT_PASSWORD:-}"
 FRESH_ADMIN=""
+if [ -n "$ADMIN_PW" ] && admin_changed; then
+  say "the admin has chosen their own password: ITER_ADMIN_PASSWORD is left out of $ENV_PATH"; ADMIN_PW=""
+fi
 if [ -z "$JWT" ]; then
-  if [ -f "$DATA_DIR/iter/iter_data.secret" ]; then
+  if present "$DATA_DIR/iter/iter_data.secret"; then
     say "no ITER_JWT_SECRET given: iter_data keeps using $DATA_DIR/iter/iter_data.secret"
   else
     JWT="$(gen 48)"; say "generated a new ITER_JWT_SECRET"
@@ -174,25 +258,54 @@ if [ -z "$JWT" ]; then
 fi
 if [ -z "$ADMIN_PW" ]; then
   # iter_data only reads it when it creates admin, i.e. on an empty database
-  if [ -f "$DATA_DIR/arango/SERVER" ]; then say "existing database: admin keeps its password"
+  if present "$DATA_DIR/arango/SERVER"; then say "existing database: admin keeps its password"
   else ADMIN_PW="$(gen 20)"; FRESH_ADMIN=1; fi
 fi
 if [ -z "$ARANGO_PW" ]; then
-  if [ -f "$DATA_DIR/arango/SERVER" ]; then
+  if present "$DATA_DIR/arango/SERVER"; then
     ARANGO_PW=iter4dev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
   else
     ARANGO_PW="$(gen 24)"; say "generated an Arango root password (kept in $ENV_PATH)"
   fi
 fi
+
+# TLS: the flags given now, else what the secrets file kept from an earlier run.
+# A certificate of your own is copied to <data-dir>/custom-tls/ (owner-only) and
+# read by iter_data at /var/lib/iter_data/custom-tls/ inside the container.
+CTLS_CERT=/var/lib/iter_data/custom-tls/tls.crt
+CTLS_KEY=/var/lib/iter_data/custom-tls/tls.key
+TLS_OFF="$(pick ITER_TLS)"; [ "$TLS_OFF" = off ] || TLS_OFF=""
+TLS_CUSTOM="$(pick ITER_TLS_CERT)"
+NAMES="$(pick ITER_TLS_NAMES)"
+case "$TLS_MODE" in
+  off) TLS_OFF=off; TLS_CUSTOM="" ;;
+  auto) TLS_OFF=""; TLS_CUSTOM="" ;;
+esac
+if [ -n "$TLS_CERT_SRC" ]; then
+  TLS_OFF=""; TLS_CUSTOM="$CTLS_CERT"
+  say "TLS: serving your certificate $TLS_CERT_SRC (copied into $CTLS_DIR)"
+  run mkdir -p "$CTLS_DIR"
+  run chmod 700 "$CTLS_DIR"
+  run install -m 644 "$TLS_CERT_SRC" "$CTLS_DIR/tls.crt"
+  run install -m 600 "$TLS_KEY_SRC" "$CTLS_DIR/tls.key"
+fi
+if [ ${#TLS_NAMES[@]} -gt 0 ]; then NAMES="$(IFS=,; echo "${TLS_NAMES[*]}")"; fi
+if [ "$TLS_OFF" = off ]; then say "TLS: off (plain HTTP): only for iter_data behind a TLS proxy; engines refuse plain http across a network"
+elif [ -n "$TLS_CUSTOM" ]; then [ -n "$TLS_CERT_SRC" ] || say "TLS: your certificate in $CTLS_DIR (kept from the last run)"
+else say "TLS: a self-signed certificate (made on first start, kept in $DATA_DIR/iter)${NAMES:+, extra names $NAMES}"; fi
 if [ "$DRY" = 1 ]; then
-  echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_ROOT_PASSWORD"
+  echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_ROOT_PASSWORD, TLS settings"
 else
   ( umask 077
     { [ -z "$ADMIN_PW" ] || echo "ITER_ADMIN_PASSWORD=$ADMIN_PW"
       [ -z "$JWT" ] || echo "ITER_JWT_SECRET=$JWT"
       echo "ARANGO_ROOT_PASSWORD=$ARANGO_PW"
+      [ -z "$TLS_OFF" ] || echo "ITER_TLS=off"
+      [ -z "$TLS_CUSTOM" ] || printf 'ITER_TLS_CERT=%s\nITER_TLS_KEY=%s\n' "$CTLS_CERT" "$CTLS_KEY"
+      [ -z "$NAMES" ] || echo "ITER_TLS_NAMES=$NAMES"
     } > "$ENV_PATH.tmp" && mv -f "$ENV_PATH.tmp" "$ENV_PATH" )
 fi
+SCHEME=https; [ "$TLS_OFF" != off ] || SCHEME=http
 
 # ---- 6. build + start
 case "$MEM" in
@@ -208,15 +321,30 @@ run "${compose[@]}" up -d --build
 
 # ---- 7. health
 if [ "$DRY" = 1 ]; then
-  echo "  + wait for http://127.0.0.1:$PORT/health to answer {\"ok\":true}"
+  echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is self-signed)')"
+  [ "$SCHEME" = http ] || echo "  + print the TLS certificate fingerprint (from the container log)"
   say "dry run done"; exit 0
 fi
 for _ in $(seq 1 180); do
-  if h="$(curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null)" && echo "$h" | grep -q '"ok":true'; then
+  if h="$(curl -fsSk "$SCHEME://127.0.0.1:$PORT/health" 2>/dev/null)" && echo "$h" | grep -q '"ok":true'; then
     say "iter_data up: $h"
-    say "webui: http://127.0.0.1:$PORT/  (login: admin / ITER_ADMIN_PASSWORD in $ENV_PATH)"
-    [ -z "$FRESH_ADMIN" ] || say "admin password (shown once; also in $ENV_PATH): $ADMIN_PW"
+    if grep -q '^ITER_ADMIN_PASSWORD=' "$ENV_PATH" 2>/dev/null; then say "webui: $SCHEME://127.0.0.1:$PORT/  (first sign-in: admin / ITER_ADMIN_PASSWORD in $ENV_PATH)"
+    else say "webui: $SCHEME://127.0.0.1:$PORT/  (sign in as admin with the password you chose)"; fi
+    if [ -n "$FRESH_ADMIN" ]; then
+      say "admin password (shown once; also in $ENV_PATH until you change it): $ADMIN_PW"
+      say "  the webui makes you change it at the first sign-in (a new password needs 12+ characters);"
+      say "  then \`$0 status\` (or the next run) removes it from $ENV_PATH"
+    fi
     [ "$ARANGO_PORT" = 0 ] || say "Arango console: http://127.0.0.1:$ARANGO_PORT/ (root / ARANGO_ROOT_PASSWORD in $ENV_PATH)"
+    if [ "$SCHEME" = http ]; then
+      say "TLS is off: put a TLS proxy in front; engines refuse plain http to another machine"
+    else
+      fp="$(fingerprint)"
+      say "TLS certificate fingerprint: ${fp:-(not found: docker logs $NAME | grep fingerprint)}"
+      say "  give it to each engine installer (--fingerprint ${fp:-sha256:...}), or compare it with \`iter_engine key status\` on the engine"
+      say "  (also in the webui's Engine keys screen; later: docker logs $NAME 2>&1 | grep fingerprint)"
+      [ -n "$TLS_CUSTOM" ] || say "  browsers warn about this self-signed certificate: accept it once, or rerun with --tls-cert/--tls-key (or put a TLS proxy in front)"
+    fi
     exit 0
   fi
   sleep 1

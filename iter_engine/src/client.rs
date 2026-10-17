@@ -10,9 +10,11 @@
 //! it and the next key becomes the key file. The engine calls `adopt_next`
 //! every tick (rate-limited), and a refused sign-in calls it at once.
 //!
-//! An engine set up before engine keys still runs on a fixed bearer token
-//! (`ITER_ENGINE_TOKEN`), and an agent's `iter` shim on the session token it
-//! was started with: `Api::new`.
+//! An agent's `iter` shim runs on the session token it was started with
+//! (`Api::new`). Every connection follows trust.rs: iter_data's certificate
+//! pinned (or CA-checked), plain http only to this machine, and no call that
+//! carries a token before the certificate is trusted: the signed sign-in,
+//! which signs the fingerprint it sees, makes that trust on first contact.
 
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
@@ -46,6 +48,11 @@ pub struct Api {
     token: Arc<RwLock<String>>,
     key: Option<Arc<KeyAuth>>,
     http: reqwest::blocking::Client,
+    /// what the TLS handshakes are checked against (None: loopback http)
+    pin: Option<Arc<crate::trust::PinState>>,
+    check: crate::trust::Check,
+    /// why this base URL may not be used at all (plain http to another machine)
+    refused: Option<String>,
 }
 
 #[derive(Debug)]
@@ -80,14 +87,46 @@ fn now_secs() -> i64 {
 impl Api {
     /// A client with a fixed bearer token.
     pub fn new(base: &str, token: &str) -> Self {
-        Self {
-            base: base.trim_end_matches('/').to_string(),
-            token: Arc::new(RwLock::new(token.to_string())),
-            key: None,
-            http: reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("http client"),
+        let base = base.trim_end_matches('/').to_string();
+        let (http, pin, check, refused) = match crate::trust::client(&base, Duration::from_secs(30)) {
+            Ok((h, p, c)) => (h, p, c, None),
+            Err(why) => (reqwest::blocking::Client::new(), None, crate::trust::Check::Loopback, Some(why)),
+        };
+        Self { base, token: Arc::new(RwLock::new(token.to_string())), key: None, http, pin, check, refused }
+    }
+
+    /// May a call that carries a token go out now?
+    pub fn trusted(&self) -> bool {
+        self.untrusted().is_none()
+    }
+
+    /// The underlying HTTP client (shares this client's live pins).
+    pub fn http(&self) -> reqwest::blocking::Client {
+        self.http.clone()
+    }
+
+    /// Why this client cannot be used, when it cannot (plain http to another machine).
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
+    }
+
+    /// An HTTP client to iter_data with a longer timeout, under the same trust.
+    pub fn long_client(&self, timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+        crate::trust::client(&self.base, timeout).map(|(h, _, _)| h)
+    }
+
+    /// A call that carries a token is refused until iter_data's certificate
+    /// is trusted (pinned by a signed sign-in, or `key trust`).
+    fn untrusted(&self) -> Option<ApiError> {
+        if let Some(why) = &self.refused {
+            return Some(ApiError { status: 0, body: why.clone() });
+        }
+        match (&self.pin, self.check) {
+            (Some(p), crate::trust::Check::Pin) if !p.pinned() => Some(ApiError {
+                status: 0,
+                body: "iter_data's certificate is not trusted yet: the engine trusts it at its first signed sign-in (or run `iter_engine key trust`)".into(),
+            }),
+            _ => None,
         }
     }
 
@@ -116,20 +155,65 @@ impl Api {
         self.token.read().map(|t| t.clone()).unwrap_or_default()
     }
 
-    /// One signed login with `key`: (session token, its expiry).
+    /// The fingerprint of the certificate iter_data presents (a health check
+    /// makes the handshake); "" over loopback http.
+    pub fn seen_fingerprint(&self) -> Result<String, ApiError> {
+        if let Some(why) = &self.refused {
+            return Err(ApiError { status: 0, body: why.clone() });
+        }
+        let Some(pin) = &self.pin else { return Ok(String::new()) };
+        let resp = self.http.get(format!("{}/health", self.base)).send().map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+        let _ = resp.text();
+        Ok(pin.seen())
+    }
+
+    /// One signed login with `key`: (session token, its expiry). It signs the
+    /// certificate fingerprint it sees, so iter_data refuses it when relayed
+    /// through anything else, and it pins (or re-pins) what iter_data
+    /// confirms it serves.
     pub fn login_with(&self, key: &SigningKey) -> Result<(String, i64), ApiError> {
         let kid = iter_core::enginekey::key_id(&key.verifying_key().to_bytes());
+        let tls_fp = self.seen_fingerprint()?;
         let (ts, nonce) = (now_secs(), uuid::Uuid::new_v4().simple().to_string());
-        let sig: String = key.sign(iter_core::enginekey::login_message(&kid, ts, &nonce).as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let sig: String = key.sign(iter_core::enginekey::login_message(&kid, ts, &nonce, &tls_fp).as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         let resp = self
             .http
             .post(format!("{}/auth/engine", self.base))
-            .json(&json!({"key_id": kid, "ts": ts, "nonce": nonce, "signature": sig}))
+            .json(&json!({"key_id": kid, "ts": ts, "nonce": nonce, "tls_fp": tls_fp, "signature": sig}))
             .send()
             .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
         let v = Self::handle(resp)?;
+        self.adopt_tls(&v)?;
         let token = v["token"].as_str().unwrap_or_default().to_string();
         Ok((token, v["expires_at"].as_i64().unwrap_or(0)))
+    }
+
+    /// Pin what a sign-in answer says iter_data serves (pin mode only).
+    fn adopt_tls(&self, answer: &Value) -> Result<(), ApiError> {
+        let (Some(pin), crate::trust::Check::Pin) = (&self.pin, self.check) else { return Ok(()) };
+        let announced: Vec<String> = answer["tls"]["fingerprints"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect()).unwrap_or_default();
+        crate::trust::adopt_announced(&self.base, pin, &announced).map_err(|e| ApiError { status: 0, body: e })
+    }
+
+    /// Replace this machine's key with `new`, signed by the current `key`
+    /// (`iter_engine key rotate`): (new key id, when the old key stops).
+    pub fn rotate_key(&self, key: &SigningKey, new: &SigningKey) -> Result<(String, String), ApiError> {
+        let kid = iter_core::enginekey::key_id(&key.verifying_key().to_bytes());
+        let new_pub = iter_core::enginekey::format_public(&new.verifying_key().to_bytes());
+        if let Some(e) = self.untrusted() {
+            return Err(e);
+        }
+        let (ts, nonce) = (now_secs(), uuid::Uuid::new_v4().simple().to_string());
+        let sig: String = key.sign(iter_core::enginekey::rotate_message(&kid, &new_pub, ts, &nonce).as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let resp = self
+            .http
+            .post(format!("{}/auth/engine/rotate", self.base))
+            .json(&json!({"key_id": kid, "new_public_key": new_pub, "ts": ts, "nonce": nonce, "signature": sig}))
+            .send()
+            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+        let v = Self::handle(resp)?;
+        self.adopt_tls(&v)?;
+        Ok((v["key_id"].as_str().unwrap_or_default().to_string(), v["old_key_stops"].as_str().unwrap_or_default().to_string()))
     }
 
     /// Sign in with the key file (`force`: even with a fresh session).
@@ -165,6 +249,9 @@ impl Api {
     }
 
     fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>, token: &str) -> Result<Value, ApiError> {
+        if let Some(e) = self.untrusted() {
+            return Err(e);
+        }
         let mut req = self.http.request(method, format!("{}{}", self.base, path)).bearer_auth(token);
         if let Some(b) = body {
             req = req.json(b);

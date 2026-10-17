@@ -2,7 +2,11 @@
 # and on a small VM / EC2 instance. install.sh sets every variable below; by hand:
 #   ITER_DATA_DIR=~/.iter/iter_data ITER_ENV_PATH=~/.iter/iter5.docker.env \
 #     docker compose -p iter5 -f compose.yml -f compose.console.yml up -d --build
-# ITER_ENV_PATH holds ITER_ADMIN_PASSWORD, ITER_JWT_SECRET and ARANGO_ROOT_PASSWORD.
+# ITER_ENV_PATH holds ITER_ADMIN_PASSWORD, ITER_JWT_SECRET and ARANGO_ROOT_PASSWORD,
+# and the TLS settings the entrypoint passes on: ITER_TLS=off (plain HTTP, behind a
+# TLS proxy only), ITER_TLS_CERT/ITER_TLS_KEY (a certificate of your own, at its path
+# inside the container), ITER_TLS_NAMES (extra names on the self-signed certificate).
+# :8400 serves HTTPS by default: https://127.0.0.1:8400/ (self-signed; browsers warn).
 # compose.console.yml adds the Arango web console on 127.0.0.1 (leave it out to
 # publish only :8400).
 # (the service is called iter5 so an existing iter5 compose project is replaced in place)

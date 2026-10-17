@@ -21,10 +21,21 @@
 #
 # Options:
 #   --data-url URL    iter_data URL (else asked; kept in ~/.iter/engine.conf);
-#                     a server in this same distro is http://127.0.0.1:8400
+#                     a server in this same distro is https://127.0.0.1:8400
 #   --name NAME       this engine's name, unique per machine (default: the hostname)
 #   --version TAG     release to download, e.g. v2026.10.17 (else $ITER_VERSION, else latest)
 #   --binary PATH     install this iter_engine file instead of downloading one
+#   --fingerprint FP  iter_data's certificate fingerprint (sha256:..., from the iter_data
+#                     installer or the webui's Engine keys screen): pinned before sign-in
+#   --trust-ca        iter_data is behind a TLS proxy with a real certificate: check it
+#                     against certificate authorities instead of pinning
+#   --secrets-command CMD  a shell command printing KEY=value lines (the account tokens,
+#                     from a secret store: aws ssm / secretsmanager, op, security, vault);
+#                     the engine runs it at startup and every --secrets-every minutes and
+#                     keeps the values in memory only. Kept in ~/.iter/engine.conf and put
+#                     on the service's command line; "none" removes it. With it, the
+#                     accounts step asks for no tokens.
+#   --secrets-every N  minutes between secrets-command runs [5]
 #   --yes             answer yes to every question; update while work runs
 #   --dry-run         print every action, change nothing
 #   -h, --help        this text
@@ -45,12 +56,25 @@
 # Everything this distro keeps for iter is in ~/.iter: bin/iter_engine, the key
 # (engine.key), the env file with account tokens (.env), engine.conf, models/
 # and the logs (engine.log, engine.err.log).
+#
+# HTTPS: iter_data must be https:// (iter_data serves HTTPS by default; plain
+# http:// is refused unless iter_data runs on this machine: 127.0.0.1,
+# localhost, ::1). The engine pins iter_data's certificate fingerprint in
+# ~/.iter/server_trust.json: --fingerprint (or the fingerprint pasted when
+# asked) runs `iter_engine key trust` right after the binary is installed and
+# stops if the server presents another certificate; without one, the first
+# sign-in trusts the certificate it sees (compare: iter_engine key status).
+# Other key commands: `iter_engine key show` (print the public key),
+# `iter_engine key rotate` (a new key, signed by the current one, no webui step).
 set -euo pipefail
 
 REPO_SLUG="Stephen-Hilton/iter"
 HERE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; fi
 IHOME="$HOME/.iter"
+# iter_engine keeps its files (key, server_trust.json) in $ITER_HOME, else ~/.iter:
+# the service reads ~/.iter, so this script's own iter_engine calls do too
+export ITER_HOME="$IHOME"
 CONF="$IHOME/engine.conf"
 ENVF="$IHOME/.env"
 KEYF="$IHOME/engine.key"
@@ -59,7 +83,7 @@ MODEL="$IHOME/models/all-MiniLM-L6-v2"
 UNIT=/etc/systemd/system/iter-engine.service
 export PATH="$HOME/.local/bin:$PATH"
 
-VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" VERSION="${ITER_VERSION:-}"
+VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|update|accounts|projects|logs|uninstall) VERB="$1" ;;
@@ -67,6 +91,10 @@ while [ $# -gt 0 ]; do
     --name) OPT_NAME="${2:?--name needs a name}"; shift ;;
     --version) VERSION="${2:?--version needs a tag}"; shift ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift ;;
+    --fingerprint) OPT_FP="${2:?--fingerprint needs sha256:<64 hex>}"; shift ;;
+    --trust-ca) TRUST_CA=1 ;;
+    --secrets-command) OPT_SC="${2?--secrets-command needs a command (or none)}"; SC_GIVEN=1; shift ;;
+    --secrets-every) OPT_SE="${2:?--secrets-every needs minutes}"; shift ;;
     --yes|-y) YES=1 ;;
     --dry-run) DRY=1 ;;
     -h|--help|help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -124,6 +152,50 @@ DATA_URL="" ENGINE=""
 load_conf() { # fills what this run has not set yet
   [ -n "$DATA_URL" ] || DATA_URL="$(confval DATA_URL)"
   [ -n "$ENGINE" ] || ENGINE="$(confval ENGINE)"
+  [ $SC_GIVEN = 1 ] || [ -n "$SECRETS_COMMAND" ] || SECRETS_COMMAND="$(confval SECRETS_COMMAND)"
+  [ -n "$SECRETS_EVERY" ] || SECRETS_EVERY="$(confval SECRETS_EVERY)"
+}
+
+# ------------------------------------------------------------------ secrets command
+# --secrets-command / --secrets-every: given now, else kept in engine.conf
+SECRETS_COMMAND="" SECRETS_EVERY=""
+secrets_settings() {
+  if [ $SC_GIVEN = 1 ]; then SECRETS_COMMAND="$OPT_SC"; else SECRETS_COMMAND="$(confval SECRETS_COMMAND)"; fi
+  [ "$SECRETS_COMMAND" != none ] || SECRETS_COMMAND=""
+  case "$SECRETS_COMMAND" in *"
+"*) die "--secrets-command: one line only" ;; esac
+  SECRETS_EVERY="${OPT_SE:-$(confval SECRETS_EVERY)}"
+  case "$SECRETS_EVERY" in ""|*[!0-9]*|0) [ -z "$OPT_SE" ] || die "--secrets-every: whole minutes, 1 or more"; SECRETS_EVERY="" ;; esac
+  [ -n "$SECRETS_COMMAND" ] || SECRETS_EVERY=""
+  if [ -n "$SECRETS_COMMAND" ]; then ok "account tokens: from the secrets command, every ${SECRETS_EVERY:-5} min (values stay in the engine's memory)"; fi
+}
+conf_text() {
+  printf 'DATA_URL=%s\nENGINE=%s\n' "$DATA_URL" "$ENGINE"
+  [ -z "$SECRETS_COMMAND" ] || printf 'SECRETS_COMMAND=%s\n' "$SECRETS_COMMAND"
+  [ -z "$SECRETS_EVERY" ] || printf 'SECRETS_EVERY=%s\n' "$SECRETS_EVERY"
+}
+# systemd's quoting for one ExecStart argument
+sd_quote() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//\$/\$\$}"; s="${s//%/%%}"; printf '"%s"' "$s"; }
+# the service's --secrets-command / --secrets-every flags, systemd-quoted
+secrets_args() {
+  [ -n "$SECRETS_COMMAND" ] || return 0
+  printf ' --secrets-command %s' "$(sd_quote "$SECRETS_COMMAND")"
+  [ -z "$SECRETS_EVERY" ] || printf ' --secrets-every %s' "$SECRETS_EVERY"
+}
+# the names (never the values) the secrets command prints
+secrets_names() {
+  sh -c "$SECRETS_COMMAND" 2>/dev/null </dev/null | sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' || true
+}
+# accounts step with a secrets command: nothing to paste; say which names it covers
+accounts_from_command() { # VARS...
+  ok "the secrets command supplies the account tokens (not $ENVF): nothing to paste here"
+  if [ $DRY = 1 ]; then printf '    [dry-run] run the secrets command once and check it prints %s (names only)\n' "$*"; return; fi
+  local names v; names="$(secrets_names)"
+  for v in "$@"; do
+    if printf '%s\n' "$names" | grep -qx "$v"; then ok "$v (from the secrets command)"
+    elif [ -n "$(envval "$v" "$ENVF")" ]; then ok "$v (from $ENVF)"
+    else warn "$v: the secrets command does not print it here (the engine logs missing token names; the service runs it with its own PATH and HOME)"; fi
+  done
 }
 
 # ~/.iter5 became ~/.iter (2026-10-11): move it once; ~/.iter5 stays as a link
@@ -136,13 +208,74 @@ migrate_home() {
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 TMPF="$WORK/api"
-# GET an iter_data path as this engine (a session from its key, else an older
-# token): body in $TMPF, prints the status. Read-only, so it runs in a dry run.
+# ------------------------------------------------------------------ iter_data over HTTPS
+# iter_data serves HTTPS with its own (self-signed) certificate. The engine pins
+# that certificate's fingerprint in ~/.iter/server_trust.json (one entry per
+# scheme://host:port), and plain http:// is only for this machine. The script's
+# own API calls check the certificate the same way.
+TRUSTF="$IHOME/server_trust.json"
+# the trust file's key for a URL: scheme://host:port, lowercased
+trust_origin() {
+  local u="${1%/}" s r hp port=80
+  s="$(printf '%s' "${u%%://*}" | tr '[:upper:]' '[:lower:]')"; r="${u#*://}"; hp="${r%%[/?#]*}"
+  hp="$(printf '%s' "$hp" | tr '[:upper:]' '[:lower:]')"
+  [ "$s" != https ] || port=443
+  case "$hp" in *\]:*) ;; *\]) hp="$hp:$port" ;; *:*) ;; *) hp="$hp:$port" ;; esac
+  printf '%s://%s' "$s" "$hp"
+}
+url_host() {
+  local r="${1#*://}"; r="${r%%[/?#]*}"
+  case "$r" in \[*) r="${r#\[}"; r="${r%%\]*}" ;; *) r="${r%:*}" ;; esac
+  printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
+}
+is_ip() { case "$1" in *:*) return 0 ;; ""|*[!0-9.]*) return 1 ;; *) return 0 ;; esac; }
+is_loopback() { case "$1" in localhost|::1) return 0 ;; 127.*) is_ip "$1" ;; *) return 1 ;; esac; }
+# stop on a URL the engine would refuse: plain http to another machine
+check_url() {
+  case "$1" in
+    https://*) ;;
+    http://*) is_loopback "$(url_host "$1")" \
+        || die "$1 is plain http: iter_data must be reached over https:// (iter_data serves HTTPS by default), so the engine's session token and the work never cross the network unencrypted; plain http:// is only for iter_data on this machine (127.0.0.1, localhost, ::1). Try https://${1#http://}" ;;
+    *) die "$1: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" ;;
+  esac
+}
+# does ~/.iter/server_trust.json have an entry for this URL yet?
+has_trust() { [ -f "$TRUSTF" ] && grep -qF "\"$(trust_origin "$1")\"" "$TRUSTF"; }
+# PINOPT = curl options that check iter_data's certificate as the engine does:
+# none for http:// to this machine or a --ca trust; for a pinned certificate, -k
+# plus the public key of the certificate iter_data presents, once its fingerprint
+# is the pinned one (so curl's one connection must reach that same key). False
+# when nothing is trusted yet, openssl or jq is missing, or the certificate differs.
+PINOPT=()
+pin_opts() {
+  PINOPT=()
+  case "$DATA_URL" in https://*) ;; *) return 0 ;; esac
+  [ -f "$TRUSTF" ] && command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
+  local o e pins hp h sni="" pem fp spki
+  o="$(trust_origin "$DATA_URL")"
+  e="$(jq -c --arg o "$o" '.servers[$o] // empty' "$TRUSTF" 2>/dev/null)"
+  [ -n "$e" ] || return 1
+  [ "$(printf '%s' "$e" | jq -r '.mode // "pin"')" != ca ] || return 0
+  pins="$(printf '%s' "$e" | jq -r '.pins[]?' | sed 's/^sha256://; s/://g' | tr 'A-F' 'a-f')"
+  hp="${o#https://}"; h="$(url_host "$DATA_URL")"
+  is_ip "$h" || sni="$h"
+  pem="$(openssl s_client -connect "$hp" ${sni:+-servername "$sni"} </dev/null 2>/dev/null | openssl x509 2>/dev/null)" || true
+  [ -n "$pem" ] || return 1
+  fp="$(printf '%s\n' "$pem" | openssl x509 -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+  printf '%s\n' "$pins" | grep -qx "$fp" || return 1
+  spki="$(printf '%s\n' "$pem" | openssl x509 -noout -pubkey | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | openssl base64 -A)"
+  [ -n "$spki" ] || return 1
+  PINOPT=(-k --pinnedpubkey "sha256//$spki")
+}
+
+# GET an iter_data path as this engine (a session from its key): body in $TMPF,
+# prints the status (000 when iter_data cannot be reached or its certificate is
+# not the trusted one). Read-only, so it runs in a dry run.
 api() {
   local tok=""
   [ -x "$BIN" ] && [ -f "$KEYF" ] && tok="$("$BIN" key session --key-file "$KEYF" --data-url "$DATA_URL" 2>/dev/null || true)"
-  [ -n "$tok" ] || tok="$(envval ITER_ENGINE_TOKEN "$ENVF")"
-  curl -sS --max-time 15 -H "authorization: Bearer $tok" -o "$TMPF" -w '%{http_code}' "$DATA_URL$1" 2>/dev/null || echo 000
+  if [ -z "$tok" ] || ! pin_opts; then echo 000; return 0; fi
+  curl -sS --max-time 15 ${PINOPT[@]+"${PINOPT[@]}"} -H "authorization: Bearer $tok" -o "$TMPF" -w '%{http_code}' "$DATA_URL$1" 2>/dev/null || echo 000
 }
 
 # ------------------------------------------------------------------ the binary
@@ -200,14 +333,14 @@ packages() {
   say "2/9 packages"
   local need=()
   if command -v pacman >/dev/null; then
-    local want=(git curl jq poppler github-cli)
+    local want=(git curl jq openssl poppler github-cli)
     for p in "${want[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 || need+=("$p"); done
     if [ ${#need[@]} -gt 0 ]; then
       yes_no "install ${need[*]} with sudo pacman?" || die "these are needed: ${need[*]}"
       run sudo pacman -S --needed --noconfirm "${need[@]}"
     fi
   elif command -v apt-get >/dev/null; then
-    local want=(git curl jq ca-certificates poppler-utils)
+    local want=(git curl jq openssl ca-certificates poppler-utils)
     for p in "${want[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || need+=("$p"); done
     # gh (credentials for HTTPS git remotes) only where the distro packages it
     if ! dpkg -s gh >/dev/null 2>&1; then
@@ -219,14 +352,14 @@ packages() {
       run sudo apt-get install -y -q "${need[@]}"
     fi
   elif command -v dnf >/dev/null; then
-    local want=(git curl jq poppler-utils gh)
+    local want=(git curl jq openssl poppler-utils gh)
     for p in "${want[@]}"; do rpm -q "$p" >/dev/null 2>&1 || need+=("$p"); done
     if [ ${#need[@]} -gt 0 ]; then
       yes_no "install ${need[*]} with sudo dnf?" || die "these are needed: ${need[*]}"
       run sudo dnf install -y -q "${need[@]}"
     fi
   else
-    warn "no pacman, apt-get or dnf: install git, curl, jq and poppler (pdftoppm) yourself"
+    warn "no pacman, apt-get or dnf: install git, curl, jq, openssl and poppler (pdftoppm) yourself"
   fi
   [ $DRY = 1 ] && { ok "(dry run: the tools are checked after the packages are installed)"; return; }
   for t in git curl jq; do command -v "$t" >/dev/null || die "$t is still missing"; done
@@ -259,8 +392,9 @@ settings() {
     [ $DRY = 1 ] || die "the iter_data URL is required (--data-url URL)"
     url="https://iter.example.com"; warn "no iter_data URL given: the dry run goes on with $url"
   fi
-  case "$url" in http://127.0.0.1*|http://localhost*|https://*) ;; http://*) warn "$url is plain http: the engine's session token crosses the network unencrypted" ;; esac
-  if curl -fsS --max-time 10 -o /dev/null "$url/health" 2>/dev/null; then ok "$url answers"
+  check_url "$url"
+  # -k: only "does it answer?"; the certificate is checked by iter_engine (pinned)
+  if curl -fsSk --max-time 10 -o /dev/null "$url/health" 2>/dev/null; then ok "$url answers"
   else warn "no answer from $url/health (a proxy may hide it; the key check below tells)"; fi
   host="$(hostname -s 2>/dev/null || cat /etc/hostname 2>/dev/null || echo engine)"
   name="${OPT_NAME:-$(ask "engine name [${ENGINE:-$host}]:" "${ENGINE:-$host}")}"
@@ -271,8 +405,9 @@ settings() {
   esac
   case "$name" in *[!A-Za-z0-9_.-]*|"") die "engine name \"$name\": letters, digits, - _ . only" ;; esac
   run mkdir -p "$IHOME"
-  printf 'DATA_URL=%s\nENGINE=%s\n' "$url" "$name" | write_file "$CONF"
   DATA_URL="$url" ENGINE="$name"
+  secrets_settings
+  conf_text | write_file "$CONF"
   ok "engine \"$ENGINE\" -> $DATA_URL (in $CONF)"
   if pgrep -x iter_engine >/dev/null 2>&1 && ! systemctl is-active -q iter-engine 2>/dev/null; then
     warn "an iter_engine runs here outside the service (pid $(pgrep -x iter_engine | head -1)): one engine per machine, stop it"
@@ -282,6 +417,31 @@ settings() {
 binary() {
   say "4/9 iter_engine"
   install_binary
+}
+
+# iter_data's certificate, before the first sign-in: --fingerprint (or the one
+# pasted here) pins it now and stops when the server presents another one;
+# --trust-ca checks it against certificate authorities (a TLS proxy with a real
+# certificate); else the first sign-in trusts what it sees (trust on first use).
+trust() {
+  say "4b/9 iter_data's certificate"
+  case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http to this machine: no certificate to trust"; return ;; esac
+  if [ $TRUST_CA = 1 ]; then
+    run "$BIN" key trust --data-url "$DATA_URL" --ca || die "could not reach $DATA_URL with a certificate-authority check"
+    return
+  fi
+  local fp="$OPT_FP"
+  if [ -z "$fp" ] && ! has_trust "$DATA_URL"; then
+    if [ $DRY = 1 ]; then printf "    [dry-run] ask for iter_data's certificate fingerprint (Enter = trust it at the first sign-in)\n"
+    else fp="$(ask "Paste iter_data's certificate fingerprint (shown in the webui's 🔑 Engine keys screen, or by the iter_data installer), or press Enter to trust it at the first sign-in:" "")"; fi
+  fi
+  if [ -z "$fp" ]; then
+    if has_trust "$DATA_URL"; then ok "trusted already ($TRUSTF)"
+    else warn "no fingerprint given: the first sign-in trusts the certificate $DATA_URL presents; compare it afterwards (iter_engine key status) with the webui's Engine keys screen"; fi
+    return
+  fi
+  run "$BIN" key trust --data-url "$DATA_URL" --fingerprint "$fp" \
+    || die "$DATA_URL does not present the certificate $fp: something else answers at that URL (or the fingerprint is mistyped). Nothing was trusted; check the URL and the fingerprint (iter_data installer output, webui Engine keys screen)"
 }
 
 # the embedding model (sentence-transformers/all-MiniLM-L6-v2, Apache-2.0,
@@ -425,7 +585,7 @@ User=$(id -un)
 WorkingDirectory=$IHOME
 Environment=HOME=$HOME
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=$BIN --data-url $DATA_URL --env-file $ENVF --key-file $KEYF --name $ENGINE
+ExecStart=$BIN --data-url $DATA_URL --env-file $ENVF --key-file $KEYF --name $ENGINE$(secrets_args)
 StandardOutput=append:$IHOME/engine.log
 StandardError=append:$IHOME/engine.err.log
 Restart=on-failure
@@ -468,6 +628,8 @@ accounts() {
   local vars missing=0
   vars="$(jq -r '[.accounts[]?.token_envar, .projects[].accounts[]?.token_envar] | map(select(. != null and . != "")) | unique | .[]' "$TMPF")"
   [ -n "$vars" ] || { ok "the served projects name no account tokens"; return; }
+  # shellcheck disable=SC2086  # one name per word
+  if [ -n "$SECRETS_COMMAND" ]; then accounts_from_command $vars; return; fi
   for v in $vars; do
     if [ -n "$(envval "$v" "$ENVF")" ]; then ok "$v"; continue; fi
     if [ $DRY = 1 ]; then printf '    [dry-run] ask for %s and add it to %s\n' "$v" "$ENVF"; continue; fi
@@ -551,7 +713,7 @@ uninstall() {
 migrate_home
 case "$VERB" in
   install)
-    wsl_conf; packages; claude_cli; settings; binary; model; key; service; keepalive
+    wsl_conf; packages; claude_cli; settings; binary; trust; model; key; service; keepalive
     say "9/9 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }
@@ -561,7 +723,7 @@ Done. Engine "$ENGINE" runs as the iter-engine service in $DISTRO and checks in 
 Next, in the webui's Settings tab: draw a serves edge from $ENGINE to each project
 (topdir ~/dev/<project>, on this distro's disk), then run \`install.sh projects\` here to clone them.
   status:  install.sh status        log:  install.sh logs  ($IHOME/engine.log)
-  update:  install.sh update        a new key:  $BIN key new   (then rotate it in Engine keys)
+  update:  install.sh update        a new key:  $BIN key rotate   (its public key: $BIN key show)
 EOF
     ;;
   projects) projects ;;

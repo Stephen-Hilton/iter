@@ -15,8 +15,10 @@ test.describe('settings graph', () => {
     const g = await sg(admin);
     await openTab(page, 'settings');
     const drawn = await page.evaluate(() => IterSettings.cy.elements().map((e) => e.id()));
-    for (const id of ['iter_data:self', 'iter_engine:mbp', 'account:main', 'provider:mock', 'provider:claude', 'project:shop', 'user:admin', 'user:pwbot']) expect(drawn).toContain(id);
-    for (const [t, f, to] of [['serves', 'iter_engine:mbp', 'project:shop'], ['holds', 'iter_engine:mbp', 'account:main'], ['bills', 'account:main', 'project:shop'], ['of', 'account:main', 'provider:mock'], ['owns', 'user:pwbot', 'iter_engine:mbp']]) {
+    for (const id of ['iter_data:self', 'iter_engine:mbp', 'account:main', 'provider:mock', 'provider:claude', 'project:shop', 'user:admin']) expect(drawn).toContain(id);
+    // engines sign in with their own keys: no engine user, no owns edge
+    expect(drawn).not.toContain('user:pwbot');
+    for (const [t, f, to] of [['serves', 'iter_engine:mbp', 'project:shop'], ['holds', 'iter_engine:mbp', 'account:main'], ['bills', 'account:main', 'project:shop'], ['of', 'account:main', 'provider:mock']]) {
       const e = edgeOf(g, t, f, to);
       expect(e, `${t} ${f} → ${to}`).toBeTruthy();
       expect(drawn).toContain('se:' + e.id);
@@ -114,14 +116,14 @@ test.describe('settings graph', () => {
   });
 
   test('tag an edge from its detail pane', async ({ page, admin }) => {
-    const owns = edgeOf(await sg(admin), 'owns', 'user:pwbot', 'iter_engine:mbp');
+    const holds = edgeOf(await sg(admin), 'holds', 'iter_engine:mbp', 'account:main');
     await openTab(page, 'settings');
-    await tapEdge(page, owns.id);
+    await tapEdge(page, holds.id);
     await page.locator('#s-detail [data-act=tag]').click();
-    await dialog(page).locator('input[type=text]').fill('bot_owns_mbp');
+    await dialog(page).locator('input[type=text]').fill('mbp_holds_main');
     await dialog(page).locator('.kit-primary').click();
-    await expect.poll(async () => (await sg(admin)).edges.find((x) => x.id === owns.id).tag).toBe('bot_owns_mbp');
-    await expect.poll(() => page.evaluate((id) => IterSettings.cy.getElementById('se:' + id).data('label'), owns.id)).toBe('bot_owns_mbp');
+    await expect.poll(async () => (await sg(admin)).edges.find((x) => x.id === holds.id).tag).toBe('mbp_holds_main');
+    await expect.poll(() => page.evaluate((id) => IterSettings.cy.getElementById('se:' + id).data('label'), holds.id)).toBe('mbp_holds_main');
   });
 
   test('create an engine node, then copy an edge onto it (settings and tag come along)', async ({ page, admin }) => {

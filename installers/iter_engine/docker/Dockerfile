@@ -7,11 +7,12 @@ FROM debian:bookworm-slim
 
 ARG TARGETARCH
 # git/bash/curl/jq: the engine and its shell steps; openssh-client: ssh git
-# remotes; poppler-utils: GraphRAG reads PDF pages; libstdc++6/libgcc-s1:
+# remotes; poppler-utils: GraphRAG reads PDF pages; openssl: install.sh's own
+# API calls check iter_data's pinned certificate with it; libstdc++6/libgcc-s1:
 # iter_engine links them (bookworm-slim has them)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git jq openssh-client poppler-utils procps less \
+      bash ca-certificates curl git jq openssh-client openssl poppler-utils procps less \
       libstdc++6 libgcc-s1 \
  && rm -rf /var/lib/apt/lists/*
 

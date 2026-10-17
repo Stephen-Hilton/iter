@@ -52,9 +52,33 @@ pub fn key_id(key: &[u8; 32]) -> String {
     hex(&Sha256::digest(key))[..12].to_string()
 }
 
-/// What the engine signs to sign in.
-pub fn login_message(key_id: &str, ts: i64, nonce: &str) -> String {
-    format!("iter-engine-login\n{key_id}\n{ts}\n{nonce}")
+/// What the engine signs to sign in: its key id, its clock, a one-time
+/// nonce and the fingerprint of the TLS certificate it sees ("" over
+/// loopback http), so iter_data can refuse a sign-in relayed through
+/// anything presenting another certificate.
+pub fn login_message(key_id: &str, ts: i64, nonce: &str, tls_fp: &str) -> String {
+    format!("iter-engine-login\n{key_id}\n{ts}\n{nonce}\n{tls_fp}")
+}
+
+/// What the engine signs, with its current key, to replace that key with
+/// `new_public` (`iter_engine key rotate`, no admin step).
+pub fn rotate_message(key_id: &str, new_public: &str, ts: i64, nonce: &str) -> String {
+    format!("iter-engine-rotate\n{key_id}\n{new_public}\n{ts}\n{nonce}")
+}
+
+/// A TLS certificate's fingerprint: the SHA-256 of its DER, 64 lowercase
+/// hex. Engines pin it (iter_engine client.rs); iter_data announces it.
+pub fn fingerprint_der(der: &[u8]) -> String {
+    hex(&Sha256::digest(der))
+}
+
+/// A fingerprint the way people type or paste it (`sha256:`, colons, spaces,
+/// any case) to 64 lowercase hex; None when it is not one.
+pub fn normalize_fingerprint(s: &str) -> Option<String> {
+    let t = s.trim();
+    let t = t.strip_prefix("sha256:").or_else(|| t.strip_prefix("SHA256:")).unwrap_or(t);
+    let h: String = t.chars().filter(|c| !matches!(c, ':' | ' ' | '-')).collect::<String>().to_ascii_lowercase();
+    (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
 }
 
 /// The JWT inside an engine session token, if `bearer` is one.
@@ -84,8 +108,17 @@ mod tests {
         assert_eq!(session_jwt("iter_eyJ.a.b"), Some("eyJ.a.b"));
         assert_eq!(session_jwt(&format_public(&[1u8; 32])), None);
         assert_eq!(session_jwt("eyJ.a.b"), None);
-        assert_eq!(login_message("abc", 5, "n"), "iter-engine-login\nabc\n5\nn");
+        assert_eq!(login_message("abc", 5, "n", "ff"), "iter-engine-login\nabc\n5\nn\nff");
+        assert_eq!(rotate_message("abc", "iter_00", 5, "n"), "iter-engine-rotate\nabc\niter_00\n5\nn");
+        assert_ne!(rotate_message("abc", "iter_00", 5, "n"), login_message("abc", 5, "n", "iter_00"), "a login can never pass as a rotation");
         assert_eq!(unhex("0aff"), Some(vec![10, 255]));
+        let h = "ab".repeat(32);
+        assert_eq!(normalize_fingerprint(&h).as_deref(), Some(h.as_str()));
+        let colons = h.as_bytes().chunks(2).map(|c| std::str::from_utf8(c).unwrap().to_uppercase()).collect::<Vec<_>>().join(":");
+        assert_eq!(normalize_fingerprint(&format!("SHA256:{colons}")).as_deref(), Some(h.as_str()));
+        assert_eq!(normalize_fingerprint("sha256:abc"), None);
+        assert_eq!(normalize_fingerprint(&"zz".repeat(32)), None);
+        assert_eq!(fingerprint_der(b"x").len(), 64);
         assert_eq!(unhex("0g"), None);
     }
 }

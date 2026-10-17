@@ -18,25 +18,34 @@ struct T {
 impl T {
     async fn new() -> T {
         let (a, db) = crate::test_db::store().await;
-        let st = Arc::new(AppState { store: Arc::new(a), secret: b"settings-test".to_vec() });
+        let st = Arc::new(AppState::for_tests(Arc::new(a), b"settings-test"));
         bootstrap(st.store.as_ref()).await.unwrap();
-        for (u, role) in [("adm", "admin"), ("eng1", "engine"), ("eng2", "engine"), ("alice", "user"), ("bob", "user"), ("vic", "viewer")] {
+        for (u, role) in [("adm", "admin"), ("alice", "user"), ("bob", "user"), ("vic", "viewer")] {
             st.store.put("webui_user", u, NOSK, &json!({"user": u, "role": role, "tokenver": 1, "pwhash": ""})).await.unwrap();
         }
         let app = crate::api::router(st.clone()).merge(crate::mcp::routes(st.clone()));
         T { st, db, app }
     }
-    fn tok(&self, user: &str) -> String {
-        let role = match user {
+    /// A bearer for `who`: an engine session for "eng1" (engine e1), "eng2"
+    /// (e2) or "eng:<engine>"; else a person's token.
+    async fn tok(&self, who: &str) -> String {
+        let engine = match who {
+            "eng1" => Some("e1"),
+            "eng2" => Some("e2"),
+            w => w.strip_prefix("eng:"),
+        };
+        if let Some(e) = engine {
+            return crate::keys::test_session(&self.st, e).await;
+        }
+        let role = match who {
             "adm" => "admin",
-            "eng1" | "eng2" => "engine",
             "vic" => "viewer",
             _ => "user",
         };
-        crate::auth::mint_token(&self.st.secret, user, role, 1, 3600).unwrap()
+        crate::auth::mint_token(&self.st.secret, who, role, 1, 3600).unwrap()
     }
     async fn call(&self, who: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-        let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", self.tok(who)));
+        let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", self.tok(who).await));
         let req = match body {
             Some(v) => {
                 b = b.header("content-type", "application/json");
@@ -333,9 +342,12 @@ async fn assignments_route_is_owner_or_admin() {
     assert_eq!(t.call("alice", "GET", "/api/engines/e1/assignments", None).await.0, 403);
     t.ok("adm", "GET", "/api/engines/e2/assignments", None).await;
     assert_eq!(t.call("adm", "GET", "/api/engines/none/assignments", None).await.0, 404);
-    // registering set the owner and the owns edge
-    assert_eq!(t.store().get("engine", "e1", NOSK).await.unwrap().unwrap()["user"], "eng1");
-    assert!(t.edge("owns", "user:eng1", "iter_engine:e1").await.unwrap().is_active());
+    // an engine registers as itself: no owning user, no owns edge
+    assert_eq!(t.store().get("engine", "e1", NOSK).await.unwrap().unwrap()["user"].as_str().unwrap_or(""), "");
+    assert!(!t.edges().await.iter().any(|e| e.edge_type == "owns" && e.to == "iter_engine:e1"));
+    // an engine reads only its own assignments, even of a record no person owns
+    t.ok("adm", "PUT", "/api/engines/e9", Some(json!({"state": "Running"}))).await;
+    assert_eq!(t.call("eng1", "GET", "/api/engines/e9/assignments", None).await.0, 403);
     t.done().await;
 }
 
@@ -479,17 +491,17 @@ async fn next_refuses_unserved_stopped_and_foreign_engines() {
     t.ok("adm", "PUT", "/api/projects/p", Some(json!({"state": "Stopped"}))).await;
     assert_eq!(t.next("eng1", "p", "e1", json!({})).await.1["reason"], "project-stopped");
     t.ok("adm", "PUT", "/api/projects/p", Some(json!({"state": "Running"}))).await;
-    // two engines of one owner race for one item: exactly one wins
-    t.ok("eng1", "PUT", "/api/engines/e3", Some(json!({"state": "Running"}))).await;
+    // two engines race for one item: exactly one wins
+    t.ok("eng:e3", "PUT", "/api/engines/e3", Some(json!({"state": "Running"}))).await;
     t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "iter_engine:e3", "to": "project:p"}))).await;
-    let (r1, r2) = tokio::join!(t.next("eng1", "p", "e1", json!({})), t.next("eng1", "p", "e3", json!({})));
+    let (r1, r2) = tokio::join!(t.next("eng1", "p", "e1", json!({})), t.next("eng:e3", "p", "e3", json!({})));
     let won = [&r1.1, &r2.1].iter().filter(|r| !r["item"].is_null()).count();
     assert_eq!(won, 1, "{r1:?} {r2:?}");
     // deactivating the serves edge stops the engine from getting work
     t.item("p", json!({"id": "b"})).await;
     t.ok("adm", "PATCH", &format!("/api/settings/edges/{}", s.id), Some(json!({"from": "iter_engine:_deactivated"}))).await;
-    // (the token still passes the project gate through e3, which serves p)
-    assert_eq!(t.next("eng1", "p", "e1", json!({})).await.1["reason"], "not-served");
+    let (c, v) = t.next("eng1", "p", "e1", json!({})).await;
+    assert_eq!(c, 403, "an engine that no longer serves the project is refused at the project gate: {v}");
     t.done().await;
 }
 
@@ -653,19 +665,14 @@ async fn engines_write_only_their_own_records_and_heartbeat_lists_waiting_work()
     for k in ["rag_waiting", "datasync_waiting"] {
         assert!(hb.get(k).is_some(), "{k} kept: {hb}");
     }
-    assert_eq!(hb["user"], "eng1");
-    // a PUT cannot hand the record to someone else (only an admin can)
-    let put = t.ok("eng1", "PUT", "/api/engines/e1", Some(json!({"state": "Running", "user": "eng2"}))).await;
-    assert_eq!(put["user"], "eng1");
-    let put = t.ok("adm", "PUT", "/api/engines/e1", Some(json!({"state": "Running", "user": "eng2"}))).await;
-    assert_eq!(put["user"], "eng2");
-    assert_eq!(t.call("eng1", "POST", "/api/engines/e1/heartbeat", Some(json!({}))).await.0, 403);
-    // an unowned (iter4) record is claimed by the first engine-token heartbeat
-    t.store().put("engine", "legacy", NOSK, &json!({"name": "legacy", "state": "Running"})).await.unwrap();
-    let hb = t.ok("eng2", "POST", "/api/engines/legacy/heartbeat", Some(json!({}))).await;
-    assert_eq!(hb["user"], "eng2");
-    assert!(t.edge("owns", "user:eng2", "iter_engine:legacy").await.is_some());
-    assert_eq!(t.call("eng1", "POST", "/api/engines/legacy/heartbeat", Some(json!({}))).await.0, 403);
+    assert_eq!(hb["user"].as_str().unwrap_or(""), "", "an engine is no user's");
+    // a PUT cannot hand the record to a person
+    let put = t.ok("eng1", "PUT", "/api/engines/e1", Some(json!({"state": "Running", "user": "alice"}))).await;
+    assert_eq!(put["user"].as_str().unwrap_or(""), "");
+    // a record no person owns is still only its own engine's to write
+    t.store().put("engine", "other", NOSK, &json!({"name": "other", "state": "Running"})).await.unwrap();
+    assert_eq!(t.call("eng2", "POST", "/api/engines/other/heartbeat", Some(json!({}))).await.0, 403);
+    assert_eq!(t.call("eng:other", "POST", "/api/engines/other/heartbeat", Some(json!({}))).await.0, 200);
     t.done().await;
 }
 
@@ -696,15 +703,15 @@ async fn renames_change_the_name_only_never_the_id() {
     // every record carries its id and a display name (the id until renamed)
     let p = t.ok("adm", "GET", "/api/projects/p1", None).await;
     assert_eq!((p["id"].as_str(), p["name"].as_str()), (Some("p1"), Some("p1")));
-    let u = t.ok("adm", "GET", "/api/users/eng1", None).await;
-    assert_eq!((u["id"].as_str(), u["user"].as_str(), u["name"].as_str()), (Some("eng1"), Some("eng1"), Some("eng1")));
+    let u = t.ok("adm", "GET", "/api/users/bob", None).await;
+    assert_eq!((u["id"].as_str(), u["user"].as_str(), u["name"].as_str()), (Some("bob"), Some("bob"), Some("bob")));
 
-    // rename the project, the engine and the engine's user in the settings graph
+    // rename the project, the engine and a user in the settings graph
     let n = t.ok("adm", "PATCH", "/api/settings/nodes/project:p1", Some(json!({"name": "Shop API"}))).await;
     assert_eq!((n["id"].as_str(), n["key"].as_str(), n["name"].as_str()), (Some("project:p1"), Some("p1"), Some("Shop API")));
     t.ok("adm", "PATCH", "/api/settings/nodes/iter_engine:e1", Some(json!({"name": "Laptop"}))).await;
     // a generic editor may send the name among the settings
-    t.ok("adm", "PATCH", "/api/settings/nodes/user:eng1", Some(json!({"settings": {"name": "Beast"}}))).await;
+    t.ok("adm", "PATCH", "/api/settings/nodes/user:bob", Some(json!({"settings": {"name": "Beast"}}))).await;
 
     // the id, the edges, the work and the tokens are untouched
     let p = t.ok("adm", "GET", "/api/projects/p1", None).await;
@@ -718,9 +725,9 @@ async fn renames_change_the_name_only_never_the_id() {
     assert_eq!(t.ok("adm", "GET", "/api/engines/e1", None).await["name"], "Laptop");
     let g = t.ok("adm", "GET", "/api/settings/graph", None).await;
     let node = |id: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).cloned().unwrap();
-    assert_eq!(node("user:eng1")["name"], "Beast");
+    assert_eq!(node("user:bob")["name"], "Beast");
     assert_eq!(node("iter_engine:e1")["name"], "Laptop");
-    assert!(node("user:eng1")["settings"].get("name").is_none(), "the name is beside the settings, not among them");
+    assert!(node("user:bob")["settings"].get("name").is_none(), "the name is beside the settings, not among them");
 
     // a PUT without a name keeps the display name; one with a name renames
     t.ok("adm", "PUT", "/api/projects/p1", Some(json!({"state": "Running", "desc": "d"}))).await;
@@ -751,19 +758,102 @@ async fn renames_change_the_name_only_never_the_id() {
     assert_eq!(crate::names::resolve_path(s, "/api/projects/Shop/workitems").await.as_deref(), Some("/api/projects/p1/workitems"));
     assert_eq!(crate::names::resolve_path(s, "/api/projects/p1/workitems").await, None);
     assert_eq!(crate::names::resolve_path(s, "/api/projects/nothing/workitems").await, None);
-    assert_eq!(crate::names::resolve_path(s, "/api/settings/nodes/user:Beast").await.as_deref(), Some("/api/settings/nodes/user:eng1"));
-    assert_eq!(crate::names::resolve_path(s, "/api/users/Beast/token").await.as_deref(), Some("/api/users/eng1/token"));
+    assert_eq!(crate::names::resolve_path(s, "/api/settings/nodes/user:Beast").await.as_deref(), Some("/api/settings/nodes/user:bob"));
+    assert_eq!(crate::names::resolve_path(s, "/api/users/Beast/token").await.as_deref(), Some("/api/users/bob/token"));
 
     // sign in by id or by display name: the token carries the id
-    t.ok("adm", "PUT", "/api/users/eng1", Some(json!({"role": "engine", "password": "pw-eng1"}))).await;
-    assert_eq!(t.ok("adm", "GET", "/api/users/eng1", None).await["name"], "Beast", "a PUT without a name keeps it");
-    for who in ["eng1", "Beast"] {
-        let r = t.ok("adm", "POST", "/auth/login", Some(json!({"user": who, "password": "pw-eng1"}))).await;
-        assert_eq!((r["user"].as_str(), r["name"].as_str()), (Some("eng1"), Some("Beast")));
+    t.ok("adm", "PUT", "/api/users/bob", Some(json!({"role": "user", "password": "pw-bob-12345"}))).await;
+    assert_eq!(t.ok("adm", "GET", "/api/users/bob", None).await["name"], "Beast", "a PUT without a name keeps it");
+    for who in ["bob", "Beast"] {
+        let r = t.ok("adm", "POST", "/auth/login", Some(json!({"user": who, "password": "pw-bob-12345"}))).await;
+        assert_eq!((r["user"].as_str(), r["name"].as_str()), (Some("bob"), Some("Beast")));
     }
     assert_eq!(t.call("adm", "POST", "/auth/login", Some(json!({"user": "Beast", "password": "wrong"}))).await.0, 401);
 
     // work-item states keep their names
     assert_eq!(t.call("adm", "PATCH", "/api/settings/nodes/workitem_type:queued", Some(json!({"name": "waiting"}))).await.0, 400);
+    t.done().await;
+}
+
+// ---------- people's passwords (2026-10-17) ----------
+
+/// A person's raw bearer call (no harness token minting).
+async fn as_bearer(t: &T, bearer: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    let mut b = Request::builder().method(method).uri(path);
+    if !bearer.is_empty() {
+        b = b.header("authorization", format!("Bearer {bearer}"));
+    }
+    let req = match body {
+        Some(v) => b.header("content-type", "application/json").body(Body::from(serde_json::to_vec(&v).unwrap())).unwrap(),
+        None => b.body(Body::empty()).unwrap(),
+    };
+    let resp = t.app.clone().oneshot(req).await.unwrap();
+    let code = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_set_password_must_be_changed_and_a_change_needs_the_current_one() {
+    let t = T::new().await;
+    // an admin sets carol's password: too short is refused; a good one must be changed
+    assert_eq!(t.call("adm", "PUT", "/api/users/carol", Some(json!({"role": "user", "password": "short"}))).await.0, 400);
+    t.ok("adm", "PUT", "/api/users/carol", Some(json!({"role": "user", "password": "set-by-admin-1"}))).await;
+    let (c, login) = as_bearer(&t, "", "POST", "/auth/login", Some(json!({"user": "carol", "password": "set-by-admin-1"}))).await;
+    assert_eq!((c, login["must_change_password"].as_bool()), (200, Some(true)), "{login}");
+    let held = login["token"].as_str().unwrap().to_string();
+    // until then: everything is refused
+    let (c, v) = as_bearer(&t, &held, "GET", "/api/projects", None).await;
+    assert_eq!(c, 403, "{v}");
+    assert!(v["error"].as_str().unwrap_or("").contains("password change required"), "{v}");
+    // the change: the current password must be right, the new one long enough and different
+    let pw = |cur: &str, new: &str| json!({"current_password": cur, "new_password": new});
+    assert_eq!(as_bearer(&t, &held, "POST", "/api/users/carol/password", Some(pw("wrong-wrong-1", "carols-own-pw-1"))).await.0, 401);
+    assert_eq!(as_bearer(&t, &held, "POST", "/api/users/carol/password", Some(pw("set-by-admin-1", "short"))).await.0, 400);
+    assert_eq!(as_bearer(&t, &held, "POST", "/api/users/carol/password", Some(pw("set-by-admin-1", "set-by-admin-1"))).await.0, 400);
+    assert_eq!(as_bearer(&t, &held, "POST", "/api/users/bob/password", Some(pw("set-by-admin-1", "carols-own-pw-1"))).await.0, 403, "only one's own");
+    let (c, fresh) = as_bearer(&t, &held, "POST", "/api/users/carol/password", Some(pw("set-by-admin-1", "carols-own-pw-1"))).await;
+    assert_eq!((c, fresh["must_change_password"].as_bool()), (200, Some(false)), "{fresh}");
+    let fresh = fresh["token"].as_str().unwrap().to_string();
+    // the old session ended, the new one works, and the new password signs in with nothing asked
+    assert_eq!(as_bearer(&t, &held, "GET", "/api/projects", None).await.0, 401);
+    assert_eq!(as_bearer(&t, &fresh, "GET", "/api/projects", None).await.0, 200);
+    let (_, again) = as_bearer(&t, "", "POST", "/auth/login", Some(json!({"user": "carol", "password": "carols-own-pw-1"}))).await;
+    assert_eq!(again["must_change_password"].as_bool(), Some(false));
+    // a person never sets a password, a hash or the flag through the profile PUT
+    let (c, v) = as_bearer(&t, &fresh, "PUT", "/api/users/carol", Some(json!({"role": "user", "password": "sneaky-new-pw-1"}))).await;
+    assert_eq!(c, 400, "{v}");
+    as_bearer(&t, &fresh, "PUT", "/api/users/carol", Some(json!({"role": "user", "pwhash": "$argon2id$forged", "must_change_password": true, "timezone": "UTC"}))).await;
+    let row = t.store().get("webui_user", "carol", NOSK).await.unwrap().unwrap();
+    assert!(row["pwhash"].as_str().unwrap().starts_with("$argon2") && row["pwhash"] != "$argon2id$forged", "{row}");
+    assert_eq!((row["must_change_password"].as_bool(), row["timezone"].as_str()), (Some(false), Some("UTC")));
+    // an admin's reset forces a change again and ends carol's sessions
+    t.ok("adm", "PUT", "/api/users/carol", Some(json!({"role": "user", "password": "reset-by-admin-2"}))).await;
+    assert_eq!(as_bearer(&t, &fresh, "GET", "/api/projects", None).await.0, 401);
+    t.done().await;
+}
+
+#[tokio::test]
+async fn sign_ins_are_limited_per_user_and_the_first_admin_must_change_theirs() {
+    let t = T::new().await;
+    t.ok("adm", "PUT", "/api/users/dave", Some(json!({"role": "user", "password": "dave-initial-1"}))).await;
+    for _ in 0..crate::api::LOGIN_MAX_FAILURES {
+        assert_eq!(as_bearer(&t, "", "POST", "/auth/login", Some(json!({"user": "dave", "password": "nope-nope-nope"}))).await.0, 401);
+    }
+    // the next attempt is refused before the password is even checked, right or wrong
+    let (c, v) = as_bearer(&t, "", "POST", "/auth/login", Some(json!({"user": "dave", "password": "dave-initial-1"}))).await;
+    assert_eq!(c, 429, "{v}");
+    // another user is not held up by dave's failures (the address limit is per real peer; tests have none)
+    t.ok("adm", "PUT", "/api/users/erin", Some(json!({"role": "user", "password": "erin-initial-1"}))).await;
+    // the first admin, made on an empty database, must change the first-boot password
+    t.store().delete("webui_user", "admin", NOSK).await.unwrap();
+    for u in t.store().scan("webui_user").await.unwrap() {
+        t.store().delete("webui_user", &crate::storage::body_str(&u, "user"), NOSK).await.unwrap();
+    }
+    unsafe { std::env::set_var("ITER_ADMIN_PASSWORD", "first-boot-pw-1") };
+    crate::bootstrap_admin(t.store()).await;
+    unsafe { std::env::remove_var("ITER_ADMIN_PASSWORD") };
+    let row = t.store().get("webui_user", "admin", NOSK).await.unwrap().unwrap();
+    assert_eq!(row["must_change_password"].as_bool(), Some(true), "{row}");
     t.done().await;
 }

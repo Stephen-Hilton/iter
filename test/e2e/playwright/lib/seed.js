@@ -1,7 +1,7 @@
 // Seed data for the Playwright suite, through the public API only (the same
 // calls the webui, an engine and the wizard make):
 //
-//   settings graph   engine user `pwbot` (role engine) owning engine `mbp`;
+//   settings graph   engine `mbp`, signed in with its own Ed25519 key;
 //                    account `main` (of provider:mock, held by mbp, bills the project)
 //   project graph    a realistic iter5 graph — project node, philosophy + reqs,
 //                    two contexts, containers, components, two connection nodes
@@ -15,10 +15,26 @@ const crypto = require('crypto');
 const sha = (t) => crypto.createHash('sha256').update(t).digest('hex');
 const enc = encodeURIComponent;
 
+// an engine key as `iter_engine key new` makes it, and its signed sign-in
+// (iter_core::enginekey; tls_fp is "" over plain http)
+function engineKey() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const raw = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  return { privateKey, pub: 'iter_' + raw.toString('hex'), id: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 12) };
+}
+async function engineSession(base, k) {
+  const ts = Math.floor(Date.now() / 1000), nonce = crypto.randomBytes(16).toString('hex');
+  const signature = crypto.sign(null, Buffer.from(`iter-engine-login\n${k.id}\n${ts}\n${nonce}\n`), k.privateKey).toString('hex');
+  const r = await fetch(base + '/auth/engine', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key_id: k.id, ts, nonce, tls_fp: '', signature }) });
+  if (!r.ok) throw new Error(`engine sign-in: ${r.status} ${await r.text()}`);
+  return (await r.json()).token;
+}
+
 async function seedSystem(admin) {
-  // the engine's own user + token (an engine authenticates as its owner)
-  await admin.put('/api/users/pwbot', { user: 'pwbot', role: 'engine', email: '', password: 'pwbot-pass-123' });
-  const tok = (await admin.post('/api/users/pwbot/token', { ttl_days: 2 })).token;
+  // engine mbp signs in with its own key (engines are never users)
+  const k = engineKey();
+  await admin.post('/api/keys', { public_key: k.pub, engine: 'mbp', label: 'playwright' });
+  const tok = await engineSession(admin.base, k);
   const eng = admin.as(tok);
   await eng.put('/api/engines/mbp', { state: 'Running', ticksec: 5, last_seen: new Date().toISOString() });
   await admin.post('/api/settings/nodes', { type: 'account', name: 'main', settings: { provider: 'mock', token_envar: 'CLAUDE_TOKEN_MAIN' } });

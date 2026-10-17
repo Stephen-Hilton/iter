@@ -836,12 +836,17 @@ pub struct WebuiUser {
     pub name: String,
     #[serde(default)]
     pub email: String,
-    /// user | engine | admin | viewer (read-only: no queue writes; may edit
-    /// their own profile)
+    /// user | admin | viewer (read-only: no queue writes; may edit their own
+    /// profile). Engines are never users: they sign in with engine keys.
     #[serde(default = "default_role")]
     pub role: String,
     #[serde(default)]
     pub pwhash: String,
+    /// the password was set for this person (the first admin's, or an admin
+    /// reset): until they choose their own, every call but the password
+    /// change is refused
+    #[serde(default)]
+    pub must_change_password: bool,
     #[serde(default = "default_tokenver")]
     pub tokenver: u64,
     #[serde(default)]

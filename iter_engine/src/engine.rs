@@ -78,6 +78,8 @@ pub struct EngineRuntime {
     cluster_healthy_since: HashMap<String, String>,
     /// project -> last `next` refusal logged (so a steady reason logs once)
     next_said: HashMap<String, String>,
+    /// the account token variables last reported missing (logged on change)
+    missing_said: std::sync::Mutex<Vec<String>>,
     /// accounts are configured but none is under its stop% (set each tick):
     /// heartbeats then carry no usage snapshot — the ambient login's numbers
     /// would describe an account this engine is not running on
@@ -331,6 +333,7 @@ impl EngineRuntime {
             cluster_state: HashMap::new(),
             cluster_healthy_since: HashMap::new(),
             next_said: HashMap::new(),
+            missing_said: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -571,13 +574,42 @@ impl EngineRuntime {
     /// something, key names only.
     fn reload_env(&self, force: bool) {
         let mut declared: HashSet<String> = HashSet::new();
-        for a in self.assigned_accounts() {
+        let mut token_vars: HashSet<String> = HashSet::new();
+        let accounts = self.assigned_accounts();
+        for a in &accounts {
             declared.insert(a.token_envar.clone());
+            token_vars.insert(a.token_envar.clone());
             declared.extend(crate::provider::mock::mock_usage_keys(&a.name));
         }
         declared.insert("ITER_MOCK_USAGE".into());
+        // no child process ever sees an account token it was not given
+        crate::envstore::set_account_vars(&token_vars);
+        crate::envstore::refresh_command_if_due();
         if let Some(ch) = crate::envstore::reload_if_changed(&declared, force) {
             println!("[engine] {}", ch.log_line());
+        }
+        // say which tokens are missing, by name only, whenever that changes
+        let mut missing: Vec<String> = accounts
+            .iter()
+            .filter(|a| !a.token_envar.is_empty() && crate::envstore::get(&a.token_envar).is_none())
+            .map(|a| format!("{} ({})", a.token_envar, a.name))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        let mut said = self.missing_said.lock().unwrap_or_else(|p| p.into_inner());
+        if *said != missing {
+            if missing.is_empty() {
+                if !said.is_empty() {
+                    println!("[engine] every account token is set again");
+                }
+            } else {
+                eprintln!(
+                    "[engine] account tokens NOT set: {} — looked in the process environment, the secrets command (when configured) and {}; those accounts get no work",
+                    missing.join(", "),
+                    crate::envstore::env_file()
+                );
+            }
+            *said = missing;
         }
     }
 

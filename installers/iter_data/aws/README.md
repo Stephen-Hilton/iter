@@ -10,10 +10,10 @@ One CloudFormation stack gives you a running iter_data server on EC2. It is the
 | EBS data volume | encrypted gp3, mounted at `/data` (database `/data/arangodb3`, backups `/data/backups`); kept as a snapshot when the stack is deleted or replaced |
 | security group | only the iter_data port (8400) from `AllowedCidr`; SSH only if you give `SshCidr`; ArangoDB is never reachable |
 | Elastic IP | a fixed address for the web page and for engines |
-| IAM role | Session Manager access, and write access to its own admin-password parameter only |
-| SSM parameter | `/iter/<stack>/admin-password` (SecureString), written by the instance; the password never passes through CloudFormation |
+| IAM role | Session Manager access, and put/get/delete on its own `/iter/<stack>/*` parameters only |
+| SSM parameters | `/iter/<stack>/admin-password` (SecureString) and `/iter/<stack>/tls-fingerprint` (String), written by the instance; the password never passes through CloudFormation, and the instance deletes it once the admin has chosen their own |
 
-The stack reports complete only after iter_data answers `/health`, typically about 10 minutes.
+The stack reports complete only after iter_data answers `https://127.0.0.1:<port>/health`, typically about 10 minutes. It needs an iter release that includes HTTPS (any release after v2026.10.17): the first boot runs that release's `linux_aws/install.sh` with `--tls-name`.
 
 ## Launch it
 
@@ -34,12 +34,29 @@ or from this folder: `./install.sh --vpc … --subnet … --allowed-cidr …`. O
 Then:
 
 ```sh
-./install.sh status      # stack state and outputs: Url, AdminPasswordParameter, InstanceId, DataVolumeId
-./install.sh password    # the admin password (from SSM)
+./install.sh status        # stack state and outputs: Url, AdminPasswordParameter, TlsFingerprintParameter, InstanceId, DataVolumeId
+./install.sh password      # the first-boot admin password (from SSM; gone once you have changed it)
+./install.sh fingerprint   # iter_data's TLS certificate fingerprint (from SSM)
 ```
 
-Open the `Url` output, sign in as `admin`, and point engines at that URL
-(`installers/iter_engine/<platform>/`).
+Open the `Url` output (`https://<Elastic IP>:8400`), sign in as `admin` and choose your own password (the webui asks at the first sign-in; 12 characters or more). The instance then deletes `/iter/<stack>/admin-password` and the `ITER_ADMIN_PASSWORD` line in `/etc/iter/data.env` (`iter-admin-cleanup`, told the stack by `/etc/iter/aws.env`). Then and point engines at that URL
+(`installers/iter_engine/<platform>/`) with the fingerprint: `install.sh --data-url https://<Elastic IP>:8400 --fingerprint sha256:…`.
+
+## HTTPS
+
+iter_data serves HTTPS with a self-signed certificate it makes on first boot (`/var/lib/iter/tls.crt`, kept
+across reinstalls). Its names are the Elastic IP and, once the instance metadata (IMDSv2) shows the Elastic IP
+attached, its public DNS name; engines ignore names, because they pin the certificate's **fingerprint**
+(`sha256:` + 64 hex). The first boot stores it in `/iter/<stack>/tls-fingerprint`. Give it to each engine
+installer (`--fingerprint`), or let the engine trust it at its first sign-in and compare with
+`iter_engine key status`; the webui's 🔑 Engine keys screen shows it too. Engines never accept plain `http://`
+to another machine.
+
+Browsers warn about the self-signed certificate until you accept it. For one they trust, put an Application
+Load Balancer with an ACM certificate (or a proxy such as Caddy) in front, rerun `linux_aws/install.sh` on the
+instance with `--tls off` (the proxy then speaks to iter_data over plain HTTP) and narrow `AllowedCidr` to the
+proxy; engines then use the proxy's URL with `iter_engine key trust --ca`. Or rerun it with
+`--tls-cert/--tls-key` for a certificate of your own.
 
 ## Sizing
 
@@ -58,10 +75,8 @@ allows internal business use of a dataset under 100 GB.
   `curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux_aws/install.sh | sudo bash -s -- install --version <tag> --db-dir /data/arangodb3 --backup-dir /data/backups`.
   Changing `IterVersion` on the stack does not upgrade a running instance: it only applies at first boot.
 - **Logs:** `/var/log/iter-bootstrap.log` (first boot), `journalctl -u iter-data -u arangodb3`.
-- **TLS:** the stack serves plain HTTP on the Elastic IP. For HTTPS put an Application Load Balancer with an
-  ACM certificate (or a proxy such as Caddy) in front, and narrow `AllowedCidr` to it.
 - **Delete:** `./install.sh delete`. The data volume is kept as an EBS snapshot (restore it to a new volume
-  to recover the database); remove the snapshot and `/iter/<stack>/admin-password` yourself when done.
+  to recover the database); remove the snapshot and the `/iter/<stack>/admin-password` and `/iter/<stack>/tls-fingerprint` parameters yourself when done.
 
 Nothing here compiles anything: the instance downloads the prebuilt `iter_data-linux-<arch>` from the
 release. To compile it yourself, clone the repo and run `cargo build --release -p iter_data` (or

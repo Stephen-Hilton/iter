@@ -29,6 +29,56 @@ again at any time. The folder READMEs above have the details for each platform.
 Installed locations: engine `~/.iter/bin/iter_engine` (Windows `%USERPROFILE%\.iter\bin\iter_engine.exe`),
 iter_data `/opt/iter/bin/iter_data`.
 
+## The first-boot admin password
+
+Every iter_data installer generates the `admin` password on a fresh install and prints it once. It must be
+changed at the first sign-in: the webui asks, and a new password needs 12 characters or more (the API refuses
+everything else until then). Then iter_data writes `admin_password_changed` beside its secrets, and the
+installers remove `ITER_ADMIN_PASSWORD` from where they put it: linux / linux_aws through the
+`iter-admin-cleanup.path` systemd unit (on an aws stack also the SSM parameter), docker on the next
+`install.sh` run or `install.sh status`.
+
+## Engine account tokens from a secret store
+
+Every engine installer takes `--secrets-command CMD` (`-SecretsCommand` on Windows) and `--secrets-every N`
+(minutes, default 5): a command printing the account tokens as `KEY=value` lines (AWS SSM Parameter Store or
+Secrets Manager, 1Password, the macOS Keychain; recipes in each folder's README). The engine runs it at
+startup and every N minutes and keeps the values in memory only; environment variables the service starts
+with win over it, and it wins over `~/.iter/.env`. With it, the installers ask for no tokens.
+
+## HTTPS and the certificate fingerprint
+
+iter_data serves HTTPS by default. On its first start it makes a self-signed certificate (`tls.crt` +
+`tls.key`, mode 600) beside its secret file, next to `engine_session.secret`; the installers keep all of
+them across reinstalls. Every iter_data installer waits on `https://127.0.0.1:<port>/health` and then
+prints the certificate's **fingerprint**, `sha256:` + 64 hex (the SHA-256 of the certificate: `openssl x509
+-in tls.crt -noout -fingerprint -sha256`, colons removed, lowercased). The webui shows it in the 🔑 Engine
+keys screen too, and `install.sh status` (linux, linux_aws) or `install.sh fingerprint` (aws) prints it
+again.
+
+Engines never accept plain `http://` across a network: an engine installer stops on an `http://` URL
+unless iter_data runs on that same machine (127.0.0.1, localhost, ::1). Each engine pins iter_data's
+fingerprint in `~/.iter/server_trust.json`:
+
+1. Install iter_data and copy the fingerprint it prints.
+2. Install each engine with `--data-url https://<host>:8400 --fingerprint sha256:…` (Windows:
+   `-DataUrl … -Fingerprint …`), or paste the fingerprint when the script asks. The script runs
+   `iter_engine key trust --data-url URL --fingerprint …` right after the binary is installed. If the
+   server presents a different certificate it stops, because something else answers at that URL.
+3. Or press Enter at that question: the engine trusts the certificate at its first sign-in. Compare it
+   afterwards with `iter_engine key status`, which prints the trusted certificate.
+
+Browsers warn about the self-signed certificate. The iter_data installers take `--tls-cert PATH --tls-key
+PATH` to serve a certificate of your own (copied into iter_data's folder, key mode 600), `--tls-name NAME`
+(repeatable) to add names to the self-signed one, and `--tls off` for iter_data behind a TLS proxy on the
+same host. An engine that reaches iter_data through a proxy with a real certificate uses `--trust-ca`
+(`iter_engine key trust --ca`) instead of a fingerprint.
+
+Engine key commands: `iter_engine key show` prints the public key; `iter_engine key rotate --data-url URL`
+replaces the key, signed by the current one, with no webui step (a revoked key cannot rotate);
+`iter_engine key status` checks the key and the trusted certificate; `iter_engine key trust --forget`
+drops a server's pin. Engines sign in only with their key; there is no engine token.
+
 ## Versions
 
 A release is a git tag `v<YYYY>.<MM>.<DD>` (UTC build day); a second release the same day is

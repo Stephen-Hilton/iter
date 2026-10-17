@@ -2,9 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   iter_data server on one EC2 instance (Amazon Linux 2023, Graviton or x86_64): ArangoDB + iter_data
   as systemd services, installed at first boot by installers/iter_data/linux_aws/install.sh from a
-  GitHub Release of Stephen-Hilton/iter (the latest unless IterVersion names one). The database lives
-  on its own encrypted EBS volume, the admin password is stored in SSM Parameter Store, and only the
-  iter_data port is reachable from AllowedCidr.
+  GitHub Release of Stephen-Hilton/iter (the latest unless IterVersion names one). iter_data serves
+  HTTPS with a self-signed certificate whose fingerprint (what engines pin) is stored in SSM. The
+  database lives on its own encrypted EBS volume, the admin password is stored in SSM Parameter
+  Store, and only the iter_data port is reachable from AllowedCidr.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -124,12 +125,14 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: iter-admin-password
+        - PolicyName: iter-admin-password-and-tls-fingerprint
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: [ssm:PutParameter, ssm:GetParameter]
+                # PutParameter at first boot; DeleteParameter when the admin has chosen their
+                # own password (iter-admin-cleanup removes /iter/<stack>/admin-password)
+                Action: [ssm:PutParameter, ssm:GetParameter, ssm:DeleteParameter]
                 Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iter/${AWS::StackName}/*
 
   InstanceProfile:
@@ -158,7 +161,8 @@ Resources:
           - |
             #!/bin/bash
             # First boot: mount the data volume, install iter_data from the release, store the
-            # admin password in SSM, report to CloudFormation. Log: /var/log/iter-bootstrap.log
+            # admin password (deleted again once the admin has chosen their own) and the TLS
+            # certificate fingerprint in SSM, report to CloudFormation. Log: /var/log/iter-bootstrap.log
             set -euo pipefail
             exec > >(tee -a /var/log/iter-bootstrap.log) 2>&1
             SIGNAL_URL='${WaitHandle}'
@@ -169,7 +173,7 @@ Resources:
             }
             trap 'signal FAILURE "first boot failed at line $LINENO: see /var/log/iter-bootstrap.log"' ERR
 
-            dnf install -y -q jq xfsprogs
+            dnf install -y -q jq xfsprogs openssl
 
             # the data volume: the one disk with no partitions that is not the root disk
             root_disk="/dev/$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")"
@@ -189,15 +193,39 @@ Resources:
             grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /data xfs defaults,nofail 0 2" >> /etc/fstab
             mountpoint -q /data || mount /data
 
+            # tells iter-admin-cleanup (installed by linux_aws/install.sh) which SSM copy of
+            # the first-boot admin password to delete once the admin has chosen their own
+            mkdir -p /etc/iter
+            printf 'STACK=%s\nREGION=%s\n' '${AWS::StackName}' '${AWS::Region}' > /etc/iter/aws.env
+            chmod 644 /etc/iter/aws.env
+
             version='${IterVersion}'
             if [ "$version" = latest ]; then
               version=$(curl -fsSL --retry 5 https://api.github.com/repos/Stephen-Hilton/iter/releases/latest | jq -r .tag_name)
             fi
             [ -n "$version" ] && [ "$version" != null ] || { echo "no iter release found"; false; }
-            echo "installing iter_data $version"
+
+            # names on iter_data's self-signed certificate: the Elastic IP, and its public DNS
+            # name once instance metadata (IMDSv2) shows the Elastic IP attached. Engines pin
+            # the certificate's fingerprint and ignore names; the names are for browsers.
+            eip='${ElasticIp}'
+            tls_names="--tls-name $eip"
+            for _ in $(seq 1 24); do
+              tok=$(curl -fsS -m 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token || true)
+              ip=$(curl -fsS -m 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+              if [ "$ip" = "$eip" ]; then
+                dns=$(curl -fsS -m 5 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/public-hostname || true)
+                [ -z "$dns" ] || tls_names="$tls_names --tls-name $dns"
+                break
+              fi
+              sleep 5
+            done
+
+            echo "installing iter_data $version ($tls_names)"
+            # shellcheck disable=SC2086  # tls_names is several words on purpose
             curl -fsSL --retry 5 "https://raw.githubusercontent.com/Stephen-Hilton/iter/$version/installers/iter_data/linux_aws/install.sh" \
               | bash -s -- install --version "$version" --port ${IterPort} \
-                  --db-dir /data/arangodb3 --backup-dir /data/backups
+                  --db-dir /data/arangodb3 --backup-dir /data/backups $tls_names
 
             pw=$(sed -n 's/^ITER_ADMIN_PASSWORD=//p' /etc/iter/data.env | head -1)
             [ -n "$pw" ] || { echo "no ITER_ADMIN_PASSWORD in /etc/iter/data.env"; false; }
@@ -205,8 +233,16 @@ Resources:
               --type SecureString --overwrite --value "$pw" >/dev/null
             unset pw
 
-            curl -fsS "http://127.0.0.1:${IterPort}/health" | grep -q '"ok":true'
-            signal SUCCESS "iter_data $version is up"
+            # iter_data serves HTTPS with its self-signed certificate (-k: this only asks "up?")
+            curl -fsSk "https://127.0.0.1:${IterPort}/health" | grep -q '"ok":true'
+
+            # the certificate's fingerprint (SHA-256 of its DER), for engines to pin
+            fp=$(openssl x509 -in /var/lib/iter/tls.crt -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
+            [ -n "$fp" ] || { echo "no TLS certificate at /var/lib/iter/tls.crt"; false; }
+            aws ssm put-parameter --region '${AWS::Region}' --name '/iter/${AWS::StackName}/tls-fingerprint' \
+              --type String --overwrite --value "sha256:$fp" >/dev/null
+            echo "TLS certificate fingerprint: sha256:$fp"
+            signal SUCCESS "iter_data $version is up, TLS certificate sha256:$fp"
           - {}
 
   DataVolume:
@@ -228,13 +264,20 @@ Resources:
       VolumeId: !Ref DataVolume
       Device: /dev/sdf
 
+  # the address exists before the instance (its first boot puts it on the TLS certificate),
+  # and is attached by the association below
   ElasticIp:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
-      InstanceId: !Ref Instance
       Tags:
         - {Key: Name, Value: !Sub "iter-data-${AWS::StackName}"}
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
 
   WaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
@@ -242,7 +285,7 @@ Resources:
   # the stack finishes only when first boot has installed iter_data and /health answers
   InstallFinished:
     Type: AWS::CloudFormation::WaitCondition
-    DependsOn: [DataVolumeAttachment, ElasticIp]
+    DependsOn: [DataVolumeAttachment, ElasticIpAssociation]
     Properties:
       Handle: !Ref WaitHandle
       Timeout: "2700"
@@ -250,13 +293,22 @@ Resources:
 
 Outputs:
   Url:
-    Description: The iter web page and API (sign in as admin). Engines use this as their iter_data URL.
-    Value: !Sub "http://${ElasticIp}:${IterPort}"
+    Description: >-
+      The iter web page and API (sign in as admin); engines use this as their iter_data URL. HTTPS
+      with a self-signed certificate: browsers warn until you accept it (or put a TLS proxy in front).
+    Value: !Sub "https://${ElasticIp}:${IterPort}"
   AdminPasswordParameter:
     Description: >-
-      SSM Parameter Store name holding the admin password. Read it with:
+      SSM Parameter Store name holding the first-boot admin password, until the admin has chosen
+      their own at the first sign-in (the webui asks; 12+ characters): then the instance deletes it. Read it with:
       aws ssm get-parameter --with-decryption --name <this> --query Parameter.Value --output text
     Value: !Sub "/iter/${AWS::StackName}/admin-password"
+  TlsFingerprintParameter:
+    Description: >-
+      SSM Parameter Store name holding iter_data's TLS certificate fingerprint (sha256:...), to give
+      to each engine installer (--fingerprint) or compare with `iter_engine key status`. Read it with:
+      aws ssm get-parameter --name <this> --query Parameter.Value --output text
+    Value: !Sub "/iter/${AWS::StackName}/tls-fingerprint"
   InstanceId:
     Description: Connect with Session Manager (aws ssm start-session --target <this>).
     Value: !Ref Instance

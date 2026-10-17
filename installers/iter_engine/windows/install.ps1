@@ -23,6 +23,17 @@ Options:
   -Name NAME       this engine's name, unique per machine (default: the hostname)
   -Version TAG     release to download, e.g. v2026.10.17 (else $env:ITER_VERSION, else latest)
   -Binary PATH     install this iter_engine.exe instead of downloading one
+  -Fingerprint FP  iter_data's certificate fingerprint (sha256:..., from the iter_data
+                   installer or the webui's Engine keys screen): pinned before sign-in
+  -TrustCa         iter_data is behind a TLS proxy with a real certificate: check it
+                   against certificate authorities instead of pinning
+  -SecretsCommand CMD  a command (run by cmd /C) printing KEY=value lines: the account
+                   tokens, from a secret store (aws ssm / secretsmanager, op, ...); the
+                   engine runs it at startup and every -SecretsEvery minutes and keeps the
+                   values in memory only. Kept in ~\.iter\engine.conf and put on the
+                   engine's command line; "none" removes it. With it, the accounts step
+                   asks for no tokens.
+  -SecretsEvery N  minutes between secrets-command runs [5]
   -Yes             answer yes to every question; update while work runs
   -DryRun          print every action, change nothing
   ($env:ITER_RELEASE_URL: download the binary and SHA256SUMS from this base URL instead)
@@ -37,9 +48,20 @@ accepts it) -> a laptop: no sleep on AC power (asks) -> the logon task
 "iter engine" (runs ~\.iter\bin\iter-engine.ps1 start, a copy of this script)
 -> account tokens and project checkouts.
 
+HTTPS: iter_data must be https:// (iter_data serves HTTPS by default; plain
+http:// is refused unless iter_data runs on this machine: 127.0.0.1, localhost,
+::1). The engine pins iter_data's certificate fingerprint in
+~\.iter\server_trust.json: -Fingerprint (or the fingerprint pasted when asked)
+runs `iter_engine key trust` right after the binary is installed and stops if
+the server presents another certificate; without one, the first sign-in trusts
+the certificate it sees (compare: iter_engine key status). Other key commands:
+`iter_engine key show` (print the public key), `iter_engine key rotate` (a new
+key, signed by the current one, no webui step).
+
 Everything this machine keeps for iter is in ~\.iter: bin\iter_engine.exe, the
-key (engine.key), the env file with account tokens (.env), engine.conf,
-models\, engine.pid and the logs (engine.log, engine.err.log).
+key (engine.key), server_trust.json (iter_data's pinned certificate), the env
+file with account tokens (.env), engine.conf, models\, engine.pid and the logs
+(engine.log, engine.err.log).
 #>
 param(
     [ValidateSet('install', 'status', 'update', 'accounts', 'projects', 'start', 'stop', 'logs', 'uninstall')]
@@ -48,10 +70,15 @@ param(
     [string]$Name = '',
     [string]$Version = $env:ITER_VERSION,
     [string]$Binary = '',
+    [string]$Fingerprint = '',
+    [switch]$TrustCa,
+    [string]$SecretsCommand = '',
+    [int]$SecretsEvery = 0,
     [switch]$Yes,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
+$script:SecretsGiven = $PSBoundParameters.ContainsKey('SecretsCommand')
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is many times slower with its progress bar
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -60,6 +87,10 @@ $RepoSlug = 'Stephen-Hilton/iter'
 $Asset = 'iter_engine-windows-x86_64.exe'   # also on ARM64 Windows, through its x64 emulation
 $Here = $PSScriptRoot
 $IterHome = Join-Path $HOME '.iter'
+# iter_engine keeps its files (key, server_trust.json) in $env:ITER_HOME, else ~\.iter:
+# the engine process reads ~\.iter, so this script's own iter_engine calls do too
+$env:ITER_HOME = $IterHome
+$TrustFile = Join-Path $IterHome 'server_trust.json'
 $BinDir = Join-Path $IterHome 'bin'
 $Exe = Join-Path $BinDir 'iter_engine.exe'
 $Launcher = Join-Path $BinDir 'iter-engine.ps1'
@@ -72,6 +103,8 @@ $ErrLog = Join-Path $IterHome 'engine.err.log'
 $ModelDir = Join-Path $IterHome 'models\all-MiniLM-L6-v2'
 $TaskName = 'iter engine'
 $script:Engine = ''
+$script:SecretsCmd = ''
+$script:SecretsEvery = ''
 
 function Say($m) { Write-Host "`n==> $m" }
 function Ok($m) { Write-Host "    ok  $m" -ForegroundColor Green }
@@ -123,29 +156,125 @@ function Get-EnvValue($key) {
     if ($l) { return ($l -replace "^\s*(export\s+)?$key\s*=\s*", '').Trim().Trim('"', "'") } return ''
 }
 
+# -SecretsCommand / -SecretsEvery: given now, else kept in engine.conf
+function Load-Secrets {
+    $script:SecretsCmd = if ($script:SecretsGiven) { $SecretsCommand } else { Get-Conf SECRETS_COMMAND }
+    if ($script:SecretsCmd -eq 'none') { $script:SecretsCmd = '' }
+    $script:SecretsEvery = if ($SecretsEvery -gt 0) { "$SecretsEvery" } else { Get-Conf SECRETS_EVERY }
+    if ($script:SecretsEvery -notmatch '^[1-9][0-9]*$' -or -not $script:SecretsCmd) { $script:SecretsEvery = '' }
+}
+
+# one argument for a Windows command line (CommandLineToArgvW quoting)
+function ConvertTo-WinArg([string]$a) {
+    if ($a -and $a -notmatch '[\s"]') { return $a }
+    $b = $a -replace '(\\*)"', '$1$1\"'
+    $b = $b -replace '(\\+)$', '$1$1'
+    return '"' + $b + '"'
+}
+
 function Load-Conf {
+    Load-Secrets
     if (-not $script:DataUrl) { $script:DataUrl = Get-Conf DATA_URL }
     if (-not $script:Engine) { $script:Engine = if ($Name) { $Name } else { Get-Conf ENGINE } }
     if (-not $script:Engine) { throw 'not installed yet: run install.cmd' }
 }
 
-# a session from the engine key (else the older fixed token), for this script's own API calls
+# a session from the engine key, for this script's own API calls ('' when there is none)
 function Get-Bearer {
     if ((Test-Path $KeyFile) -and (Test-Path $Exe)) {
         $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try { $t = & $Exe key session --key-file $KeyFile --data-url $script:DataUrl 2>$null } finally { $ErrorActionPreference = $eap }
         if ($LASTEXITCODE -eq 0 -and $t) { return "$t".Trim() }
     }
-    return Get-EnvValue 'ITER_ENGINE_TOKEN'
+    return ''
 }
 
-# GET an iter_data path as this engine (curl.exe: no PS 5.1 re-encoding); $null on failure. Read-only.
+# ------------------------------------------------------------------ iter_data over HTTPS
+# iter_data serves HTTPS with its own (self-signed) certificate. The engine pins
+# that certificate's fingerprint in ~\.iter\server_trust.json (one entry per
+# scheme://host:port), and plain http:// is only for this machine. This script's
+# own API calls check the certificate the same way (IterPinnedGet below).
+
+# the trust file's key for a URL: scheme://host:port, lowercased
+function Get-TrustOrigin([string]$u) {
+    $u = $u.Trim().TrimEnd('/')
+    $i = $u.IndexOf('://')
+    $s = if ($i -ge 0) { $u.Substring(0, $i).ToLower() } else { 'http' }
+    $r = if ($i -ge 0) { $u.Substring($i + 3) } else { $u }
+    $hp = ($r -split '[/?#]', 2)[0].ToLower()
+    $hasPort = if ($hp.Contains(']')) { $hp.Substring($hp.LastIndexOf(']')).Contains(':') } else { $hp.Contains(':') }
+    if (-not $hasPort) { $hp = $hp + ':' + $(if ($s -eq 'https') { '443' } else { '80' }) }
+    return $s + '://' + $hp
+}
+
+function Test-LoopbackUrl([string]$u) {
+    try { $h = ([Uri]$u).Host.Trim('[', ']').ToLower() } catch { return $false }
+    if ($h -eq 'localhost') { return $true }
+    $ip = $null
+    if ([Net.IPAddress]::TryParse($h, [ref]$ip)) { return [Net.IPAddress]::IsLoopback($ip) }
+    return $false
+}
+
+# this URL's entry in server_trust.json (mode, pins), or $null
+function Get-TrustEntry([string]$u) {
+    if (-not (Test-Path $TrustFile)) { return $null }
+    try { $j = Get-Content $TrustFile -Raw | ConvertFrom-Json } catch { return $null }
+    if (-not $j.servers) { return $null }
+    $p = $j.servers.PSObject.Properties[(Get-TrustOrigin $u)]
+    if ($p) { return $p.Value } return $null
+}
+
+# GET with a bearer token over HttpWebRequest, accepting only a certificate whose
+# SHA-256 (of its DER) is one of the pins: the same check the engine makes. Empty
+# pins = ordinary certificate-authority checks. Throws when it cannot.
+$PinnedGetSource = @'
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+public static class IterPinnedGet {
+    public static string Get(string url, string bearer, string[] pins, int timeoutMs) {
+        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+        req.Timeout = timeoutMs;
+        req.ReadWriteTimeout = timeoutMs;
+        if (!String.IsNullOrEmpty(bearer)) { req.Headers["Authorization"] = "Bearer " + bearer; }
+        if (pins != null && pins.Length > 0) {
+            req.ServerCertificateValidationCallback = delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
+                if (cert == null) { return false; }
+                string hex;
+                using (SHA256 sha = SHA256.Create()) { hex = BitConverter.ToString(sha.ComputeHash(cert.GetRawCertData())).Replace("-", "").ToLowerInvariant(); }
+                foreach (string p in pins) { if (p == hex) { return true; } }
+                return false;
+            };
+        }
+        using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+        using (StreamReader rd = new StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8)) { return rd.ReadToEnd(); }
+    }
+}
+'@
+
+# GET an iter_data path as this engine, iter_data's certificate checked as the engine
+# checks it; $null on failure (unreachable, refused, nothing trusted yet, or another
+# certificate). Read-only.
 function Get-Api($path) {
     $ErrorActionPreference = 'Continue'
     $tok = Get-Bearer
-    $out = & curl.exe -sS -f --max-time 15 -H "authorization: Bearer $tok" "$($script:DataUrl)$path" 2>$null
-    if ($LASTEXITCODE -ne 0) { return $null }
-    return ($out -join "`n") | ConvertFrom-Json
+    if (-not $tok) { return $null }
+    $pins = @()
+    if ($script:DataUrl -match '^https://') {
+        $t = Get-TrustEntry $script:DataUrl
+        if (-not $t) { return $null }
+        if ($t.mode -ne 'ca') {
+            $pins = @($t.pins | ForEach-Object { ("$_" -replace '^sha256:', '' -replace ':', '').ToLower() })
+            if ($pins.Count -eq 0) { return $null }
+        }
+    }
+    try {
+        if (-not ('IterPinnedGet' -as [type])) { Add-Type -TypeDefinition $PinnedGetSource -IgnoreWarnings -WarningAction SilentlyContinue }
+        return [IterPinnedGet]::Get("$($script:DataUrl)$path", $tok, [string[]]$pins, 15000) | ConvertFrom-Json
+    } catch { return $null }
 }
 
 # Git for Windows' bash.exe, found from git.exe (<Git>\cmd\git.exe -> <Git>\bin\bash.exe),
@@ -197,27 +326,28 @@ function Stop-Engine {
 function Start-Engine {
     Load-Conf
     if (-not $DryRun -and -not (Test-Path $Exe)) { throw "$Exe is missing: run install.cmd" }
-    if (-not (Test-Path $KeyFile) -and -not (Get-EnvValue 'ITER_ENGINE_TOKEN')) {
+    if (-not (Test-Path $KeyFile)) {
         if ($DryRun) { Dry "start iter_engine (once $KeyFile exists)"; return }
         throw "no engine key at ${KeyFile}: run install.cmd (or '$Exe key new', then add its public key in the webui's Engine keys screen)"
     }
     $running = Get-EngineProcess
     if ($running) { Ok "iter_engine already running (pid $($running.Id))"; return }
     $engineArgs = @('--data-url', $script:DataUrl, '--env-file', $EnvFile, '--key-file', $KeyFile, '--name', $script:Engine)
-    if ($DryRun) { Dry "start (hidden) $Exe $($engineArgs -join ' ') > $Log 2> $ErrLog"; return }
+    if ($script:SecretsCmd) { $engineArgs += @('--secrets-command', $script:SecretsCmd) }
+    if ($script:SecretsEvery) { $engineArgs += @('--secrets-every', $script:SecretsEvery) }
+    # one quoted command line: Start-Process joins an argument array without quoting
+    $engineArgs = ($engineArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
+    if ($DryRun) { Dry "start (hidden) $Exe $engineArgs > $Log 2> $ErrLog"; return }
     New-Item -ItemType Directory -Force $IterHome | Out-Null
     $p = Start-Process -FilePath $Exe -ArgumentList $engineArgs -WorkingDirectory $IterHome -WindowStyle Hidden `
         -RedirectStandardOutput $Log -RedirectStandardError $ErrLog -PassThru
     Set-Content $PidFile $p.Id
     Ok "iter_engine '$($script:Engine)' started (pid $($p.Id)) -> $($script:DataUrl); log $Log"
-    $token = Get-Bearer
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep 1
         if ($p.HasExited) { Get-Content $ErrLog -Tail 20 -ErrorAction SilentlyContinue; throw "iter_engine exited ($($p.ExitCode))" }
-        try {
-            $e = Invoke-RestMethod "$($script:DataUrl)/api/engines/$($script:Engine)" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 3
-            if ($e.state -eq 'Running') { Ok "engine checked in: state $($e.state)"; return }
-        } catch { }
+        $e = Get-Api "/api/engines/$($script:Engine)"
+        if ($e -and $e.state -eq 'Running') { Ok "engine checked in: state $($e.state)"; return }
     }
     Warn "no Running check-in after 30s; see $Log and $ErrLog"
 }
@@ -310,17 +440,28 @@ function Step-Settings {
         if (-not $DryRun) { throw 'the iter_data URL is required (-DataUrl URL)' }
         $url = 'https://iter.example.com'; Warn "no iter_data URL given: the dry run goes on with $url"
     }
-    if ($url -match '^http://' -and $url -notmatch '^http://(127\.0\.0\.1|localhost)') { Warn "$url is plain http: the engine's session token crosses the network unencrypted" }
-    & curl.exe -sS -f --max-time 10 -o NUL "$url/health" 2>$null
+    if ($url -notmatch '^https?://') { throw "${url}: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" }
+    if ($url -match '^http://' -and -not (Test-LoopbackUrl $url)) {
+        throw "$url is plain http: iter_data must be reached over https:// (iter_data serves HTTPS by default), so the engine's session token and the work never cross the network unencrypted; plain http:// is only for iter_data on this machine (127.0.0.1, localhost, ::1). Try $($url -replace '^http://', 'https://')"
+    }
+    # -k: only "does it answer?"; the certificate is checked by iter_engine (pinned)
+    & curl.exe -sS -f -k --max-time 10 -o NUL "$url/health" 2>$null
     if ($LASTEXITCODE -eq 0) { Ok "$url answers" } else { Warn "no answer from $url/health (a proxy may hide it; the key check below tells)" }
     # hostname keeps its case; $env:COMPUTERNAME is upper-cased and would register a second engine
     $priorName = Get-Conf ENGINE
     $def = if ($priorName) { $priorName } else { hostname }
     $n = if ($Name) { $Name } else { Ask "engine name [$def]:" $def }
     if ($n -notmatch '^[A-Za-z0-9_.-]+$') { throw "engine name '$n': letters, digits, - _ . only" }
-    Step "write $Conf (DATA_URL=$url, ENGINE=$n)" {
+    Load-Secrets
+    $lines = @("DATA_URL=$url", "ENGINE=$n")
+    if ($script:SecretsCmd) {
+        $lines += "SECRETS_COMMAND=$($script:SecretsCmd)"
+        Ok "account tokens: from the secrets command, every $(if ($script:SecretsEvery) { $script:SecretsEvery } else { 5 }) min (values stay in the engine's memory)"
+    }
+    if ($script:SecretsEvery) { $lines += "SECRETS_EVERY=$($script:SecretsEvery)" }
+    Step "write $Conf ($($lines -join ', '))" {
         New-Item -ItemType Directory -Force $IterHome | Out-Null
-        [IO.File]::WriteAllLines($Conf, [string[]]@("DATA_URL=$url", "ENGINE=$n"))
+        [IO.File]::WriteAllLines($Conf, [string[]]$lines)
     }
     $script:DataUrl = $url; $script:Engine = $n
     Ok "engine '$n' -> $url (in $Conf)"
@@ -332,6 +473,37 @@ function Step-Settings {
 function Step-Binary {
     Say '3/8 iter_engine'
     $script:Changed = Install-Binary
+}
+
+# iter_data's certificate, before the first sign-in: -Fingerprint (or the one pasted
+# here) pins it now and stops when the server presents another one; -TrustCa checks
+# it against certificate authorities (a TLS proxy with a real certificate); else the
+# first sign-in trusts what it sees (trust on first use).
+function Step-Trust {
+    $ErrorActionPreference = 'Continue'
+    Say '3b/8 iter_data''s certificate'
+    if ($script:DataUrl -notmatch '^https://') { Ok "$($script:DataUrl) is plain http to this machine: no certificate to trust"; return }
+    if ($TrustCa) {
+        Invoke-Native "$Exe key trust --data-url $($script:DataUrl) --ca" { & $Exe key trust --data-url $script:DataUrl --ca }
+        return
+    }
+    $fp = $Fingerprint
+    $has = [bool](Get-TrustEntry $script:DataUrl)
+    if (-not $fp -and -not $has) {
+        $keyIcon = [char]::ConvertFromUtf32(0x1F511)
+        if ($DryRun) { Dry "ask for iter_data's certificate fingerprint (Enter = trust it at the first sign-in)" }
+        elseif (-not $Yes) { $fp = Ask "Paste iter_data's certificate fingerprint (shown in the webui's $keyIcon Engine keys screen, or by the iter_data installer), or press Enter to trust it at the first sign-in:" '' }
+    }
+    if (-not $fp) {
+        if ($has) { Ok "trusted already ($TrustFile)" }
+        else { Warn "no fingerprint given: the first sign-in trusts the certificate $($script:DataUrl) presents; compare it afterwards (iter_engine key status) with the webui's Engine keys screen" }
+        return
+    }
+    try {
+        Invoke-Native "$Exe key trust --data-url $($script:DataUrl) --fingerprint $fp" { & $Exe key trust --data-url $script:DataUrl --fingerprint $fp }
+    } catch {
+        throw "$($script:DataUrl) does not present the certificate ${fp}: something else answers at that URL (or the fingerprint is mistyped). Nothing was trusted; check the URL and the fingerprint (iter_data installer output, webui Engine keys screen)"
+    }
 }
 
 # the embedding model (sentence-transformers/all-MiniLM-L6-v2, Apache-2.0,
@@ -428,6 +600,19 @@ function Step-Accounts {
     $vars = @($a.accounts | ForEach-Object { $_.token_envar }) + @($a.projects | ForEach-Object { $_.accounts | ForEach-Object { $_.token_envar } }) |
         Where-Object { $_ } | Sort-Object -Unique
     if (-not $vars) { Ok 'the served projects name no account tokens'; return }
+    if ($script:SecretsCmd) {
+        Ok "the secrets command supplies the account tokens (not $EnvFile): nothing to paste here"
+        if ($DryRun) { Dry "run the secrets command once and check it prints $($vars -join ', ') (names only)"; return }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $names = @(& cmd.exe /d /c $script:SecretsCmd 2>$null | ForEach-Object { if ("$_" -match '^\s*(export\s+)?([A-Za-z_][A-Za-z0-9_]*)=') { $Matches[2] } })
+        $ErrorActionPreference = $eap
+        foreach ($v in $vars) {
+            if ($names -contains $v) { Ok "$v (from the secrets command)" }
+            elseif (Get-EnvValue $v) { Ok "$v (from $EnvFile)" }
+            else { Warn "${v}: the secrets command does not print it here (the engine logs missing token names)" }
+        }
+        return
+    }
     foreach ($v in $vars) {
         if (Get-EnvValue $v) { Ok $v; continue }
         if ($DryRun) { Dry "ask for $v and add it to $EnvFile"; continue }
@@ -511,13 +696,14 @@ function Do-Uninstall {
 if ($DryRun) { Write-Host 'dry run: every action is printed, nothing is changed' }
 switch ($Mode) {
     'install' {
-        Step-Tools; Step-Settings; Step-Binary; Step-Model; Step-Key; Step-Power; Step-Service
+        Step-Tools; Step-Settings; Step-Binary; Step-Trust; Step-Model; Step-Key; Step-Power; Step-Service
         Say '8/8 accounts and projects'
         Step-Accounts; Step-Projects
         if ($DryRun) { Write-Host "`nDry run done: nothing was changed."; break }
         Write-Host "`nDone. Engine '$($script:Engine)' starts at logon and checks in with $($script:DataUrl)."
         Write-Host 'Next, in the webui''s Settings tab: draw a serves edge from it to each project (topdir with forward'
         Write-Host 'slashes, e.g. C:/Users/<you>/dev/<project>), then run install.cmd projects here to clone them.'
+        Write-Host "  a new key: $Exe key rotate   (its public key: $Exe key show)"
     }
     'status' { Show-Status }
     'update' { Do-Update }

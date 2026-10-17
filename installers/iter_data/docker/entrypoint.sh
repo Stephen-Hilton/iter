@@ -13,6 +13,9 @@ export ARANGO_PASSWORD="${ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-}}"
 # the one data mount (a host folder in compose.yml); /var/lib/arangodb3,
 # /var/lib/arangodb3-apps and /var/lib/iter are links into it
 mkdir -p /var/lib/iter_data/arango /var/lib/iter_data/arango-apps /var/lib/iter_data/iter
+# iter_data's own files (iter_data.secret, engine_session.secret, tls.key) are
+# owner-only, and so is the folder that holds them
+chmod 700 /var/lib/iter_data/iter
 
 # No endpoint argument: the image config already listens on 0.0.0.0:8529, and the
 # image entrypoint passes our arguments to its first-run init server too (an
@@ -30,11 +33,21 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
+# HTTPS (iter_data's default, --tls auto): a self-signed certificate made on first
+# start beside the secret file. ITER_TLS=off (read by iter_data itself) serves plain
+# HTTP; ITER_TLS_CERT + ITER_TLS_KEY serve a certificate of your own; ITER_TLS_NAMES
+# (comma- or space-separated) adds names to the self-signed one.
+tls=()
+[ -z "${ITER_TLS_CERT:-}" ] || tls+=(--tls-cert "$ITER_TLS_CERT")
+[ -z "${ITER_TLS_KEY:-}" ] || tls+=(--tls-key "$ITER_TLS_KEY")
+IFS=', ' read -r -a names <<< "${ITER_TLS_NAMES:-}"
+for n in "${names[@]}"; do [ -z "$n" ] || tls+=(--tls-name "$n"); done
+
 iter_data --backend arango \
   --listen "${ITER_LISTEN:-0.0.0.0:8400}" \
   --secret-file /var/lib/iter/iter_data.secret \
   --env-file /var/lib/iter/.env \
-  "$@" &
+  "${tls[@]}" "$@" &
 ITER_PID=$!
 
 trap 'kill "$ITER_PID" "$ARANGO_PID" 2>/dev/null; wait; exit 0' TERM INT

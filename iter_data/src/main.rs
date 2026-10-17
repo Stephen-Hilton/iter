@@ -26,6 +26,7 @@ mod settings;
 mod storage;
 mod switches;
 mod testlogs;
+mod tls;
 pub mod sync_hooks;
 #[cfg(test)]
 mod test_db;
@@ -59,9 +60,26 @@ struct Args {
     /// static webui directory ('' disables)
     #[arg(long, default_value = "")]
     webui_dir: String,
-    /// JWT secret sidecar file (ITER_JWT_SECRET env wins)
+    /// the user sign-in secret file (ITER_JWT_SECRET env wins); the engine
+    /// session secret (engine_session.secret) and the TLS certificate
+    /// (--tls auto) live beside it
     #[arg(long, default_value = "./iter_data.secret")]
     secret_file: String,
+    /// TLS: auto = a self-signed certificate made on first start, kept beside
+    /// the secret file, pinned by engines; off = plain HTTP (a loopback dev
+    /// loop, or behind a TLS proxy). ITER_TLS env wins over the default.
+    #[arg(long, default_value = "")]
+    tls: String,
+    /// serve this certificate (PEM; a real one for a domain) instead of the
+    /// self-signed one; needs --tls-key
+    #[arg(long, default_value = "")]
+    tls_cert: String,
+    /// the private key (PEM) for --tls-cert
+    #[arg(long, default_value = "")]
+    tls_key: String,
+    /// an extra name (DNS or IP) on the self-signed certificate; repeatable
+    #[arg(long)]
+    tls_name: Vec<String>,
     /// .env file to load (KEY=VALUE lines; malformed lines skipped)
     #[arg(long, default_value = "./.env")]
     env_file: String,
@@ -155,8 +173,18 @@ async fn main() {
     }
 
     rag::guide::ingest_at_startup(store.clone());
-    let secret = auth::load_secret(&args.secret_file);
-    let state = Arc::new(AppState { store, secret });
+    let secret = auth::load_secret("ITER_JWT_SECRET", &args.secret_file);
+    let dir = std::path::Path::new(&args.secret_file).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let engine_secret = auth::load_secret("ITER_ENGINE_SESSION_SECRET", &dir.join("engine_session.secret").to_string_lossy());
+    let tls_mode = if args.tls.trim().is_empty() { std::env::var("ITER_TLS").unwrap_or_else(|_| "auto".into()) } else { args.tls.clone() };
+    let tls = match tls::TlsState::setup(&tls_mode, &args.tls_cert, &args.tls_key, &dir, &args.tls_name) {
+        Ok(t) => Arc::new(t),
+        Err(e) => {
+            eprintln!("[iter_data] TLS: {e}");
+            std::process::exit(2);
+        }
+    };
+    let state = Arc::new(AppState { store, secret, engine_secret, tls: tls.clone(), state_dir: dir.clone() });
 
     rag::embed::set_model_dir(&args.embed_model);
     match rag::embed::find_model_dir() {
@@ -185,11 +213,35 @@ async fn main() {
         let port = std::env::var("ITER_PORT").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "8400".into());
         format!("127.0.0.1:{}", port.trim())
     };
-    let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
-    println!("[iter_data] listening on {listen} (backend: arango)");
+    let addr: std::net::SocketAddr = listen.parse().unwrap_or_else(|e| panic!("--listen {listen}: {e}"));
     // display names in paths resolve to ids before routing (names.rs)
     let app = tower::Layer::layer(&axum::middleware::from_fn_with_state(state, names::rewrite), app);
-    axum::serve(listener, axum::ServiceExt::<axum::extract::Request>::into_make_service(app)).await.expect("serve");
+    // the peer address reaches handlers (login rate limits per address)
+    let make = axum::ServiceExt::<axum::extract::Request>::into_make_service_with_connect_info::<std::net::SocketAddr>(app.clone());
+    match tls.rustls_config().await {
+        Err(e) => {
+            eprintln!("[iter_data] TLS: {e}");
+            std::process::exit(2);
+        }
+        Ok(None) => {
+            println!("[iter_data] listening on http://{listen} (backend: arango, TLS off)");
+            if !addr.ip().is_loopback() {
+                eprintln!("[iter_data] WARNING: plain HTTP on {listen}: passwords, session tokens and data cross the network unencrypted (--tls auto, or a TLS proxy in front)");
+            }
+            let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
+            axum::serve(listener, make).await.expect("serve");
+        }
+        Ok(Some(cfg)) => {
+            println!("[iter_data] listening on https://{listen} (backend: arango, TLS {})", tls.mode.as_str());
+            println!("[iter_data] TLS certificate fingerprint (engines pin it; also in the webui's Engine keys screen): sha256:{}", tls.fingerprint());
+            // axum_server hands hyper's body; the router takes axum's
+            let svc = tower::ServiceBuilder::new()
+                .map_request(|r: axum::http::Request<hyper::body::Incoming>| r.map(axum::body::Body::new))
+                .service(app);
+            let make = axum::ServiceExt::<axum::http::Request<hyper::body::Incoming>>::into_make_service_with_connect_info::<std::net::SocketAddr>(svc);
+            axum_server::bind_rustls(addr, cfg).serve(make).await.expect("serve");
+        }
+    }
 }
 
 async fn open_arango(args: &Args) -> arango::ArangoBackend {
@@ -237,9 +289,22 @@ async fn bootstrap_summary_agent(store: &dyn storage::Storage) {
     }
 }
 
-async fn bootstrap_admin(store: &dyn storage::Storage) {
+/// The first admin's id, made on an empty database.
+pub const BOOTSTRAP_ADMIN: &str = "admin";
+/// Written beside the secret file once that admin replaced the first-boot
+/// password; the installers then remove ITER_ADMIN_PASSWORD from the env
+/// file (and SSM on AWS).
+pub const ADMIN_PASSWORD_CHANGED: &str = "admin_password_changed";
+
+/// The first admin, on an empty database: ITER_ADMIN_PASSWORD (or a
+/// generated password printed once), which must be changed at the first
+/// sign-in.
+pub(crate) async fn bootstrap_admin(store: &dyn storage::Storage) {
     let users = store.scan("webui_user").await.unwrap_or_default();
     if !users.is_empty() {
+        if std::env::var("ITER_ADMIN_PASSWORD").is_ok_and(|p| !p.trim().is_empty()) {
+            println!("[iter_data] ITER_ADMIN_PASSWORD is set but only seeds an empty database; remove it from the env file once the admin has chosen their own");
+        }
         return;
     }
     let (password, generated) = match std::env::var("ITER_ADMIN_PASSWORD") {
@@ -256,15 +321,15 @@ async fn bootstrap_admin(store: &dyn storage::Storage) {
     };
     let pwhash = auth::hash_password(&password).expect("hash admin password");
     let row = json!({
-        "user": "admin", "email": "", "role": "admin", "pwhash": pwhash,
+        "user": BOOTSTRAP_ADMIN, "email": "", "role": "admin", "pwhash": pwhash, "must_change_password": true,
         "tokenver": 1, "css": "", "pubkey": "", "settings": {}, "authz": {}
     });
-    store.put("webui_user", "admin", "-", &row).await.expect("bootstrap admin");
+    store.put("webui_user", BOOTSTRAP_ADMIN, "-", &row).await.expect("bootstrap admin");
     let _ = store.bump_seq(GLOBAL, "webui_user").await;
     if generated {
         println!("[iter_data] bootstrapped user 'admin' with password: {password}");
-        println!("[iter_data] (set ITER_ADMIN_PASSWORD to control this; change via the users API)");
+        println!("[iter_data] (set ITER_ADMIN_PASSWORD to control this); it must be changed at the first sign-in");
     } else {
-        println!("[iter_data] bootstrapped user 'admin' (password from ITER_ADMIN_PASSWORD)");
+        println!("[iter_data] bootstrapped user 'admin' (password from ITER_ADMIN_PASSWORD; it must be changed at the first sign-in)");
     }
 }

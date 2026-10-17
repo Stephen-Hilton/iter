@@ -21,24 +21,34 @@ struct T {
 impl T {
     async fn new() -> T {
         let (a, db) = crate::test_db::store().await;
-        let st = Arc::new(AppState { store: Arc::new(a), secret: b"graph-test".to_vec() });
+        let st = Arc::new(AppState::for_tests(Arc::new(a), b"graph-test"));
         crate::settings::bootstrap(st.store.as_ref()).await.unwrap();
-        for (u, role) in [("adm", "admin"), ("eng1", "engine"), ("alice", "user")] {
+        for (u, role) in [("adm", "admin"), ("alice", "user")] {
             st.store.put("webui_user", u, NOSK, &json!({"user": u, "role": role, "tokenver": 1, "pwhash": ""})).await.unwrap();
         }
         let app = crate::api::router(st.clone()).merge(crate::mcp::routes(st.clone()));
         T { st, db, app }
     }
-    fn tok(&self, user: &str) -> String {
-        let role = match user {
+    /// A bearer for `who`: an engine session for "eng1" (engine e1), "eng2"
+    /// (e2) or "eng:<engine>"; else a person's token.
+    async fn tok(&self, who: &str) -> String {
+        let engine = match who {
+            "eng1" => Some("e1"),
+            "eng2" => Some("e2"),
+            w => w.strip_prefix("eng:"),
+        };
+        if let Some(e) = engine {
+            return crate::keys::test_session(&self.st, e).await;
+        }
+        let role = match who {
             "adm" => "admin",
-            "eng1" => "engine",
+            "vic" => "viewer",
             _ => "user",
         };
-        crate::auth::mint_token(&self.st.secret, user, role, 1, 3600).unwrap()
+        crate::auth::mint_token(&self.st.secret, who, role, 1, 3600).unwrap()
     }
     async fn call(&self, who: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-        let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", self.tok(who)));
+        let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", self.tok(who).await));
         let req = match body {
             Some(v) => {
                 b = b.header("content-type", "application/json");

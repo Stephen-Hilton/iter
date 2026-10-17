@@ -33,9 +33,19 @@
 //! most every USED_EVERY_SECS per key, so a request never rewrites the key's
 //! own row (it would race a revoke).
 //!
-//! The older engine logins — a user with role `engine` signing in with a
-//! signed (JWT) token from `POST /api/users/{user}/token` — still work until
-//! each engine has its own key; the screen lists those users for removal.
+//! Engine-initiated rotation (`POST /auth/engine/rotate`, 2026-10-17): an
+//! engine replaces its own key with no admin step by signing
+//! `enginekey::rotate_message` (its current key id and the new public key)
+//! with the current key. Only a key that is still fully active may rotate
+//! itself: a revoked key, or one already on its way out, is refused, so a
+//! compromised (revoked) engine can never mint itself a fresh key; it has
+//! to be set up again by hand. The old key keeps working for
+//! ROTATE_GRACE_SECS, for agents still holding its sessions.
+//!
+//! Sessions are signed with the engine session secret, never the one that
+//! signs people's tokens (AppState::engine_secret), and the sign-in answer
+//! carries the TLS certificate fingerprints iter_data serves (tls.rs), so
+//! engines learn a coming certificate over the channel they already trust.
 
 use crate::api::{ApiError, AppState, AuthUser, NOSK, bad, notfound};
 use crate::auth::Claims;
@@ -57,12 +67,18 @@ const USED_EVERY_SECS: u64 = 600;
 /// with it (the engine renews well before), and revocation does not wait
 /// for it: every request re-checks the key.
 pub const SESSION_SECS: u64 = 24 * 3600;
+/// How long a key an engine rotated away from keeps working.
+pub const ROTATE_GRACE_SECS: i64 = 3600;
 
 type Ctx = State<Arc<AppState>>;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/auth/engine", post(engine_login))
+        .route("/auth/engine/rotate", post(engine_rotate))
+        .route("/api/server/tls", get(tls_get))
+        .route("/api/server/tls/next", post(tls_next))
+        .route("/api/server/tls/promote", post(tls_promote))
         .route("/api/keys", get(keys_list).post(key_add))
         .route("/api/keys/{id}/revoke", post(key_revoke))
         .route("/api/keys/{id}/rotate", post(key_rotate))
@@ -93,6 +109,9 @@ struct LoginReq {
     key_id: String,
     ts: i64,
     nonce: String,
+    /// the fingerprint of the TLS certificate the engine sees ("" over http)
+    #[serde(default)]
+    tls_fp: String,
     /// hex of the 64-byte Ed25519 signature over enginekey::login_message
     signature: String,
 }
@@ -109,35 +128,117 @@ fn nonce_reused(nonce: &str) -> bool {
     m.insert(nonce.to_string(), Instant::now()).is_some()
 }
 
-async fn engine_login(State(st): Ctx, Json(req): Json<LoginReq>) -> Result<Json<Value>, ApiError> {
+/// Check one signed engine message against key row `row`: the clock skew,
+/// the nonce's shape, the Ed25519 signature over `message`, then the nonce's
+/// freshness (remembered only once the signature holds).
+fn verify_signed(row: &Value, ts: i64, nonce: &str, signature: &str, message: &str) -> Result<(), ApiError> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    let row = live_key(&st, &req.key_id).await?;
     let now = chrono::Utc::now().timestamp();
-    if (now - req.ts).abs() > enginekey::LOGIN_SKEW_SECS {
+    if (now - ts).abs() > enginekey::LOGIN_SKEW_SECS {
         return Err(unauthorized("the engine's clock is more than 5 minutes off the server's"));
     }
-    if req.nonce.len() < 16 || req.nonce.len() > 64 {
+    if nonce.len() < 16 || nonce.len() > 64 {
         return Err(unauthorized("bad nonce"));
     }
-    let key = enginekey::parse_public(&body_str(&row, "public_key")).ok_or_else(|| unauthorized("unknown engine key"))?;
+    let key = enginekey::parse_public(&body_str(row, "public_key")).ok_or_else(|| unauthorized("unknown engine key"))?;
     let vk = VerifyingKey::from_bytes(&key).map_err(|_| unauthorized("unknown engine key"))?;
-    let sig: [u8; 64] = enginekey::unhex(&req.signature).and_then(|b| b.try_into().ok()).ok_or_else(|| unauthorized("bad signature"))?;
-    vk.verify(enginekey::login_message(&req.key_id, req.ts, &req.nonce).as_bytes(), &Signature::from_bytes(&sig))
-        .map_err(|_| unauthorized("bad signature"))?;
-    if nonce_reused(&req.nonce) {
-        return Err(unauthorized("this login was already used"));
+    let sig: [u8; 64] = enginekey::unhex(signature).and_then(|b| b.try_into().ok()).ok_or_else(|| unauthorized("bad signature"))?;
+    vk.verify(message.as_bytes(), &Signature::from_bytes(&sig)).map_err(|_| unauthorized("bad signature"))?;
+    if nonce_reused(nonce) {
+        return Err(unauthorized("this signed message was already used"));
     }
-    let engine = body_str(&row, "engine");
+    Ok(())
+}
+
+/// A session for key `kid` of `engine`, signed with the engine session
+/// secret, plus the TLS fingerprints the engine should trust.
+fn session(st: &AppState, engine: &str, kid: &str) -> Result<Value, ApiError> {
     let claims = Claims {
         sub: format!("iter_engine:{engine}"),
         role: "engine".into(),
         tokenver: 0,
-        exp: now as u64 + SESSION_SECS,
-        kid: req.key_id.clone(),
+        exp: chrono::Utc::now().timestamp() as u64 + SESSION_SECS,
+        kid: kid.to_string(),
     };
-    let jwt = crate::auth::mint_claims(&st.secret, &claims).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    touch(st.store.clone(), &req.key_id);
-    Ok(Json(json!({"token": format!("{}{jwt}", enginekey::SESSION_PREFIX), "engine": engine, "expires_at": claims.exp})))
+    let jwt = crate::auth::mint_claims(&st.engine_secret, &claims).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    touch(st.store.clone(), kid);
+    Ok(json!({
+        "token": format!("{}{jwt}", enginekey::SESSION_PREFIX), "engine": engine, "expires_at": claims.exp,
+        "tls": {"mode": st.tls.mode.as_str(), "fingerprints": st.tls.announced()},
+    }))
+}
+
+async fn engine_login(State(st): Ctx, Json(req): Json<LoginReq>) -> Result<Json<Value>, ApiError> {
+    let row = live_key(&st, &req.key_id).await?;
+    verify_signed(&row, req.ts, &req.nonce, &req.signature, &enginekey::login_message(&req.key_id, req.ts, &req.nonce, &req.tls_fp))?;
+    // when iter_data terminates TLS itself, the engine must have seen one of
+    // its certificates: a sign-in relayed through anything else is refused
+    let announced = st.tls.announced();
+    if !announced.is_empty() && !announced.contains(&req.tls_fp) {
+        return Err(unauthorized("the engine saw a TLS certificate that is not iter_data's: something between them presents its own"));
+    }
+    Ok(Json(session(&st, &body_str(&row, "engine"), &req.key_id)?))
+}
+
+#[derive(serde::Deserialize)]
+struct RotateSelfReq {
+    key_id: String,
+    new_public_key: String,
+    ts: i64,
+    nonce: String,
+    /// hex Ed25519 signature, by the CURRENT key, over enginekey::rotate_message
+    signature: String,
+}
+
+/// An engine replaces its own key: signed by the current key, which must be
+/// fully active (not revoked, not already rotating out). Answers with a
+/// session of the new key.
+async fn engine_rotate(State(st): Ctx, Json(req): Json<RotateSelfReq>) -> Result<Json<Value>, ApiError> {
+    let mut old = live_key(&st, &req.key_id).await?;
+    if !body_str(&old, "revoked").is_empty() {
+        return Err(unauthorized("this key is already being replaced or revoked: it cannot rotate itself (an admin sets the engine up again)"));
+    }
+    let new_public = req.new_public_key.trim().to_string();
+    verify_signed(&old, req.ts, &req.nonce, &req.signature, &enginekey::rotate_message(&req.key_id, &new_public, req.ts, &req.nonce))?;
+    let engine = body_str(&old, "engine");
+    let by = format!("iter_engine:{engine}");
+    let new = insert(&st, &by, &new_public, &engine, &body_str(&old, "label"), &req.key_id).await?;
+    let at = chrono::Utc::now() + chrono::Duration::seconds(ROTATE_GRACE_SECS);
+    old["revoked"] = json!(at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    old["revoked_by"] = json!(by);
+    old["replaced_by"] = new["id"].clone();
+    st.store.put(TABLE, &req.key_id, NOSK, &old).await?;
+    let mut out = session(&st, &engine, &body_str(&new, "id"))?;
+    out["key_id"] = new["id"].clone();
+    out["old_key_stops"] = old["revoked"].clone();
+    Ok(Json(out))
+}
+
+/// The certificate iter_data serves (admins: the Engine keys screen; an
+/// engine session: the fingerprints only).
+async fn tls_get(user: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiError> {
+    if user.role == "engine" {
+        return Ok(Json(json!({"mode": st.tls.mode.as_str(), "fingerprints": st.tls.announced()})));
+    }
+    user.require_admin()?;
+    Ok(Json(st.tls.describe()))
+}
+
+/// Make the next self-signed certificate; engines pick its fingerprint up at
+/// their next sign-in (within 12 hours, or at once on a restart).
+async fn tls_next(user: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiError> {
+    user.require_admin()?;
+    st.tls.make_next().map_err(bad)?;
+    Ok(Json(st.tls.describe()))
+}
+
+/// Serve the next certificate from now on. An engine that never signed in
+/// while it was announced no longer trusts the server and needs
+/// `iter_engine key trust` again.
+async fn tls_promote(user: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiError> {
+    user.require_admin()?;
+    st.tls.promote().await.map_err(bad)?;
+    Ok(Json(st.tls.describe()))
 }
 
 /// A verified session's claims to the engine it acts for; 401 once its key
@@ -198,16 +299,7 @@ async fn keys_list(user: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiErr
         .map(|r| public(r, used.get(&body_str(r, "id")).copied(), &now))
         .collect();
     keys.sort_by(|a, b| (body_str(a, "engine"), body_str(b, "created")).cmp(&(body_str(b, "engine"), body_str(a, "created"))));
-    // the older engine logins: users with role engine, listed for removal
-    let older: Vec<Value> = st
-        .store
-        .scan("webui_user")
-        .await?
-        .iter()
-        .filter(|u| body_str(u, "role") == "engine")
-        .map(|u| json!({"user": body_str(u, "user"), "name": body_str(u, "name")}))
-        .collect();
-    Ok(Json(json!({"keys": keys, "older": older})))
+    Ok(Json(json!({"keys": keys, "tls": st.tls.describe()})))
 }
 
 #[derive(serde::Deserialize)]
@@ -305,6 +397,18 @@ async fn key_delete(user: AuthUser, State(st): Ctx, Path(id): Path<String>) -> R
     Ok(Json(json!({"deleted": id})))
 }
 
+/// Tests: a live key row for `engine` and a session of it, the way an
+/// engine that signed in holds one.
+#[cfg(test)]
+pub(crate) async fn test_session(st: &AppState, engine: &str) -> String {
+    let id = format!("test-{engine}");
+    if st.store.get(TABLE, &id, NOSK).await.unwrap().is_none() {
+        let row = json!({"id": id, "engine": engine, "public_key": enginekey::format_public(&[7u8; 32]), "revoked": "", "created": now_utc()});
+        st.store.put(TABLE, &id, NOSK, &row).await.unwrap();
+    }
+    session(st, engine, &id).unwrap()["token"].as_str().unwrap().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +458,7 @@ mod api_tests {
         enginekey::key_id(&k.verifying_key().to_bytes())
     }
     fn login_body(k: &SigningKey, ts: i64, nonce: &str) -> Value {
-        let msg = enginekey::login_message(&kid(k), ts, nonce);
+        let msg = enginekey::login_message(&kid(k), ts, nonce, "");
         let sig: String = k.sign(msg.as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         json!({"key_id": kid(k), "ts": ts, "nonce": nonce, "signature": sig})
     }
@@ -365,7 +469,7 @@ mod api_tests {
     impl T {
         async fn new() -> T {
             let (a, db) = crate::test_db::store().await;
-            let st = Arc::new(AppState { store: Arc::new(a), secret: b"keys-test".to_vec() });
+            let st = Arc::new(AppState::for_tests(Arc::new(a), b"keys-test"));
             for (u, role) in [("adm", "admin"), ("alice", "user")] {
                 st.store.put("webui_user", u, NOSK, &json!({"user": u, "role": role, "tokenver": 1, "pwhash": ""})).await.unwrap();
             }
@@ -397,6 +501,68 @@ mod api_tests {
             let (c, v) = self.call("", "POST", "/auth/engine", Some(login_body(k, chrono::Utc::now().timestamp(), &nonce()))).await;
             if c == 200 { Ok(v["token"].as_str().unwrap().to_string()) } else { Err(c) }
         }
+    }
+
+    fn rotate_body(old: &SigningKey, new_pub: &str, ts: i64) -> Value {
+        let n = nonce();
+        let msg = enginekey::rotate_message(&kid(old), new_pub, ts, &n);
+        let sig: String = old.sign(msg.as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        json!({"key_id": kid(old), "new_public_key": new_pub, "ts": ts, "nonce": n, "signature": sig})
+    }
+
+    #[tokio::test]
+    async fn an_engine_rotates_its_own_key_but_never_a_revoked_one_and_secrets_stay_apart() {
+        let t = T::new().await;
+        let k1 = new_key();
+        t.admin("POST", "/api/keys", Some(json!({"public_key": pubkey(&k1), "engine": "lap1"}))).await;
+        let s1 = t.login(&k1).await.unwrap();
+        let (_, v) = t.call("", "POST", "/auth/engine", Some(login_body(&k1, chrono::Utc::now().timestamp(), &nonce()))).await;
+        assert_eq!(v["tls"]["mode"], "off", "the sign-in answer says what TLS the server serves: {v}");
+
+        // signed by the current key: accepted with no admin step; the new key signs in at once
+        let now = chrono::Utc::now().timestamp();
+        let k2 = new_key();
+        // a rotation signed by some other key, or naming a different new key than it signed, is refused
+        let mut forged = rotate_body(&new_key(), &pubkey(&k2), now);
+        forged["key_id"] = json!(kid(&k1));
+        assert_eq!(t.call("", "POST", "/auth/engine/rotate", Some(forged)).await.0, 401);
+        let mut swapped = rotate_body(&k1, &pubkey(&k2), now);
+        swapped["new_public_key"] = json!(pubkey(&new_key()));
+        assert_eq!(t.call("", "POST", "/auth/engine/rotate", Some(swapped)).await.0, 401);
+        let (c, r) = t.call("", "POST", "/auth/engine/rotate", Some(rotate_body(&k1, &pubkey(&k2), now))).await;
+        assert_eq!((c, r["key_id"].as_str()), (200, Some(kid(&k2).as_str())), "{r}");
+        let s_new = r["token"].as_str().unwrap().to_string();
+        assert_eq!(t.call(&s_new, "GET", "/api/engines", None).await.0, 200);
+        // the old key keeps working for its grace (agents still hold its sessions) …
+        assert_eq!(t.call(&s1, "GET", "/api/engines", None).await.0, 200);
+        let (_, list) = t.admin("GET", "/api/keys", None).await;
+        let old = list["keys"].as_array().unwrap().iter().find(|k| k["id"] == kid(&k1)).unwrap().clone();
+        assert_eq!((old["status"].as_str(), old["replaced_by"].as_str()), (Some("expiring"), Some(kid(&k2).as_str())), "{old}");
+        // … but a key on its way out cannot rotate again
+        assert_eq!(t.call("", "POST", "/auth/engine/rotate", Some(rotate_body(&k1, &pubkey(&new_key()), now))).await.0, 401);
+        // a revoked key never rotates itself: it is assumed compromised
+        assert_eq!(t.admin("POST", &format!("/api/keys/{}/revoke", kid(&k2)), None).await.0, 200);
+        assert_eq!(t.call("", "POST", "/auth/engine/rotate", Some(rotate_body(&k2, &pubkey(&new_key()), now))).await.0, 401);
+        assert_eq!(t.call(&s_new, "GET", "/api/engines", None).await.0, 401);
+
+        // engines and people never share a signing secret: an engine-shaped
+        // session signed with the user secret, and a user token with role engine,
+        // are both refused
+        let k3 = new_key();
+        t.admin("POST", "/api/keys", Some(json!({"public_key": pubkey(&k3), "engine": "lap2"}))).await;
+        let claims = crate::auth::Claims { sub: "iter_engine:lap2".into(), role: "engine".into(), tokenver: 0, exp: now as u64 + 600, kid: kid(&k3) };
+        let wrong = format!("{}{}", enginekey::SESSION_PREFIX, crate::auth::mint_claims(&t.st.secret, &claims).unwrap());
+        assert_eq!(t.call(&wrong, "GET", "/api/engines", None).await.0, 401);
+        let right = format!("{}{}", enginekey::SESSION_PREFIX, crate::auth::mint_claims(&t.st.engine_secret, &claims).unwrap());
+        assert_eq!(t.call(&right, "GET", "/api/engines", None).await.0, 200);
+        assert_eq!(t.call(&t.signed("alice", "engine"), "GET", "/api/engines", None).await.0, 401, "a user token claiming role engine");
+        assert_eq!(t.admin("PUT", "/api/users/bot", Some(json!({"role": "engine", "password": "x"}))).await.0, 400, "no engine users");
+        // the certificate endpoints: admins see the details, engines the fingerprints, others nothing
+        assert_eq!(t.admin("GET", "/api/server/tls", None).await.1["mode"], "off");
+        assert!(t.call(&right, "GET", "/api/server/tls", None).await.1["fingerprints"].is_array());
+        assert_eq!(t.call(&t.signed("alice", "user"), "GET", "/api/server/tls", None).await.0, 403);
+        assert_eq!(t.admin("POST", "/api/server/tls/next", None).await.0, 400, "nothing to rotate without --tls auto");
+        crate::test_db::drop(&t.db).await;
     }
 
     #[tokio::test]
@@ -457,7 +623,7 @@ mod api_tests {
         assert_eq!(t.call(&s1, "GET", "/api/keys", None).await.0, 403);
         let (_, list) = t.admin("GET", "/api/keys", None).await;
         assert_eq!(list["keys"].as_array().unwrap().len(), 1);
-        assert!(list["older"].as_array().unwrap().is_empty());
+        assert_eq!(list["tls"]["mode"], "off");
 
         // rotate with a grace period: sessions of both keys work until the old one's time comes
         let k2 = new_key();
