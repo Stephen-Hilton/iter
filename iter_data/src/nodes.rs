@@ -310,6 +310,16 @@ impl Graph {
         ps.into_iter().next()
     }
 
+    /// The folder holding the project's head file, where new usecases,
+    /// actors, connections and project-level requirements go
+    /// (`nf::DEFAULT_PROJECT_DIR` until the project node exists).
+    pub fn project_dir(&self) -> String {
+        self.project_node()
+            .map(|p| nf::dir_of(&p.doc.path))
+            .filter(|d| d.starts_with("{topdir}"))
+            .unwrap_or_else(|| nf::DEFAULT_PROJECT_DIR.to_string())
+    }
+
     pub fn naming(&self) -> nf::Naming {
         let s = self.project_node().and_then(|p| p.doc.front.get("file_naming")).and_then(|v| v.as_str()).unwrap_or("");
         nf::Naming::from_setting(s)
@@ -871,7 +881,7 @@ pub async fn ensure_project_node(store: &dyn Storage, project: &str) -> Result<b
     for (t, name) in [(NodeType::Philosophy, "Philosophy"), (NodeType::Bizreq, "Business requirements"), (NodeType::Techreq, "Technical requirements")] {
         let parent = g.get(&pid).unwrap().doc.clone();
         let mut d = NodeDoc::new(t, name, by, &now);
-        d.path = nf::plan_path(&d, Some(&parent), nf::Attach::Under(EdgeKind::Reqs), &g.taken_paths(), g.naming());
+        d.path = nf::plan_path_in(&d, Some(&parent), nf::Attach::Under(EdgeKind::Reqs), &g.taken_paths(), g.naming(), &g.project_dir());
         let d = canonical(&d, &now, by);
         let id = d.id.clone();
         g.insert_new(d, by, "default global requirement");

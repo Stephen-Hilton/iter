@@ -212,10 +212,17 @@ fn attached_of_type(parent: &NodeDoc, t: NodeType, existing_paths: &HashSet<Stri
         .min()
 }
 
+/// The project-level folder a new project's head file goes in, and so the
+/// default for [`plan_path`]'s usecases, actors, connections and
+/// project-level requirements.
+pub const DEFAULT_PROJECT_DIR: &str = "{topdir}/global";
+
 /// Where a new node's file goes (§2.5), unique against `existing_paths` —
 /// except a bizreq / techreq attached to a code node or the project, which
 /// has exactly one file per attachment point (§2.8): that path is returned
 /// even when it exists (the requirement goes into the existing file).
+/// Project-level files go under [`DEFAULT_PROJECT_DIR`]; [`plan_path_in`]
+/// takes the folder of a project whose head file lives elsewhere.
 pub fn plan_path(
     doc: &NodeDoc,
     parent: Option<&NodeDoc>,
@@ -223,6 +230,23 @@ pub fn plan_path(
     existing_paths: &HashSet<String>,
     naming: Naming,
 ) -> String {
+    plan_path_in(doc, parent, attach, existing_paths, naming, DEFAULT_PROJECT_DIR)
+}
+
+/// [`plan_path`] with the project-level folder given: `project_dir` is the
+/// folder holding the project's head file (`{topdir}/global` for a project
+/// made by `iter init` or the designer, e.g. `{topdir}/docs/iter_project_docs`
+/// for iter's own repo). Usecases, actors, connections, project-level
+/// requirements and parentless tests are planned under it.
+pub fn plan_path_in(
+    doc: &NodeDoc,
+    parent: Option<&NodeDoc>,
+    attach: Attach,
+    existing_paths: &HashSet<String>,
+    naming: Naming,
+    project_dir: &str,
+) -> String {
+    let pd = project_dir.trim_end_matches('/');
     let t = doc.nodetype;
     let base = {
         let s = slug(&doc.name);
@@ -238,7 +262,7 @@ pub fn plan_path(
     // bizreq / techreq (§2.8): ONE file of each type per attachment point,
     // named after it — the parent's already-attached file of this type when it
     // has one, else `<nodedir>/reqs/<nodeslug>.<type>.iter.md` (code node) or
-    // `{topdir}/global/requirements/<projectslug>.<type>.iter.md` (project).
+    // `<project dir>/requirements/<projectslug>.<type>.iter.md` (project).
     if matches!(t, NodeType::Bizreq | NodeType::Techreq) {
         if let Some(p) = parent.filter(|p| matches!(p.nodetype, NodeType::Code | NodeType::Project)) {
             if let Some(found) = attached_of_type(p, t, existing_paths) {
@@ -251,7 +275,7 @@ pub fn plan_path(
             };
             return match (p.nodetype, &parent_dir) {
                 (NodeType::Code, Some(d)) => format!("{}/reqs/{}.{}", d, owner, ext),
-                _ => format!("{{topdir}}/global/requirements/{}.{}", owner, ext),
+                _ => format!("{}/requirements/{}.{}", pd, owner, ext),
             };
         }
     }
@@ -263,13 +287,13 @@ pub fn plan_path(
         Nested(String),
     }
     let layout = match t {
-        NodeType::Project => Layout::Flat("{topdir}/global".into()),
-        NodeType::Usecase | NodeType::Actor => Layout::Flat("{topdir}/global/usecases".into()),
+        NodeType::Project => Layout::Flat(pd.to_string()),
+        NodeType::Usecase | NodeType::Actor => Layout::Flat(format!("{}/usecases", pd)),
         NodeType::Bizreq | NodeType::Techreq | NodeType::Philosophy => match (parent, &parent_dir) {
             (Some(p), Some(d)) if p.nodetype != NodeType::Project => Layout::Flat(format!("{}/reqs", d)),
-            _ => Layout::Flat("{topdir}/global/requirements".into()),
+            _ => Layout::Flat(format!("{}/requirements", pd)),
         },
-        NodeType::Code if doc.is_connection() => Layout::Flat("{topdir}/global/connections".into()),
+        NodeType::Code if doc.is_connection() => Layout::Flat(format!("{}/connections", pd)),
         NodeType::Code => match (parent, &parent_dir, attach) {
             (Some(p), Some(d), Attach::Under(k))
                 if p.nodetype == NodeType::Code
@@ -282,7 +306,7 @@ pub fn plan_path(
         },
         NodeType::Test | NodeType::Agentmem => match &parent_dir {
             Some(d) => Layout::Flat(d.clone()),
-            None if t == NodeType::Test => Layout::Flat("{topdir}/global/tests".into()),
+            None if t == NodeType::Test => Layout::Flat(format!("{}/tests", pd)),
             None => Layout::Flat("{topdir}".into()),
         },
     };

@@ -738,6 +738,30 @@ fn set(paths: &[&str]) -> HashSet<String> {
 }
 
 #[test]
+fn plan_path_in_follows_the_project_head_files_folder() {
+    let none = HashSet::new();
+    let n = Naming::Sequence;
+    let pd = "{topdir}/docs/iter_project_docs";
+    let project = doc(NodeType::Project, "{topdir}/docs/iter_project_docs/iter5.project.iter.md", "iter5");
+    let uc = doc(NodeType::Usecase, "", "Environ");
+    assert_eq!(plan_path_in(&uc, None, Attach::Root, &none, n, pd), "{topdir}/docs/iter_project_docs/usecases/environ.usecase.iter.md");
+    let actor = doc(NodeType::Actor, "", "Employer");
+    assert_eq!(plan_path_in(&actor, None, Attach::Root, &none, n, &format!("{pd}/")), "{topdir}/docs/iter_project_docs/usecases/employer.actor.iter.md");
+    let req = doc(NodeType::Techreq, "", "Global");
+    assert_eq!(
+        plan_path_in(&req, Some(&project), Attach::Under(EdgeKind::Reqs), &none, n, pd),
+        "{topdir}/docs/iter_project_docs/requirements/iter5.techreq.iter.md"
+    );
+    let mut conn = doc(NodeType::Code, "", "API call");
+    conn.level = Some("connection".into());
+    assert_eq!(plan_path_in(&conn, None, Attach::Root, &none, n, pd), "{topdir}/docs/iter_project_docs/connections/api_call.code.iter.md");
+    // code nodes keep their own layout; plan_path is plan_path_in at {topdir}/global
+    let code = doc(NodeType::Code, "", "Data");
+    assert_eq!(plan_path_in(&code, None, Attach::Root, &none, n, pd), "{topdir}/src/data/data.code.iter.md");
+    assert_eq!(plan_path(&uc, None, Attach::Root, &none, n), plan_path_in(&uc, None, Attach::Root, &none, n, DEFAULT_PROJECT_DIR));
+}
+
+#[test]
 fn plan_path_folder_rules() {
     let none = HashSet::new();
     let n = Naming::Sequence;

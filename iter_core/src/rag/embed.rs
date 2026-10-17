@@ -30,7 +30,7 @@ use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 pub const MODEL_REPO: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
-/// the weights this build was verified with (tools/fetch_model.sh checks the same)
+/// the weights this build was verified with (installers/fetch_model.sh checks the same)
 pub const MODEL_SHA256: &str = "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db";
 pub const MODEL_FILES: &[&str] = &["config.json", "tokenizer.json", "model.safetensors", "special_tokens_map.json", "tokenizer_config.json"];
 pub const DIM: usize = 384;
@@ -141,7 +141,7 @@ fn load_global(download: bool) -> Result<&'static Embedder, String> {
         .get_or_init(|| {
             let dir = if download { ensure_model()? } else {
                 find_model_dir().ok_or_else(|| {
-                    format!("embedding model {MODEL_NAME} not found (looked in {:?}); run iter4/tools/fetch_model.sh or pass --embed-model", candidates())
+                    format!("embedding model {MODEL_NAME} not found (looked in {:?}); run installers/fetch_model.sh or pass --embed-model", candidates())
                 })?
             };
             Embedder::load(&dir)
@@ -247,7 +247,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    /// Needs the downloaded model (tools/fetch_model.sh); skipped without it.
+    /// Needs the downloaded model (installers/fetch_model.sh); skipped without it.
     #[test]
     fn similar_sentences_are_closer_than_unrelated_ones() {
         let Some(dir) = find_model_dir() else {

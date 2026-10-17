@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  iter_data server on one EC2 instance (Amazon Linux 2023, Graviton or x86_64): ArangoDB + iter_data
+  as systemd services, installed at first boot by installers/iter_data/linux_aws/install.sh from a
+  GitHub Release of Stephen-Hilton/iter (the latest unless IterVersion names one). The database lives
+  on its own encrypted EBS volume, the admin password is stored in SSM Parameter Store, and only the
+  iter_data port is reachable from AllowedCidr.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Release}
+        Parameters: [IterVersion]
+      - Label: {default: Machine}
+        Parameters: [Architecture, InstanceType, DataVolumeSize]
+      - Label: {default: Network}
+        Parameters: [VpcId, SubnetId, AllowedCidr, IterPort, SshCidr, KeyName]
+    ParameterLabels:
+      IterVersion: {default: iter release tag (or latest)}
+      AllowedCidr: {default: Who may reach the web page and API}
+
+Parameters:
+  IterVersion:
+    Type: String
+    Default: latest
+    AllowedPattern: '^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?)$'
+    Description: >-
+      A release tag such as v2026.10.17, or "latest" to resolve the newest release at first boot.
+      The install script and the iter_data binary both come from that release.
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+    Description: arm64 = Graviton (t4g, m7g, ...); x86_64 = Intel/AMD (t3, m7i, ...). Must match InstanceType.
+  InstanceType:
+    Type: String
+    Default: t4g.large
+    Description: >-
+      An instance type of the chosen Architecture. t4g.medium (4 GiB) runs a small team;
+      t4g.large (8 GiB) is the comfortable default; ArangoDB and iter_data share the memory.
+  DataVolumeSize:
+    Type: Number
+    Default: 50
+    MinValue: 10
+    MaxValue: 16384
+    Description: GiB of encrypted gp3 storage for the database and its backups (mounted at /data).
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC to run in.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A subnet of that VPC with a route to the internet (a public subnet, since the instance gets an
+      Elastic IP): first boot downloads from GitHub, Docker Hub and Hugging Face.
+  AllowedCidr:
+    Type: String
+    AllowedPattern: '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
+    Description: >-
+      The address range allowed to reach iter_data on IterPort, e.g. your office or VPN range
+      (203.0.113.0/24) or 0.0.0.0/0 for anywhere. Engines connect here too.
+  IterPort:
+    Type: Number
+    Default: 8400
+    MinValue: 1024
+    MaxValue: 65535
+    Description: The port iter_data serves the API and web page on.
+  SshCidr:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
+    Description: >-
+      Optional address range allowed to SSH (port 22). Leave empty and use SSM Session Manager
+      instead (no open port needed).
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair name for SSH. Leave empty when you use Session Manager.
+  LatestAmiArm64:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: The newest Amazon Linux 2023 AMI for arm64 (resolved by AWS; leave as is).
+  LatestAmiX8664:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: The newest Amazon Linux 2023 AMI for x86_64 (resolved by AWS; leave as is).
+
+Conditions:
+  IsArm64: !Equals [!Ref Architecture, arm64]
+  HasSsh: !Not [!Equals [!Ref SshCidr, ""]]
+  HasKey: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "iter_data ${AWS::StackName}: the iter_data port only (ArangoDB is never exposed)"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref IterPort
+          ToPort: !Ref IterPort
+          CidrIp: !Ref AllowedCidr
+          Description: iter_data API and web page
+        - !If
+          - HasSsh
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref SshCidr
+            Description: SSH
+          - !Ref AWS::NoValue
+      Tags:
+        - {Key: Name, Value: !Sub "iter-data-${AWS::StackName}"}
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: iter-admin-password
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ssm:PutParameter, ssm:GetParameter]
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iter/${AWS::StackName}/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If [IsArm64, !Ref LatestAmiArm64, !Ref LatestAmiX8664]
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !If [HasKey, !Ref KeyName, !Ref AWS::NoValue]
+      MetadataOptions:
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags:
+        - {Key: Name, Value: !Sub "iter-data-${AWS::StackName}"}
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            # First boot: mount the data volume, install iter_data from the release, store the
+            # admin password in SSM, report to CloudFormation. Log: /var/log/iter-bootstrap.log
+            set -euo pipefail
+            exec > >(tee -a /var/log/iter-bootstrap.log) 2>&1
+            SIGNAL_URL='${WaitHandle}'
+            signal() {  # STATUS REASON
+              local body
+              body=$(printf '{"Status":"%s","Reason":"%s","UniqueId":"iter-data","Data":"%s"}' "$1" "$2" "$2")
+              curl -fsS -X PUT -H 'Content-Type:' --data-binary "$body" "$SIGNAL_URL" || true
+            }
+            trap 'signal FAILURE "first boot failed at line $LINENO: see /var/log/iter-bootstrap.log"' ERR
+
+            dnf install -y -q jq xfsprogs
+
+            # the data volume: the one disk with no partitions that is not the root disk
+            root_disk="/dev/$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")"
+            dev=""
+            for _ in $(seq 1 120); do
+              for d in $(lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}'); do
+                [ "$d" = "$root_disk" ] && continue
+                [ "$(lsblk -no NAME "$d" | wc -l)" = 1 ] && { dev="$d"; break; }
+              done
+              [ -n "$dev" ] && break
+              sleep 5
+            done
+            [ -n "$dev" ] || { echo "data volume never appeared"; false; }
+            blkid "$dev" >/dev/null 2>&1 || mkfs.xfs -q -L iterdata "$dev"
+            mkdir -p /data
+            uuid=$(blkid -s UUID -o value "$dev")
+            grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /data xfs defaults,nofail 0 2" >> /etc/fstab
+            mountpoint -q /data || mount /data
+
+            version='${IterVersion}'
+            if [ "$version" = latest ]; then
+              version=$(curl -fsSL --retry 5 https://api.github.com/repos/Stephen-Hilton/iter/releases/latest | jq -r .tag_name)
+            fi
+            [ -n "$version" ] && [ "$version" != null ] || { echo "no iter release found"; false; }
+            echo "installing iter_data $version"
+            curl -fsSL --retry 5 "https://raw.githubusercontent.com/Stephen-Hilton/iter/$version/installers/iter_data/linux_aws/install.sh" \
+              | bash -s -- install --version "$version" --port ${IterPort} \
+                  --db-dir /data/arangodb3 --backup-dir /data/backups
+
+            pw=$(sed -n 's/^ITER_ADMIN_PASSWORD=//p' /etc/iter/data.env | head -1)
+            [ -n "$pw" ] || { echo "no ITER_ADMIN_PASSWORD in /etc/iter/data.env"; false; }
+            aws ssm put-parameter --region '${AWS::Region}' --name '/iter/${AWS::StackName}/admin-password' \
+              --type SecureString --overwrite --value "$pw" >/dev/null
+            unset pw
+
+            curl -fsS "http://127.0.0.1:${IterPort}/health" | grep -q '"ok":true'
+            signal SUCCESS "iter_data $version is up"
+          - {}
+
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt Instance.AvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: !Sub "iter-data-${AWS::StackName}-db"}
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+      Tags:
+        - {Key: Name, Value: !Sub "iter-data-${AWS::StackName}"}
+
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  # the stack finishes only when first boot has installed iter_data and /health answers
+  InstallFinished:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: [DataVolumeAttachment, ElasticIp]
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: "2700"
+      Count: 1
+
+Outputs:
+  Url:
+    Description: The iter web page and API (sign in as admin). Engines use this as their iter_data URL.
+    Value: !Sub "http://${ElasticIp}:${IterPort}"
+  AdminPasswordParameter:
+    Description: >-
+      SSM Parameter Store name holding the admin password. Read it with:
+      aws ssm get-parameter --with-decryption --name <this> --query Parameter.Value --output text
+    Value: !Sub "/iter/${AWS::StackName}/admin-password"
+  InstanceId:
+    Description: Connect with Session Manager (aws ssm start-session --target <this>).
+    Value: !Ref Instance
+  DataVolumeId:
+    Description: The database volume (kept as a snapshot when the stack is deleted).
+    Value: !Ref DataVolume

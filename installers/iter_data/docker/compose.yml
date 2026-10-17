@@ -1,0 +1,31 @@
+# iter_data all-in-one (ArangoDB CE + iter_data). Works the same in Docker Desktop
+# and on a small VM / EC2 instance. install.sh sets every variable below; by hand:
+#   ITER_DATA_DIR=~/.iter/iter_data ITER_ENV_PATH=~/.iter/iter5.docker.env \
+#     docker compose -p iter5 -f compose.yml -f compose.console.yml up -d --build
+# ITER_ENV_PATH holds ITER_ADMIN_PASSWORD, ITER_JWT_SECRET and ARANGO_ROOT_PASSWORD.
+# compose.console.yml adds the Arango web console on 127.0.0.1 (leave it out to
+# publish only :8400).
+# (the service is called iter5 so an existing iter5 compose project is replaced in place)
+services:
+  iter5:
+    build:
+      context: .
+    image: ${ITER_NAME:-iter5}:latest
+    container_name: ${ITER_NAME:-iter5}
+    restart: unless-stopped
+    # hard cap (memswap_limit = mem_limit: no swap on top)
+    mem_limit: ${ITER_MEM_LIMIT:-6g}
+    memswap_limit: ${ITER_MEM_LIMIT:-6g}
+    ports:
+      - "${ITER_PORT:-8400}:8400"
+    env_file:
+      - path: ${ITER_ENV_PATH:-./docker.env}
+        required: false
+    environment:
+      # arangod sizes its caches and AQL limits from the host's RAM, not the
+      # cgroup limit above; leave headroom for iter_data in the same container
+      ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY: ${ITER_ARANGO_MEMORY:-5G}
+    # everything that persists (database, Arango apps, iter_data's files) in one
+    # host folder, e.g. ~/.iter/iter_data
+    volumes:
+      - ${ITER_DATA_DIR:?set ITER_DATA_DIR to the host folder for iter_data}:/var/lib/iter_data

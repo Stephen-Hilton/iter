@@ -9,7 +9,7 @@ owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
   codenodes: ["{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_engine/src/local/validate.code.iter.md"]
-  tests:     ["{thisfiledir}/test/*.test.iter.md"]
+  tests:     []
   reqs:      ["{topdir}/docs/iter5_spec.md"]
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
 ---

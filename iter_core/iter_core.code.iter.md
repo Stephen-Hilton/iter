@@ -9,7 +9,7 @@ owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
   codenodes: ["{topdir}/iter_core/src/model.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_core/src/settings.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md", "{topdir}/iter_core/src/waits.code.iter.md", "{topdir}/iter_core/src/sched.code.iter.md", "{topdir}/iter_core/src/dedupkeys.code.iter.md", "{topdir}/iter_core/src/cluster.code.iter.md", "{topdir}/iter_core/src/widget.code.iter.md", "{topdir}/iter_core/src/rag/rag.code.iter.md"]
-  tests:     ["{thisfiledir}/test/*.test.iter.md"]
+  tests:     ["{topdir}/test/iter_core/*.test.iter.md"]
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
 ---

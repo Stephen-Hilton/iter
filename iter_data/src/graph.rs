@@ -508,7 +508,7 @@ async fn node_create(user: AuthUser, State(st): Ctx, Path(name): Path<String>, J
         (Some(_), k) => Some(edge_kind(k)?),
     };
     let attach = kind.map(nf::Attach::Under).unwrap_or(nf::Attach::Root);
-    doc.path = nf::plan_path(&doc, parent.as_ref(), attach, &g.taken_paths(), g.naming());
+    doc.path = nf::plan_path_in(&doc, parent.as_ref(), attach, &g.taken_paths(), g.naming(), &g.project_dir());
     // one bizreq / techreq file per attachment point (§2.8): plan_path names
     // the existing one — its requirements are added with graph/reqs
     if let Some(have) = g.nodes.iter().find(|n| !n.deleted && (n.doc.path == doc.path || n.old_path == doc.path)) {

@@ -15,5 +15,11 @@ models/
 *.secret
 .DS_Store
 
-# Playwright output (e2e/playwright/run.sh)
-e2e/playwright/screenshots/
+# Playwright output (test/e2e/playwright/run.sh)
+test/e2e/playwright/screenshots/
+
+# installers/: binaries are placed by installers/build.sh and published as
+# GitHub Release assets, never committed
+installers/**/iter_data-*
+installers/**/iter_engine-*
+installers/dist/

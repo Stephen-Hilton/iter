@@ -40,4 +40,4 @@ Test scripts are written by people and agents in any language. One small contrac
 
 ## Example
 
-`tools/cargo-test-crate.sh iter_core` ends with `{"name":"iter_core unit tests",…,"normal":{"total":190,"pass":190,"err":0},…}` and exits 0 → pass; the same script with no ArangoDB for iter_data exits 2 → could not run: the test log records it as `error`, not `red`, so a broken harness is never read as broken code.
+`test/cargo-test-crate.sh iter_core` ends with `{"name":"iter_core unit tests",…,"normal":{"total":190,"pass":190,"err":0},…}` and exits 0 → pass; the same script with no ArangoDB for iter_data exits 2 → could not run: the test log records it as `error`, not `red`, so a broken harness is never read as broken code.

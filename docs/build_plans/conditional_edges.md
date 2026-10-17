@@ -46,8 +46,8 @@ Mirror the protocol feature line for line; it landed on 2026-10-11 and every tou
 | `iter_data/src/nodes.rs` | `edge_protocol`, `set_edge_protocol`; `graph` edge gets `protocol` | `edge_condition`, `set_edge_condition` (same WrongKind / length checks, 60 chars); `graph` edge gets `condition` |
 | `iter_data/src/api.rs` | `POST graph/edges/protocol`; `POST graph/edges` reads `protocol` | `POST graph/edges/condition`; `POST graph/edges` reads `condition`; change text `condition X → Y: …` |
 | `iter_data/src/mcp.rs` | `edge_protocol` | `edge_condition` |
-| `webui/graph.js` | `KNOWN_PROTOCOLS`; `edgeVisual` label `kind (protocol)`; detail pane "Protocol:" line | `KNOWN_CONDITIONS`; `edgeVisual`: if `m.link.condition` → `line = 'dashed'`, label `+ ' · if ' + condition`, class `conditional`; detail pane "Condition:" line; chip `hide conditional` (selector `edge.conditional`) |
-| `webui/graphedit.js` | `editProtocol`, `pickProtocol`, configure field `protocol`, `addEdge(…, protocol)` | `editCondition`, `pickCondition`, configure field `condition`, `addEdge` passes `condition`; the paste/copy of an edge carries it |
+| `iter_data/webui/graph.js` | `KNOWN_PROTOCOLS`; `edgeVisual` label `kind (protocol)`; detail pane "Protocol:" line | `KNOWN_CONDITIONS`; `edgeVisual`: if `m.link.condition` → `line = 'dashed'`, label `+ ' · if ' + condition`, class `conditional`; detail pane "Condition:" line; chip `hide conditional` (selector `edge.conditional`) |
+| `iter_data/webui/graphedit.js` | `editProtocol`, `pickProtocol`, configure field `protocol`, `addEdge(…, protocol)` | `editCondition`, `pickCondition`, configure field `condition`, `addEdge` passes `condition`; the paste/copy of an edge carries it |
 | `docs/iter5_spec.md` | §2.3 code keys, §3 routes table, §4 MCP | add `conditions` beside `protocols` in each place |
 | `docs/node_text_standard.md` | — | one line: a condition is 2–5 plain words saying *when*, not *why* |
 

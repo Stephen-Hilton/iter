@@ -1,0 +1,14 @@
+[Unit]
+Description=iter online database backup (arangodump, no downtime)
+Requires=arangodb3.service
+After=arangodb3.service
+
+[Service]
+Type=oneshot
+User=iter
+Group=iter
+Nice=10
+IOSchedulingClass=idle
+EnvironmentFile=/etc/iter/data.env
+EnvironmentFile=-/etc/iter/backup.env
+ExecStart=/usr/local/bin/iter-backup

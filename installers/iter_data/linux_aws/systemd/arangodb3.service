@@ -1,0 +1,22 @@
+[Unit]
+Description=ArangoDB 3.12 for iter_data
+After=network.target local-fs.target
+RequiresMountsFor=@DB_DIR@
+
+[Service]
+User=arangodb
+Group=arangodb
+Slice=iter.slice
+# arangod sizes caches and AQL limits from this, not from the slice cap
+Environment=ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY=@ARANGO_MEM@
+Environment=GLIBCXX_FORCE_NEW=1
+# read by arangod only when it initialises an empty database directory
+EnvironmentFile=/etc/arangodb3/root.env
+ExecStart=/usr/sbin/arangod --configuration /etc/arangodb3/arangod.conf
+LimitNOFILE=131072
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

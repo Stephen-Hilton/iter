@@ -9,7 +9,7 @@ owner: bespoke
 children:
   codedirs:  ["{thisfiledir}/"]
   codenodes: ["{topdir}/iter_core/src/rag/extract.code.iter.md", "{topdir}/iter_core/src/rag/chunk.code.iter.md", "{topdir}/iter_core/src/rag/embed.code.iter.md"]
-  tests:     ["{thisfiledir}/test/*.test.iter.md"]
+  tests:     []
   reqs:      []
 timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
 ---

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Deploy iter5 locally.
 #
-#   ./deploy.sh docker   the all-in-one container (ArangoDB CE + iter_data), http://127.0.0.1:8400
+#   ./deploy.sh docker   the all-in-one container (ArangoDB CE + iter_data), http://127.0.0.1:8400:
+#                        builds iter_data-linux-<arch> with installers/build.sh (a bullseye
+#                        container), then runs installers/iter_data/docker/install.sh
 #   ./deploy.sh local    native iter_data (release build) against a dev Arango container on :8529
 #
 # The container keeps everything that persists (database, Arango apps,
@@ -68,20 +70,21 @@ case "$MODE" in
     # without it iter_data mints a new secret into the data folder and every
     # existing token (engines, users) stops verifying
     [ -n "$(envval ITER_JWT_SECRET)" ] || { echo "[deploy] ITER_JWT_SECRET is not set in $ENV_FILE (set ITER_ENV_FILE)" >&2; exit 1; }
-    umask 077
-    {
-      echo "ITER_ADMIN_PASSWORD=$(envval ITER_ADMIN_PASSWORD)"
-      echo "ITER_JWT_SECRET=$(envval ITER_JWT_SECRET)"
-    } > "$RUN/docker.env"
-    "$ROOT/tools/fetch_model.sh"
-    mkdir -p "$DATA_DIR"
+    # the image takes a prebuilt glibc-2.31 linux binary for the docker host's CPU
+    DARCH="$(docker info --format '{{.Architecture}}')"; [ "$DARCH" = arm64 ] && DARCH=aarch64; [ "$DARCH" = amd64 ] && DARCH=x86_64
+    echo "[deploy] building iter_data-linux-$DARCH (installers/build.sh, placed in installers/iter_data/docker/)"
+    "$ROOT/installers/build.sh" --only "iter_data-linux-$DARCH"
+    "$ROOT/installers/fetch_model.sh"
     echo "[deploy] building + starting the iter5 container (data: $DATA_DIR)"
-    (cd "$ROOT/docker" && ARANGO_ROOT_PASSWORD="$ARANGO_PW" ITER_PORT="$PORT" ITER_DATA_DIR="$DATA_DIR" docker compose up -d --build)
-    wait_health || { docker logs --tail 40 iter5; exit 1; }
-    echo "[deploy] Arango console: http://127.0.0.1:${ARANGO_HOST_PORT:-8630}/ (root / \$ARANGO_ROOT_PASSWORD)"
+    # secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) from $ENV_FILE -> ~/.iter/iter5.docker.env;
+    # the Arango root password from ARANGO_ROOT_PASSWORD [iter4dev] unless that file or $ENV_FILE has one
+    ARANGO_ROOT_PASSWORD="$ARANGO_PW" "$ROOT/installers/iter_data/docker/install.sh" \
+      --env-file "$ENV_FILE" --port "$PORT" --data-dir "$DATA_DIR" --name iter5 \
+      --arango-port "${ARANGO_HOST_PORT:-8630}" --model-dir "$ROOT/models/all-MiniLM-L6-v2"
     ;;
   local)
     build_native
+    "$ROOT/installers/fetch_model.sh"
     stop_native
     if ! docker ps --format '{{.Names}}' | grep -qx iter4-arango-dev; then
       docker start iter4-arango-dev 2>/dev/null || docker run -d --name iter4-arango-dev -p 127.0.0.1:8529:8529 \
@@ -89,7 +92,7 @@ case "$MODE" in
     fi
     ARANGO_URL=http://127.0.0.1:8529 ARANGO_PASSWORD="$ARANGO_PW" nohup "$BIN/iter_data" --backend arango \
       --listen "127.0.0.1:$PORT" --secret-file "$RUN/iter_data.secret" --env-file "$ENV_FILE" \
-      --webui-dir "$ROOT/webui" > "$RUN/iter_data.log" 2>&1 &
+      --webui-dir "$ROOT/iter_data/webui" --embed-model "$ROOT/models/all-MiniLM-L6-v2" > "$RUN/iter_data.log" 2>&1 &
     echo $! > "$RUN/iter_data.pid"
     wait_health || { tail -20 "$RUN/iter_data.log"; exit 1; }
     ;;

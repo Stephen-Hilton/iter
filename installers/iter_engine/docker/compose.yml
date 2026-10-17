@@ -1,0 +1,35 @@
+# iter engine in a container. install.sh copies this into ~/.iter/docker and
+# writes the .env beside it (ITER_UID, ITER_GID, ITER_HOST_HOME, ITER_CHECKOUTS,
+# ITER_DATA_URL, ITER_ENGINE), plus compose.override.yml with the git
+# credentials it found (~/.ssh, ~/.gitconfig, ...), mounted read-only.
+#   docker compose up -d        docker compose logs -f        docker compose down
+#
+# ~/.iter (engine.conf, engine.key, .env with the account tokens, models/,
+# claude/ = the container's claude CLI config) and the checkouts folder are
+# mounted at the SAME absolute paths as on the host: the serves edges' topdirs
+# (~/dev/<project>) must mean the same folder inside and outside.
+name: iter-engine
+services:
+  engine:
+    build: .
+    image: iter-engine:local
+    container_name: iter-engine
+    restart: unless-stopped
+    init: true
+    # a stop takes the agent sessions with it; give them a moment
+    stop_grace_period: 30s
+    mem_limit: ${ITER_MEM_LIMIT:-8g}
+    environment:
+      ITER_UID: ${ITER_UID:?run install.sh (it writes .env)}
+      ITER_GID: ${ITER_GID:?run install.sh (it writes .env)}
+      ITER_HOME_DIR: ${ITER_HOST_HOME:?run install.sh (it writes .env)}
+      ITER_DATA_URL: ${ITER_DATA_URL:?run install.sh (it writes .env)}
+      ITER_ENGINE: ${ITER_ENGINE:?run install.sh (it writes .env)}
+      ITER_EMBED_MODEL: ${ITER_HOST_HOME}/.iter/models/all-MiniLM-L6-v2
+      CLAUDE_CONFIG_DIR: ${ITER_HOST_HOME}/.iter/claude
+    volumes:
+      - ${ITER_HOST_HOME}/.iter:${ITER_HOST_HOME}/.iter
+      - ${ITER_CHECKOUTS:?run install.sh (it writes .env)}:${ITER_CHECKOUTS}
+    # iter_data on this host: http://host.docker.internal:<port> (127.0.0.1 is the container)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

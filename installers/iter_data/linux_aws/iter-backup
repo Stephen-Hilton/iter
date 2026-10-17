@@ -1,0 +1,31 @@
+#!/bin/bash
+# shellcheck disable=SC2012  # the names are ours: iter5-<UTC timestamp>.tar
+# iter-backup: online backup of the iter_data database (arangodump reads a
+# consistent snapshot while arangod keeps serving; nothing is stopped), plus
+# iter_data's env and secret files, as one tar in $ITER_BACKUP_DIR; the newest
+# $ITER_BACKUP_KEEP are kept. Run by iter-backup.timer (install.sh) as user iter,
+# with /etc/iter/data.env and /etc/iter/backup.env in its environment.
+#   restore: mkdir /tmp/r && tar -xf iter5-<ts>.tar -C /tmp/r && arangorestore \
+#     --server.username root --server.password "$ARANGO_PASSWORD" \
+#     --server.database iter5 --create-database true \
+#     --include-system-collections true --input-directory /tmp/r/db
+set -euo pipefail
+: "${ARANGO_PASSWORD:?ARANGO_PASSWORD is not set (run via iter-backup.service, or with /etc/iter/data.env exported)}"
+DEST="${ITER_BACKUP_DIR:-/var/backups/iter}"
+KEEP="${ITER_BACKUP_KEEP:-28}"
+ts=$(date -u +%Y%m%d-%H%M%SZ)
+tmp=$(mktemp -d)                      # dump on the local disk, then one copy out
+trap 'rm -rf "$tmp"' EXIT
+arangodump --server.endpoint tcp://127.0.0.1:8529 --server.username "${ARANGO_USER:-root}" \
+  --server.password "$ARANGO_PASSWORD" --server.database "${ARANGO_DB:-iter5}" \
+  --include-system-collections true --threads 2 --log.level warning \
+  --output-directory "$tmp/db"
+cp -a /etc/iter/data.env "$tmp/"
+for f in iter_data.secret .env; do
+  if [ -f "/var/lib/iter/$f" ]; then cp -a "/var/lib/iter/$f" "$tmp/"; fi
+done
+mkdir -p "$DEST"
+tar -C "$tmp" -cf "$DEST/.iter5-$ts.tar.part" .
+mv "$DEST/.iter5-$ts.tar.part" "$DEST/iter5-$ts.tar"
+ls -1t "$DEST"/iter5-*.tar | tail -n +$((KEEP + 1)) | xargs -r rm -f
+echo "iter-backup: $DEST/iter5-$ts.tar ($(du -h "$DEST/iter5-$ts.tar" | cut -f1)), $(ls "$DEST"/iter5-*.tar | wc -l) kept"

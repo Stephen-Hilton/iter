@@ -14,7 +14,8 @@ Deploy iter on Windows (native PowerShell; deploy.sh is the Linux/macOS twin).
                           keepalive, then starts Docker Desktop again
 
 The server (ArangoDB + iter_data on :8400) runs in a WSL2 distro, installed
-there with linux/install.sh; `docker` only says so now.
+there with installers/iter_data/linux/install.sh; `docker` only says so now.
+The Windows engine for other machines: installers/iter_engine/windows.
 
 Engine settings (defaults in brackets):
   -DataUrl  [$env:ITER_DATA_URL, else http://127.0.0.1:8400]
@@ -150,7 +151,7 @@ function Stop-Engine {
 function Start-Engine {
     if (-not (Test-Path $Exe)) { throw "$Exe is missing: run .\deploy.ps1 build" }
     if (-not (Test-Path $KeyFile) -and -not (Get-EnvValue $EnvFile 'ITER_ENGINE_TOKEN')) {
-        throw "no engine key at ${KeyFile}: run '$Exe key new', then add its public key in the webui's Engine keys screen (or run install.ps1)"
+        throw "no engine key at ${KeyFile}: run '$Exe key new', then add its public key in the webui's Engine keys screen (or run installers\iter_engine\windows\install.cmd)"
     }
     $running = Get-EngineProcess
     if ($running) { Say "iter_engine already running (pid $($running.Id))"; return }
@@ -187,7 +188,7 @@ function Wait-Health([int]$seconds = 120) {
         } catch { }
         Start-Sleep 1
     }
-    throw "iter_data did not answer on :$Port within ${seconds}s (in WSL: linux/install.sh status)"
+    throw "iter_data did not answer on :$Port within ${seconds}s (in WSL: sudo installers/iter_data/linux/install.sh status)"
 }
 
 # The WSL VM keeps freed page cache (a cargo build leaves ~10 GB) counted
@@ -209,12 +210,12 @@ function Confirm-WslMemoryReclaim {
 }
 
 # On Windows the server (ArangoDB + iter_data) runs natively in a WSL2
-# distro as systemd services (linux/install.sh), not in a container: the
+# distro as systemd services (installers/iter_data/linux), not in a container: the
 # database stays off the slow Windows-drive mount and Linux-heavy projects get
 # their own engine there. Its port 8400 reaches Windows as 127.0.0.1:8400.
 function Show-DockerMoved {
     Say 'the docker deploy is retired on Windows: the server runs in a WSL2 distro instead.'
-    Say "  in the distro:  linux/install.sh server   (then: install.sh engine --name <name>)"
+    Say "  in the distro:  sudo installers/iter_data/linux/install.sh   (then: installers/iter_engine/linux_wsl/install.sh)"
     Say "  on Windows:     .\deploy.ps1 autostart          (start it all at logon)"
     Say '(./deploy.sh docker remains for Linux and macOS hosts)'
 }

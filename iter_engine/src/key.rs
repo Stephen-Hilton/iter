@@ -36,7 +36,7 @@ enum Action {
         name: Option<String>,
     },
     /// sign in with the key and print the session token, for a script's own
-    /// API calls (install.sh, deploy.ps1); exit 1 when iter_data refuses
+    /// API calls (the installers/iter_engine scripts, deploy.ps1); exit 1 when iter_data refuses
     Session {
         /// key file [~/.iter/engine.key]
         #[arg(long)]

@@ -1,0 +1,6 @@
+[Unit]
+Description=iter data services (ArangoDB + iter_data), capped like the docker container
+
+[Slice]
+MemoryMax=@MEM_MAX@
+MemorySwapMax=0

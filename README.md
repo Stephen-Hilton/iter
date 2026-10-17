@@ -7,69 +7,74 @@ iter5 is a fork of iter4. A project lives in two places that stay in step: the r
 | `iter_core` | shared types: work items, projects, settings graph types, locks, dedup keys, the test result JSON, `nodefile` (parse / conform / render / edge derivation / path planning for v5 node files) and `rag/` (GraphRAG extraction, chunking and embedding) |
 | `iter_data` | the data server: axum API on ArangoDB, auth and authz, get_next (`POST …/next`), the project graph and file sync (`nodes.rs`, `filesync.rs`), the settings graph (`settings.rs`), test results (`testlogs.rs`), MCP (`mcp.rs`) and GraphRAG (`rag/`) |
 | `iter_engine` | the engine (one per machine; providers in `provider/`, file sync in `filesync.rs`) the `iter` verbs (`cli.rs`) and the checkout tools in `local/` (node scan, validate, test runner) |
-| `webui/` | the web page (embedded into iter_data) |
-| `docker/` | the all-in-one image: ArangoDB CE + iter_data |
-| `linux/` | native systemd install: ArangoDB, iter_data, backups and the engine as services (also in a WSL2 distro) |
+| `iter_data/webui/` | the web page (embedded into iter_data) |
+| `installers/` | prebuilt binaries (GitHub Releases) and one install script per program and platform: [`installers/README.md`](installers/README.md) |
+| `test/` | every test suite run from outside the crates: the crate test nodes, `test/e2e.sh` and the Playwright suite |
+| `docs/` | the spec, the user guide, and `docs/iter_project_docs/` (iter's own project graph: project node, use cases, connections, `map/`) |
 
 iter5 is a cargo workspace at the repo root (`Cargo.toml`); build and test from the root. It runs beside iter4: container `iter5`, port **:8400**, database `iter5`.
 
-## Run it
+## Install it
+
+Prebuilt binaries for every platform are published as GitHub Releases; nothing needs Rust. Pick the folder
+for the program and the machine in [`installers/`](installers/README.md); each one can be run straight from
+GitHub:
 
 ```bash
-./deploy.sh docker   # build and start the container: API + webui on :8400, Arango console on 127.0.0.1:8630
+# the server (ArangoDB + iter_data on :8400)
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/docker/install.sh | bash      # any Docker host
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux/install.sh | sudo bash  # Debian / Ubuntu / Arch / WSL2
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux_aws/install.sh | sudo bash  # EC2 Amazon Linux 2023
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/aws/install.sh | bash -s -- --vpc vpc-… --subnet subnet-… --allowed-cidr 203.0.113.0/24  # a whole AWS stack (CloudFormation)
+# one engine per machine
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash      # also linux_wsl/, macos/, docker/
+```
+```powershell
+irm https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/windows/install.ps1 -OutFile $env:TEMP\iter-install.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\iter-install.ps1
+```
+
+Add `--version vYYYY.MM.DD` (`-Version` on Windows) for a fixed release; without it the latest is used.
+Every script takes `--help` and `--dry-run`. The engine installers ask for the iter_data URL and a name
+unique to the machine, make the engine key and wait while you register it in the Engine keys screen, then
+start the engine as a service (systemd `iter-engine`, launchd `com.iter.engine`, the Windows logon task
+`iter engine`, or the `iter-engine` container). Projects go beside each other: give the engine's `serves`
+edge the topdir `~/dev/<project>`, then run the installer's `projects` verb to clone them. Other verbs:
+`status`, `update`, `accounts`, `logs`, `uninstall`.
+
+To compile it yourself, clone the repo and run `cargo build --release -p iter_engine -p iter_data`;
+`installers/build.sh` builds all seven release binaries and `installers/build.sh --release` publishes them.
+
+## Developer loop
+
+```bash
+./deploy.sh docker   # build iter_data-linux-<arch> and start the container via installers/iter_data/docker: API + webui on :8400
 ./deploy.sh local    # native release iter_data on :8400 against the dev Arango container on :8529 (fast dev loop)
 ```
 
-Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). Release binaries land in `bin/<os>-<arch>/` (`bin/linux-x86_64/`, `bin/windows-x86_64/`, …).
-
-### Native systemd Linux
-
-```bash
-linux/install.sh server              # ArangoDB + iter_data on :8400 + an online backup every 6 hours
-linux/install.sh engine --name NAME  # this machine's engine as a service
-linux/install.sh update | backup | status
-```
-
-See [`linux/linux.code.iter.md`](linux/linux.code.iter.md).
+Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). `deploy.sh` puts its native release binaries in `bin/<os>-<arch>/`.
 
 ### Windows
 
-On Windows the server runs in a WSL2 distro, and each engine runs where its project builds best. Unreal-style projects use the native Windows engine. Bash- and Linux-heavy projects use an engine in the distro, because Git Bash makes every process start expensive.
+On Windows the server runs in a WSL2 distro, and each engine runs where its project builds best. Unreal-style projects use the native Windows engine (`installers/iter_engine/windows/`). Bash- and Linux-heavy projects use an engine in the distro (`installers/iter_engine/linux_wsl/`), because Git Bash makes every process start expensive.
 
 1. `wsl --install -d Debian`, then in `/etc/wsl.conf`: `[boot] systemd=true`, `[user] default=<you>` (and `[interop] appendWindowsPath=false` to keep Windows tools off the Linux PATH); `wsl --terminate Debian`.
-2. In the distro: clone the repo to `~/dev/iter`, then `linux/install.sh server` (and `install.sh engine --name <host>-wsl` for a Linux engine; put its projects' checkouts on the distro's disk, e.g. `~/dev/<project>`). Docker Desktop's WSL integration gives the distro `docker`.
-3. On Windows, `deploy.ps1` handles the native engine and the startup:
+2. In the distro: `installers/iter_data/linux/install.sh` (as root) for the server; put an engine's project checkouts on the distro's disk, e.g. `~/dev/<project>`.
+3. On Windows, `deploy.ps1` keeps the distro up and handles a developer build of the native engine:
 
 ```powershell
-.\deploy.ps1 engine     # cargo build --release -> bin\windows-x86_64\iter_engine.exe, then (re)start it
-.\deploy.ps1 start | stop | status
 .\deploy.ps1 startup    # start the distro (ArangoDB, iter_data, its engine), wait for :8400, start the Windows engine
 .\deploy.ps1 autostart  # run `startup` at every logon (Task Scheduler); also sets WSL memory reclaim
 .\deploy.ps1 restart-wsl  # restart the WSL VM (applies ~\.wslconfig / unit changes); refuses while any engine runs work (-Force)
+.\deploy.ps1 engine | build | start | stop | status   # developer build of iter_engine.exe from this checkout (needs Rust)
 ```
 
 - Restart WSL only with `restart-wsl`, never a bare `wsl --shutdown` / `wsl --terminate <distro>`: under a running Docker Desktop that breaks its WSL integration ("WSL integration with distro ... unexpectedly stopped" every ~30 s), and it ends the logon task's keepalive, so the distro is no longer held. `restart-wsl` stops Docker Desktop first, restarts the distro and its keepalive, then starts Docker Desktop again.
-
-- Needs Rust (`winget install Rustlang.Rustup`, MSVC toolchain), Git for Windows and the `claude` CLI on PATH.
-- The engine signs in with `~\.iter\engine.key`, reads account tokens from `~\.iter\.env`, registers under the hostname, and logs to `~\.iter\engine.log` (`-EnvFile`, `-Name`, `-DataUrl` override). A machine set up when this folder was `~\.iter5` is moved over the next time `deploy.ps1` runs with no engine running from it; `~\.iter5` then links to `~\.iter`.
+- The Windows engine needs Git for Windows and the `claude` CLI on PATH, no Rust. It signs in with `~\.iter\engine.key`, reads account tokens from `~\.iter\.env`, registers under the hostname, and logs to `~\.iter\engine.log`.
 - Shell steps (exec items, git postwork, test scripts, the `iter` shim) run under Git for Windows' bash, never WSL's `bash.exe`; `ITER_BASH` overrides. The checkout also gets `.iter\bin\iter.cmd` for cmd and PowerShell.
 - Give a `serves` edge a Windows topdir with forward slashes: `C:/Users/me/dev/project`.
-- Windows Smart App Control can block cargo's unsigned debug build scripts (`os error 4551`); `cargo test --release` builds past it.
 - The repo's `.gitattributes` keeps LF in a Windows checkout so the container and Git Bash scripts run.
-- `.\deploy.ps1 docker` is retired on Windows and only points here; `./deploy.sh docker` remains for Linux and macOS hosts.
 
-## Start an engine (once per machine)
-
-An engine-only machine (iter_data runs elsewhere) is set up from the folder that holds your code projects:
-
-```bash
-cd ~/dev && git clone https://github.com/Stephen-Hilton/iter.git && ./iter/install.sh   # Linux (Omarchy / Arch, Debian, Ubuntu)
-```
-```powershell
-cd ~\dev; git clone https://github.com/Stephen-Hilton/iter.git; .\iter\install.ps1     # Windows
-```
-
-The script checks and installs the tools, asks for the iter_data URL and a name unique to the machine, builds `iter_engine`, and fetches the embedding model. It makes the engine token and waits while you register it in the Engine keys screen. On a laptop it offers to turn off sleep. It then starts the engine as a service (Linux: systemd `iter-engine`; Windows: a logon task). Projects go beside the repo: give the engine's `serves` edge the topdir `~/dev/<project>`, then run `./iter/install.sh projects` (`install.ps1 projects`) to clone them. The other verbs are `status`, `update` and `accounts` (Linux).
+## Engines
 
 By hand:
 
@@ -80,10 +85,10 @@ iter_engine --data-url http://127.0.0.1:8400 [--name Engine01]
 
 - Everything a machine keeps for iter is in `~/.iter`: the engine key (`engine.key`), the env file with each account's token under that account's `token_envar` (`.env`, re-read while the engine runs), the binary, the embedding model and the logs. `--key-file` and `--env-file` point elsewhere.
 - **Several engines on one repository.** Each engine has its own clone, so a push can find the remote ahead of it. The engine merges the remote in and pushes again. When the merge conflicts, an agent session resolves it in the checkout: it is told the conflicted files, both sides' commits and the work items behind them. It edits the files, and the engine checks that no conflict marker is left before committing the merge. If the agent cannot combine the two sides, the merge is backed out, so a checkout is never left half-merged, and the work item moves to `question` with what conflicts and why. That engine starts nothing new in that project until you answer; other engines carry on. Your answer is the instruction for the next attempt. The same merge runs before every work item (the git prework).
-- **Omarchy laptops.** `install.sh` asks before each change. It turns off suspend and makes closing the lid do nothing. It turns off Omarchy's idle lock and screensaver (in `~/.config/omarchy/shell.json`) and the lock on lid close (in `~/.config/hypr/bindings.lua`). It also sets up `hypridle` to turn the screen off after 10 minutes. On older Omarchy, its `hypridle.conf` is kept as `hypridle.conf.before-iter`.
+- **Omarchy laptops.** `installers/iter_engine/linux/install.sh` asks before each change. It turns off suspend and makes closing the lid do nothing. It turns off Omarchy's idle lock and screensaver (in `~/.config/omarchy/shell.json`) and the lock on lid close (in `~/.config/hypr/bindings.lua`). It also sets up `hypridle` to turn the screen off after 10 minutes. On older Omarchy, its `hypridle.conf` is kept as `hypridle.conf.before-iter`.
 - **Engine keys.** An engine proves who it is with a key pair it makes for itself: `iter_engine key new` writes the private key to `~/.iter/engine.key` (it never leaves the machine) and prints the public key (`iter_…`). An admin pastes the public key into **Engine keys** (the 🔑 button in the webui header), naming the engine. Nothing secret is copied. The engine signs a one-time login with its key and gets a session token, which it and the agents it starts send with each request. Every request re-checks the key, so **Revoke** stops the engine and its agents at once. **Rotate**: run `key new` again on the machine (it keeps the new key as `engine.key.next`) and paste its public key under the old row's *rotate…*. The running engine switches by itself within a minute, and the old key stops working at the time you pick, which gives agents already running time to finish. `iter_engine key status --data-url URL` shows whether iter_data accepts the keys. An engine is a machine, not a user: it signs in as the engine itself, never as a person. Engines set up before engine keys signed in as a user of their own (role engine) with `ITER_ENGINE_TOKEN`; once such an engine has a key, remove that user under *Older engine logins* in the same screen.
 - If you leave out `--data-url`, the engine uses `$ITER_DATA_URL`. If you leave out `--name`, it uses the short hostname. The name it registers with becomes the engine's id; renaming the engine in the Settings graph changes only its display name, and either one works as `--name` afterwards.
-- `/iter_engine_setup.sh`, the older setup script, is retired: it only points at `install.sh` / `install.ps1`.
+- `/iter_engine_setup.sh`, the older setup script, is retired: it only points at `installers/iter_engine/`.
 - Nothing else is read from disk. On its first heartbeat the engine registers itself, and it appears in the Settings graph.
 
 To give the engine work, connect it in the **Settings** tab (the settings graph):
@@ -212,10 +217,10 @@ iter_data serves a stateless MCP server at `POST /mcp` (Streamable HTTP, JSON). 
 ```bash
 ./deploy.sh local              # once: the dev ArangoDB on :8529 that the tests use
 cargo test --workspace         # every crate; iter_data's tests each get a throwaway iter5_test_* database
-./e2e.sh                       # full stack, mock provider, one engine serving two projects (throwaway iter5_e2e_* database)
-E2E_ONLY=b,c ./e2e.sh          # setup + only those sections (a0, a, b, c, d, e, f, g, h)
-./e2e.sh --live                # also one tiny item on a real claude account (needs ITER_LIVE_CLAUDE_TOKEN)
-e2e/playwright/run.sh          # webui suite; screenshots in e2e/playwright/screenshots (git-ignored)
+test/e2e.sh                       # full stack, mock provider, one engine serving two projects (throwaway iter5_e2e_* database)
+E2E_ONLY=b,c test/e2e.sh          # setup + only those sections (a0, a, b, c, d, e, f, g, h)
+test/e2e.sh --live                # also one tiny item on a real claude account (needs ITER_LIVE_CLAUDE_TOKEN)
+test/e2e/playwright/run.sh          # webui suite; screenshots in test/e2e/playwright/screenshots (git-ignored)
 ```
 
 `ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` point the tests at another Arango.

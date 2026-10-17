@@ -75,31 +75,31 @@ struct Args {
 
 /// The webui, embedded so a container or Lambda deploy needs no filesystem:
 /// the page, the Project graph viewer and Intro tab, and the vendored
-/// Cytoscape libraries (MIT, licences in webui/vendor/).
-const WEBUI_INDEX: &str = include_str!("../../webui/index.html");
+/// Cytoscape libraries (MIT, licences in iter_data/webui/vendor/).
+const WEBUI_INDEX: &str = include_str!("../webui/index.html");
 const WEBUI_FILES: &[(&str, &str, &[u8])] = &[
-    ("/graph.js", "application/javascript", include_bytes!("../../webui/graph.js")),
-    ("/graph.css", "text/css", include_bytes!("../../webui/graph.css")),
-    ("/graphedit.js", "application/javascript", include_bytes!("../../webui/graphedit.js")),
-    ("/intro.js", "application/javascript", include_bytes!("../../webui/intro.js")),
-    ("/intro.css", "text/css", include_bytes!("../../webui/intro.css")),
-    ("/rag.js", "application/javascript", include_bytes!("../../webui/rag.js")),
-    ("/rag.css", "text/css", include_bytes!("../../webui/rag.css")),
-    ("/vendor/cytoscape.min.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape.min.js")),
-    ("/vendor/layout-base.js", "application/javascript", include_bytes!("../../webui/vendor/layout-base.js")),
-    ("/vendor/cose-base.js", "application/javascript", include_bytes!("../../webui/vendor/cose-base.js")),
-    ("/vendor/cytoscape-fcose.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape-fcose.js")),
-    ("/vendor/cytoscape-dagre.js", "application/javascript", include_bytes!("../../webui/vendor/cytoscape-dagre.js")),
-    ("/vendor/elk.bundled.js", "application/javascript", include_bytes!("../../webui/vendor/elk.bundled.js")),
-    ("/kit.js", "application/javascript", include_bytes!("../../webui/kit.js")),
-    ("/kit.css", "text/css", include_bytes!("../../webui/kit.css")),
-    ("/settings.js", "application/javascript", include_bytes!("../../webui/settings.js")),
+    ("/graph.js", "application/javascript", include_bytes!("../webui/graph.js")),
+    ("/graph.css", "text/css", include_bytes!("../webui/graph.css")),
+    ("/graphedit.js", "application/javascript", include_bytes!("../webui/graphedit.js")),
+    ("/intro.js", "application/javascript", include_bytes!("../webui/intro.js")),
+    ("/intro.css", "text/css", include_bytes!("../webui/intro.css")),
+    ("/rag.js", "application/javascript", include_bytes!("../webui/rag.js")),
+    ("/rag.css", "text/css", include_bytes!("../webui/rag.css")),
+    ("/vendor/cytoscape.min.js", "application/javascript", include_bytes!("../webui/vendor/cytoscape.min.js")),
+    ("/vendor/layout-base.js", "application/javascript", include_bytes!("../webui/vendor/layout-base.js")),
+    ("/vendor/cose-base.js", "application/javascript", include_bytes!("../webui/vendor/cose-base.js")),
+    ("/vendor/cytoscape-fcose.js", "application/javascript", include_bytes!("../webui/vendor/cytoscape-fcose.js")),
+    ("/vendor/cytoscape-dagre.js", "application/javascript", include_bytes!("../webui/vendor/cytoscape-dagre.js")),
+    ("/vendor/elk.bundled.js", "application/javascript", include_bytes!("../webui/vendor/elk.bundled.js")),
+    ("/kit.js", "application/javascript", include_bytes!("../webui/kit.js")),
+    ("/kit.css", "text/css", include_bytes!("../webui/kit.css")),
+    ("/settings.js", "application/javascript", include_bytes!("../webui/settings.js")),
 ];
 
-/// The retired engine setup script (tools/iter_engine_setup.sh): it now only
-/// points at install.sh / install.ps1, so an old link says where to go. Served in
+/// The retired engine setup script (iter_data/iter_engine_setup.sh): it now only
+/// points at installers/iter_engine/, so an old link says where to go. Served in
 /// both webui modes; it holds no secrets, so no sign-in.
-const ENGINE_SETUP_SH: &[u8] = include_bytes!("../../tools/iter_engine_setup.sh");
+const ENGINE_SETUP_SH: &[u8] = include_bytes!("../iter_engine_setup.sh");
 async fn engine_setup_sh() -> axum::response::Response {
     use axum::response::IntoResponse;
     ([(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], ENGINE_SETUP_SH).into_response()
@@ -161,7 +161,7 @@ async fn main() {
     rag::embed::set_model_dir(&args.embed_model);
     match rag::embed::find_model_dir() {
         Some(d) => println!("[iter_data] GraphRAG embedding model: {} ({})", rag::embed::MODEL_NAME, d.display()),
-        None => eprintln!("[iter_data] GraphRAG embedding model {} not found — ingestion and search will refuse (tools/fetch_model.sh)", rag::embed::MODEL_NAME),
+        None => eprintln!("[iter_data] GraphRAG embedding model {} not found — ingestion and search will refuse (installers/fetch_model.sh)", rag::embed::MODEL_NAME),
     }
 
     let mut app = api::router(state.clone())

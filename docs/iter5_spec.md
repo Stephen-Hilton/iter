@@ -370,7 +370,7 @@ Default response "mock: done". Verifier prompts (close gate) answer `VERDICT: co
 contains `mock: gate incomplete`. Cost 0, tokens counted as prompt length/4, session id `mock-<uuid>`.
 Usage: `ITER_MOCK_USAGE=<five_hour_pct>,<seven_day_pct>` env (for gating tests).
 
-Live smoke: `e2e.sh --live` queues one tiny item to a real `claude` account (skipped unless set).
+Live smoke: `test/e2e.sh --live` queues one tiny item to a real `claude` account (skipped unless set).
 
 ---
 
@@ -524,16 +524,16 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 - `cargo test` green in every crate (iter_data tests on Arango :8529, db `iter5_test_*`).
 - `iter_core::nodefile` property-ish tests: parse/render round trip, conform idempotent, legacy migration, glob resolution, path planning collisions, edge derivation.
 - iter_data API tests: node CRUD + edges + pending/ack, files/sync conflict cases, settings graph CRUD/validation/placeholders, get_next ordering/locks/deps/authz, engine token authz, MCP tools.
-- `e2e.sh` (rewritten, mock provider, one engine, **two projects**): engine serves both; work item round trips in each;
+- `test/e2e.sh` (rewritten, mock provider, one engine, **two projects**): engine serves both; work item round trips in each;
   file edit → node within seconds; node edit → file + commit; create node in graph → file; delete both ways; conflict;
   designer project → build → repo created + files + plan item; tests standard JSON → test node + log; account switch/stop
   via bills edge; deactivate serves edge → project stops; MCP tool calls; `iter migrate5` on a fixture.
-- Playwright (`e2e/playwright/`): login, queue, project graph renders, type filters, configure lightbox node + edge,
+- Playwright (`test/e2e/playwright/`): login, queue, project graph renders, type filters, configure lightbox node + edge,
   create node via graph, drag edge endpoint, copy/paste edge, settings graph, designer build flow, screenshots
   reviewed for polish (light/dark not required — the app is dark), no console errors.
 - Live smoke (`--live`) opt-in.
-- At final pass (2026-10-02) all three suites were green: `cargo test --workspace` 375 tests, `./e2e.sh` 184/184 checks,
-  `e2e/playwright/run.sh` 31/31 specs.
+- At final pass (2026-10-02) all three suites were green: `cargo test --workspace` 375 tests, `test/e2e.sh` 184/184 checks,
+  `test/e2e/playwright/run.sh` 31/31 specs.
 
 ---
 
@@ -594,6 +594,6 @@ Phase 1: `iter_core` nodefile + settings types (team CORE). In parallel: setting
 engine multi-project + provider/mock (ENG-RUN), webui scaffolding (UI).
 Phase 2 (after CORE): project graph store + file sync API + designer + MCP (DATA-GRAPH); filescan/conform/sync service,
 pending writer, build, test JSON runner, migrate5, interface removal in iter_local (ENG-FILES).
-Phase 3: e2e.sh + Playwright + fixes until green (TEST), docs/README.
-Status (2026-10-02): all three phases built; final pass green — `cargo test --workspace` 375, `./e2e.sh` 184/184,
-`e2e/playwright/run.sh` 31/31.
+Phase 3: test/e2e.sh + Playwright + fixes until green (TEST), docs/README.
+Status (2026-10-02): all three phases built; final pass green — `cargo test --workspace` 375, `test/e2e.sh` 184/184,
+`test/e2e/playwright/run.sh` 31/31.

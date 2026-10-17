@@ -36,7 +36,7 @@ From the `iter4/` directory of the repository:
 ./deploy.sh local    # native iter_data (release build) against a dev ArangoDB container on :8529
 ```
 
-`docker` is the normal way. It writes `run/docker.env` with the admin password and token secret from your `.env`, downloads the embedding model (`tools/fetch_model.sh`), builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter4-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
+`docker` is the normal way. It builds the Linux iter_data binary, downloads the embedding model (`installers/fetch_model.sh`) and runs `installers/iter_data/docker/install.sh`, which writes `~/.iter/iter5.docker.env` with the admin password and token secret from your `.env`, builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter4-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
 
 ### Which ports does iter4 use?
 
@@ -69,7 +69,7 @@ No. The container runs ArangoDB and iter_data only. Engines — and the Claude C
 
 ### Can I run iter4 on a server or in the cloud?
 
-Yes. The same `docker/compose.yml` runs on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; `linux/install.sh` installs one on a Linux host.
+Yes. The installers in `installers/iter_data/` (docker, linux, or linux_aws for EC2 Amazon Linux 2023) run on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; `installers/iter_engine/` installs one on a Linux host.
 
 ## Creating a new project
 
@@ -384,7 +384,7 @@ Semantic search over a project's knowledge, in the fourth web tab. It indexes tw
 
 ### What is the embedding model used?
 
-**all-MiniLM-L6-v2** from sentence-transformers: 384-dimension vectors, a 256-token window, run in-process with candle on the CPU. Engines do the bulk embedding (document chunks and their summaries); iter_data embeds only search questions. Every vector carries a model stamp, so chunks embedded by different weights are flagged. The container has the model built in; `tools/fetch_model.sh` downloads it (about 91 MB) for other setups.
+**all-MiniLM-L6-v2** from sentence-transformers: 384-dimension vectors, a 256-token window, run in-process with candle on the CPU. Engines do the bulk embedding (document chunks and their summaries); iter_data embeds only search questions. Every vector carries a model stamp, so chunks embedded by different weights are flagged. The container has the model built in; `installers/fetch_model.sh` downloads it (about 91 MB) for other setups.
 
 ### How does GraphRAG index a document?
 
@@ -488,7 +488,7 @@ No engine serving the project is online, or a running item holds a lock on the f
 
 ### GraphRAG says the embedding model is not found.
 
-Run `tools/fetch_model.sh` (or `./deploy.sh docker`, which runs it), or point `ITER_EMBED_MODEL` or `--embed-model` at the model directory.
+Run `installers/fetch_model.sh` (or `./deploy.sh docker`, which runs it), or point `ITER_EMBED_MODEL` or `--embed-model` at the model directory.
 
 ### Where are the logs?
 

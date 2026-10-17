@@ -292,7 +292,7 @@ fn file_for_node(g: &mut Graph, node: &str, t: NodeType, by: &str) -> Result<(St
     let now = nf::now_ts();
     let what = if t == NodeType::Bizreq { "business requirements" } else { "technical requirements" };
     let mut doc = NodeDoc::new(t, &format!("{} {what}", owner.doc.name), by, &now);
-    doc.path = nf::plan_path(&doc, Some(&owner.doc), nf::Attach::Under(EdgeKind::Reqs), &g.taken_paths(), g.naming());
+    doc.path = nf::plan_path_in(&doc, Some(&owner.doc), nf::Attach::Under(EdgeKind::Reqs), &g.taken_paths(), g.naming(), &g.project_dir());
     // the file may exist already without the node naming it: use it
     let existing = g.nodes.iter().find(|n| !n.deleted && (n.doc.path == doc.path || n.old_path == doc.path)).map(|n| (n.doc.id.clone(), n.live() && n.doc.nodetype == t));
     let (fid, fpath, created) = match existing {

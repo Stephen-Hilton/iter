@@ -14,7 +14,7 @@
 
 ## Build and test
 - Build: from the repo root, `cargo build -p iter_core` (workspace: iter_core, iter_data, iter_engine).
-- Test: `iter runtests iter_core/test/iter_core.test.iter.md` (cargo test -p iter_core via tools/cargo-test-crate.sh; prints the standard result JSON).
+- Test: `iter runtests test/iter_core/iter_core.test.iter.md` (cargo test -p iter_core via test/cargo-test-crate.sh; prints the standard result JSON).
 - `nodefile::tests::conform_idempotent_over_repo_tree` conforms every *.iter.md in the checkout: a malformed node file anywhere breaks it.
 
 ## Gotchas

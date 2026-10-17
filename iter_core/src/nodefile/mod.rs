@@ -27,7 +27,7 @@ mod reqs_tests;
 pub use conform::{Conformed, conform, conform_against};
 pub use edges::{DATAFLOW, Edge, EdgeKind, KNOWN_PROTOCOLS, PROTOCOLS, add_child, edges_of, owner_is_target, protocol_of, remove_child, set_protocol};
 pub use parse::{parse, parse_tolerant};
-pub use paths::{Attach, Naming, dir_of, expand_entry, file_name_of, plan_path, resolve, resolve_in, slug, stem_of};
+pub use paths::{Attach, DEFAULT_PROJECT_DIR, Naming, dir_of, expand_entry, file_name_of, plan_path, plan_path_in, resolve, resolve_in, slug, stem_of};
 pub use render::render;
 pub use reqs::{ReqItem, conform_reqs, first_sentence, is_req_key, parse_reqs, render_reqs, req_edges, req_node_name};
 

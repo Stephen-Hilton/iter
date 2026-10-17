@@ -13,10 +13,10 @@ embedding).
 
 A change here changes both programs, so finish with all of these, from the repo root:
 
-1. `cargo test -p iter_core`
+1. `cargo test -p iter_core` (or `test/iter_core/cargo_test.sh`)
 2. `cargo build --release -p iter_engine -p iter_data`: both, never only one.
 3. `cargo test -p iter_engine` and `cargo test -p iter_data` (iter_data's tests need the dev ArangoDB on
    127.0.0.1:8529; start it with `docker start iter4-arango-dev`). A change that compiles in iter_core can
    still break a caller.
 4. Say in your report that both binaries must be redeployed: one rebuilt alone leaves the other on the old
-   iter_core rules (see the repo-root `CLAUDE.md`).
+   iter_core rules (see the repo-root `CLAUDE.md`), and that `installers/` needs a rebuild and release.
