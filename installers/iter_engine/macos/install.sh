@@ -617,24 +617,38 @@ key() {
     if [ -f "$KEYF" ]; then ok "$KEYF exists"; else printf '    [dry-run] %s key new --key-file %s --name %s\n' "$BIN" "$KEYF" "$ENGINE"; fi
     printf '    [dry-run] wait until iter_data accepts it (%s key status)\n' "$BIN"; return
   fi
-  [ -f "$KEYF" ] || "$BIN" key new --key-file "$KEYF" --name "$ENGINE" | sed 's/^/    /'
-  local first=1
+  [ -f "$KEYF" ] || "$BIN" key new --key-file "$KEYF" --name "$ENGINE" >/dev/null
   while :; do
     if "$BIN" key status --key-file "$KEYF" --data-url "$DATA_URL" > "$TMPF" 2>&1; then
       sed 's/^/    /' "$TMPF"; ok "iter_data accepts this engine's key"; return
     fi
-    if [ $first = 1 ]; then
-      sed 's/^/    /' "$TMPF"
-      printf '\n    In the webui (%s): Engine keys (the key button in the header) -> Add: paste the iter_... public key above, engine name "%s".\n' "$DATA_URL" "$ENGINE"
-      first=0
-    fi
-    case "$(ask "press Enter once it is added (n = a new key, s = skip):" "")" in
-      n|N) mv "$KEYF" "$KEYF.replaced-$(date +%Y%m%d%H%M%S)"; "$BIN" key new --key-file "$KEYF" --name "$ENGINE" | sed 's/^/    /'; first=1 ;;
+    key_help
+    case "$(ask "Press Enter once that key is added in the webui (n = make a new key instead, s = skip for now):" "")" in
+      n|N) mv "$KEYF" "$KEYF.replaced-$(date +%Y%m%d%H%M%S)"; "$BIN" key new --key-file "$KEYF" --name "$ENGINE" >/dev/null
+           warn "made a new key: paste the new line below instead (delete the old key in the webui if you added it)" ;;
       s|S) warn "skipped: iter_data refuses this engine until its public key is added"; return ;;
       *) tty_ok || die "iter_data does not accept the key yet (no terminal to wait at): add it, then run this again"
-         sleep 2; printf '    not accepted yet\n' ;;
+         printf '    checking again...\n' ;;
     esac
   done
+}
+
+# what to paste and where, and why iter_data refused the last check; printed at
+# every try, so the screen always shows the one line to paste and the reason
+key_help() {
+  local pub id why
+  pub="$("$BIN" key show --key-file "$KEYF" 2>/dev/null | head -1)"
+  id="$("$BIN" key show --key-file "$KEYF" 2>/dev/null | sed -n 's/^(id \([0-9a-f]*\).*/\1/p')"
+  why="$(sed -n 's/^key  *id [0-9a-f]*  *//p' "$TMPF" | head -1)"
+  [ -n "$why" ] || why="$(tail -1 "$TMPF")"
+  printf '\n    iter_data does not accept this engine yet: %s\n' "$why"
+  case "$why" in
+    *"unknown engine key"*) printf '    (iter_data has no key with id %s: it was not added yet, or a different line was pasted)\n' "$id" ;;
+    *"not reachable"*) printf '    (this machine cannot reach %s: check the URL and that iter_data is running)\n' "$DATA_URL" ;;
+  esac
+  printf "\n    Paste this one line, this engine's public key (nothing else on this screen):\n\n      %s\n\n" "$pub"
+  printf '    Where: open %s, sign in as an admin, click 🔑 Engine keys in the header, then Add.\n' "$DATA_URL"
+  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n\n' "$ENGINE" "$id"
 }
 
 # a laptop: the agent can run under `caffeinate -s` (no system sleep while on

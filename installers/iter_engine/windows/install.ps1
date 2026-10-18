@@ -692,26 +692,38 @@ function Step-Key {
     }
     New-Item -ItemType Directory -Force $SecretsDir | Out-Null
     if (-not (Test-Path $EnvFile)) { New-Item -ItemType File $EnvFile | Out-Null }
-    if (-not (Test-Path $KeyFile)) { & $Exe key new --key-file $KeyFile --name $script:Engine | ForEach-Object { "    $_" } }
-    $first = $true
+    if (-not (Test-Path $KeyFile)) { & $Exe key new --key-file $KeyFile --name $script:Engine | Out-Null }
     while ($true) {
         $out = & $Exe key status --key-file $KeyFile --data-url $script:DataUrl
         if ($LASTEXITCODE -eq 0) { $out | ForEach-Object { "    $_" }; Ok "iter_data accepts this engine's key"; return }
-        if ($first) {
-            $out | ForEach-Object { "    $_" }
-            Write-Host "`n    In the webui ($($script:DataUrl)): Engine keys (the key button in the header) -> Add: paste the iter_... public key above, engine name '$($script:Engine)'."
-            $first = $false
-        }
+        Show-KeyHelp $out
         if ($Yes) { Warn 'not accepted yet (-Yes does not wait): add the key, then run this again'; return }
-        switch (Ask 'press Enter once it is added (n = a new key, s = skip):' '') {
+        switch (Ask 'Press Enter once that key is added in the webui (n = make a new key instead, s = skip for now):' '') {
             { $_ -in 'n', 'N' } {
                 Move-Item $KeyFile "$KeyFile.replaced-$(Get-Date -Format yyyyMMddHHmmss)" -Force
-                & $Exe key new --key-file $KeyFile --name $script:Engine | ForEach-Object { "    $_" }; $first = $true
+                & $Exe key new --key-file $KeyFile --name $script:Engine | Out-Null
+                Warn 'made a new key: paste the new line below instead (delete the old key in the webui if you added it)'
             }
             { $_ -in 's', 'S' } { Warn 'skipped: iter_data refuses this engine until its public key is added'; return }
-            default { Start-Sleep 2; Write-Host '    not accepted yet' }
+            default { Write-Host '    checking again...' }
         }
     }
+}
+
+# What to paste and where, and why iter_data refused the last check; shown at
+# every try, so the screen always holds the one line to paste and the reason.
+function Show-KeyHelp($status) {
+    $show = @(& $Exe key show --key-file $KeyFile 2>$null)
+    $pub = $show | Select-Object -First 1
+    $id = ($show | Select-String '^\(id ([0-9a-f]+)' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1)
+    $why = ($status | Select-String '^key\s+id [0-9a-f]+\s+(.*)$' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1)
+    if (-not $why) { $why = $status | Select-Object -Last 1 }
+    Write-Host "`n    iter_data does not accept this engine yet: $why"
+    if ($why -match 'unknown engine key') { Write-Host "    (iter_data has no key with id ${id}: it was not added yet, or a different line was pasted)" }
+    elseif ($why -match 'not reachable') { Write-Host "    (this machine cannot reach $($script:DataUrl): check the URL and that iter_data is running)" }
+    Write-Host "`n    Paste this one line, this engine's public key (nothing else on this screen):`n`n      $pub`n"
+    Write-Host "    Where: open $($script:DataUrl), sign in as an admin, click Engine keys (the key button) in the header, then Add."
+    Write-Host "    Paste the line above as the public key and type $($script:Engine) as the engine name. The list then shows key id ${id}.`n"
 }
 
 function Step-Power {

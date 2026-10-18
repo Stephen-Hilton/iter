@@ -615,24 +615,38 @@ key() {
     [ -f "$KEYF" ] && ok "$KEYF exists" || printf '    [dry-run] %s key new --key-file %s --name %s\n' "$BIN" "$KEYF" "$ENGINE"
     printf '    [dry-run] wait until iter_data accepts it (%s key status)\n' "$BIN"; return
   fi
-  [ -f "$KEYF" ] || "$BIN" key new --key-file "$KEYF" --name "$ENGINE" | sed 's/^/    /'
-  local first=1
+  [ -f "$KEYF" ] || "$BIN" key new --key-file "$KEYF" --name "$ENGINE" >/dev/null
   while :; do
     if "$BIN" key status --key-file "$KEYF" --data-url "$DATA_URL" > "$TMPF" 2>&1; then
       sed 's/^/    /' "$TMPF"; ok "iter_data accepts this engine's key"; return
     fi
-    if [ $first = 1 ]; then
-      sed 's/^/    /' "$TMPF"
-      printf '\n    In the webui (%s): Engine keys (the key button in the header) -> Add: paste the iter_... public key above, engine name "%s".\n' "$DATA_URL" "$ENGINE"
-      first=0
-    fi
-    case "$(ask "press Enter once it is added (n = a new key, s = skip):" "")" in
-      n|N) mv "$KEYF" "$KEYF.replaced-$(date +%Y%m%d%H%M%S)"; "$BIN" key new --key-file "$KEYF" --name "$ENGINE" | sed 's/^/    /'; first=1 ;;
+    key_help
+    case "$(ask "Press Enter once that key is added in the webui (n = make a new key instead, s = skip for now):" "")" in
+      n|N) mv "$KEYF" "$KEYF.replaced-$(date +%Y%m%d%H%M%S)"; "$BIN" key new --key-file "$KEYF" --name "$ENGINE" >/dev/null
+           warn "made a new key: paste the new line below instead (delete the old key in the webui if you added it)" ;;
       s|S) warn "skipped: iter_data refuses this engine until its public key is added"; return ;;
       *) { [ -r /dev/tty ] && { : < /dev/tty; } 2>/dev/null; } || die "iter_data does not accept the key yet (no terminal to wait at): add it, then run this again"
-         sleep 2; printf '    not accepted yet\n' ;;
+         printf '    checking again...\n' ;;
     esac
   done
+}
+
+# what to paste and where, and why iter_data refused the last check; printed at
+# every try, so the screen always shows the one line to paste and the reason
+key_help() {
+  local pub id why
+  pub="$("$BIN" key show --key-file "$KEYF" 2>/dev/null | head -1)"
+  id="$("$BIN" key show --key-file "$KEYF" 2>/dev/null | sed -n 's/^(id \([0-9a-f]*\).*/\1/p')"
+  why="$(sed -n 's/^key  *id [0-9a-f]*  *//p' "$TMPF" | head -1)"
+  [ -n "$why" ] || why="$(tail -1 "$TMPF")"
+  printf '\n    iter_data does not accept this engine yet: %s\n' "$why"
+  case "$why" in
+    *"unknown engine key"*) printf '    (iter_data has no key with id %s: it was not added yet, or a different line was pasted)\n' "$id" ;;
+    *"not reachable"*) printf '    (this machine cannot reach %s: check the URL and that iter_data is running)\n' "$DATA_URL" ;;
+  esac
+  printf "\n    Paste this one line, this engine's public key (nothing else on this screen):\n\n      %s\n\n" "$pub"
+  printf '    Where: open %s, sign in as an admin, click 🔑 Engine keys in the header, then Add.\n' "$DATA_URL"
+  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n\n' "$ENGINE" "$id"
 }
 
 power() {
@@ -657,6 +671,33 @@ power() {
 HYPR="$HOME/.config/hypr"
 MARK="iter engine (install.sh)"
 
+# Closing the lid reconciles the displays but does not lock: Omarchy's lid
+# binding, replaced in ~/.config/hypr/bindings.lua. o.rebind exists only in
+# newer Omarchy, so the block falls back to hl.unbind + o.bind. A block from an
+# earlier run that called o.rebind directly (a config error on older Omarchy) is
+# taken out first, the file kept as bindings.lua.before-lid-fix.
+lid_binding() {
+  local b="$HYPR/bindings.lua"
+  if grep -qs '^o\.rebind("switch:on:' "$b"; then
+    cp "$b" "$b.before-lid-fix"
+    grep -v -e '^o\.rebind("switch:on:Lid Switch"' -e '^o\.rebind("switch:on:Apple SMC power/lid events"' \
+      -e "^-- $MARK: closing the lid" "$b.before-lid-fix" > "$b"
+  fi
+  grep -qs 'local rebind = o.rebind or' "$b" && return 0
+  cat >> "$b" <<EOF
+
+-- $MARK: closing the lid reconciles the displays but does not lock
+do
+  local rebind = o.rebind or function(keys, description, dispatcher, options)
+    if hl.unbind then hl.unbind(keys) end
+    o.bind(keys, description, dispatcher, options)
+  end
+  rebind("switch:on:Lid Switch", nil, "omarchy-hyprland-monitor-clamshell", { locked = true })
+  rebind("switch:on:Apple SMC power/lid events", nil, "omarchy-hyprland-monitor-clamshell", { locked = true })
+end
+EOF
+}
+
 # Omarchy: no idle lock, no screensaver, no lock on lid close; hypridle turns
 # the screen off after 10 minutes. Current Omarchy (Lua Hyprland config) runs
 # idle in its own shell (~/.config/omarchy/shell.json) and dropped hypridle;
@@ -667,6 +708,8 @@ desktop() {
   local done=0
   grep -qs "$MARK" "$HYPR/hypridle.conf" && done=1
   if [ -f "$HYPR/hyprland.lua" ] && ! jq -e '.idle.screensaver == 0 and .idle.lock == 0' "$HOME/.config/omarchy/shell.json" >/dev/null 2>&1; then done=0; fi
+  # the lid block an earlier run wrote with o.rebind, which older Omarchy lacks
+  if [ -f "$HYPR/hyprland.lua" ] && grep -qs '^o\.rebind("switch:on:' "$HYPR/bindings.lua"; then done=0; fi
   [ $done = 0 ] || { ok "no lock, no screensaver, screen off after 10 min"; return; }
   yes_no "unattended engine: turn off the lock screen and screensaver, and have hypridle turn the screen off after 10 minutes?" \
     || { warn "left as Omarchy set it"; return; }
@@ -681,9 +724,7 @@ desktop() {
     mkdir -p "$(dirname "$sj")"; [ -s "$sj" ] || echo '{"version": 1}' > "$sj"
     jq '.idle = ((.idle // {}) + {"screensaver": 0, "lock": 0})' "$sj" > "$sj.tmp" && mv "$sj.tmp" "$sj"
     ok "Omarchy shell: idle screensaver and lock off ($sj)"
-    if ! grep -q "$MARK" "$HYPR/bindings.lua" 2>/dev/null; then
-      printf '\n-- %s: closing the lid reconciles the displays but does not lock\no.rebind("switch:on:Lid Switch", nil, "omarchy-hyprland-monitor-clamshell", { locked = true })\no.rebind("switch:on:Apple SMC power/lid events", nil, "omarchy-hyprland-monitor-clamshell", { locked = true })\n' "$MARK" >> "$HYPR/bindings.lua"
-    fi
+    lid_binding
     ok "lid close: no lock ($HYPR/bindings.lua)"
     if ! grep -q 'launch_on_start("hypridle")' "$HYPR/autostart.lua" 2>/dev/null; then
       printf '\n-- %s: turns the screen off after 10 minutes (hypridle.conf)\no.launch_on_start("hypridle")\n' "$MARK" >> "$HYPR/autostart.lua"
