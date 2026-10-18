@@ -121,9 +121,13 @@ sudo ./install.sh restore /opt/iter/iter_data/backups/iter5-<ts>.tar
 
 This stops `iter-data`, replaces the collections the backup holds (`arangorestore --overwrite true` as iter's user), and starts `iter-data` again. The env and secret files in the tar are not touched; they are there for a move to a new machine.
 
+## An engine on the same machine
+
+`iter_data engine-key add --public-key iter_… --engine NAME` registers an engine's key straight in the database, as an admin would in the Engine keys screen. Run it as the `iter` user with `--env-file D/config/data.env`; it starts no server. The Linux engine installer (`installers/iter_engine/linux`) runs it by itself when its iter_data URL is this machine, and also pins iter_data's certificate from `D/state`. See its README.
+
 ## The first-boot admin password
 
-A fresh install generates the `admin` password, prints it once and keeps it as `ITER_ADMIN_PASSWORD` in `D/config/data.env`. iter_data marks that admin `must_change_password`: the webui makes you choose your own password at the first sign-in (12 characters or more), and the API refuses everything else until then. At that moment iter_data writes `D/state/admin_password_changed`, and `iter-admin-cleanup.path` starts `iter-admin-cleanup.service` (root, oneshot), which removes the `ITER_ADMIN_PASSWORD` line from `D/config/data.env` (everything else and its `root:iter 640` stay). `install.sh status` and a reinstall run the same cleanup when the marker exists, and a reinstall never writes the line back.
+A fresh install generates the `admin` password, prints it once and keeps it as `ITER_ADMIN_PASSWORD` in `D/config/data.env` (read it again with `sudo sed -n 's/^ITER_ADMIN_PASSWORD=//p' /opt/iter/iter_data/config/data.env`; an engine installed here afterwards prints it at its end). iter_data marks that admin `must_change_password`: the webui makes you choose your own password at the first sign-in (12 characters or more), and the API refuses everything else until then. At that moment iter_data writes `D/state/admin_password_changed`, and `iter-admin-cleanup.path` starts `iter-admin-cleanup.service` (root, oneshot), which removes the `ITER_ADMIN_PASSWORD` line from `D/config/data.env` (everything else and its `root:iter 640` stay). `install.sh status` and a reinstall run the same cleanup when the marker exists, and a reinstall never writes the line back.
 
 
 

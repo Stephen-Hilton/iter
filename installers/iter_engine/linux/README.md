@@ -18,9 +18,9 @@ Run it as your own user; it uses sudo where it must. The steps:
 1. Packages: git, curl, jq, openssl, poppler, and gh where the distro has it. It asks before installing.
 2. The `claude` CLI, from Anthropic's installer into `~/.local/bin`.
 3. The iter_data URL and the engine name, saved to `config/engine.conf`.
-4. `bin/iter_engine`, written to a temp name and then moved into place, and linked as `/usr/local/bin/iter_engine`. Then iter_data's certificate: `--fingerprint` (or the one you paste) is pinned with `iter_engine key trust` (see [HTTPS](#https-and-iter_datas-certificate)).
+4. `bin/iter_engine`, written to a temp name and then moved into place, and linked as `/usr/local/bin/iter_engine`. Then iter_data's certificate: `--fingerprint` (or the one you paste) is pinned with `iter_engine key trust` (see [HTTPS](#https-and-iter_datas-certificate)). With iter_data on this machine (below), the script reads the certificate from its file instead.
 5. The embedding model into `models/`, checksum-verified.
-6. The engine key. `iter_engine key new` makes it; you paste its public key into the webui's Engine keys screen, and the script waits until iter_data accepts it.
+6. The engine key. `iter_engine key new` makes it; you paste its public key into the webui's Engine keys screen, and the script waits until iter_data accepts it. Each try shows the one line to paste, the key id the webui will list, and why iter_data refused. With iter_data on this machine (below), nothing is pasted.
 7. On a laptop: no suspend, and on Omarchy no lock screen. It asks first.
 8. The `iter-engine` systemd service.
 9. Account tokens (`claude setup-token`, saved to `secrets/.env`, or none to paste with `--secrets-command`) and clones of the served projects.
@@ -64,6 +64,16 @@ Only links live outside the folder: `/etc/systemd/system/iter-engine.service` an
 Verbs: `install` (the default), `status`, `update`, `accounts`, `projects`, `logs`, `uninstall`.
 
 Projects: in the webui's Settings tab, draw a `serves` edge from the engine to the project with the topdir `~/dev/<project>`, then run `install.sh projects`.
+
+## iter_data on the same machine
+
+When the iter_data URL is this machine (`https://127.0.0.1:8400`, `localhost`, `::1`) and iter_data is installed here by `installers/iter_data/linux` (its folder is found from the `iter-data` unit), the two are set up together and nothing is copied by hand:
+
+- **The certificate** is read from iter_data's own file (`iter_data/state/tls.crt`, or `custom-tls.crt`) and pinned, so no fingerprint is asked for.
+- **The engine key** is registered with `sudo -u iter <iter dir>/iter_data/bin/iter_data engine-key add --env-file <iter dir>/iter_data/config/data.env --public-key iter_… --engine NAME`. This runs as iter_data's own user with its own env file, the way the `iter-data` service reaches the database, so no admin password is needed. The key shows in the webui's Engine keys screen like one an admin added. A rerun is a no-op. An iter_data without this command falls back to pasting.
+- **The webui sign-in** is printed at the end: the URL, and the first-boot admin password while it is still the first-boot one.
+
+Install iter_data first, then the engine with `--data-url https://127.0.0.1:8400`. An engine on another machine still has its key pasted in the webui, and an engine here that reports to another iter_data is set up as usual.
 
 ## Account tokens from a secret store
 

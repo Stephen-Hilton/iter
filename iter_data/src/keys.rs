@@ -347,6 +347,37 @@ async fn key_add(user: AuthUser, State(st): Ctx, Json(req): Json<AddReq>) -> Res
     Ok(Json(public(&row, None, &now_utc())))
 }
 
+/// `iter_data engine-key add` (main.rs): registers the key of an engine on this
+/// same machine without the webui. The engine installer runs it as the `iter`
+/// user with iter_data's env file, so it reaches the database exactly as the
+/// service does and no one's password is involved. The same key for the same
+/// engine again is a no-op, so installers may rerun it.
+pub async fn add_local(store: &dyn Storage, public_key: &str, engine: &str) -> Result<String, String> {
+    let key = enginekey::parse_public(public_key)
+        .ok_or_else(|| format!("that is not an engine public key: `iter_engine key show` prints the {}… line", enginekey::PREFIX))?;
+    let id = enginekey::key_id(&key);
+    if let Some(row) = store.get(TABLE, &id, NOSK).await.map_err(|e| e.to_string())? {
+        if body_str(&row, "engine") != engine {
+            return Err(format!("key {id} is registered already, for engine \"{}\"", body_str(&row, "engine")));
+        }
+        if revoked_at(&row, &now_utc()) {
+            return Err(format!("key {id} of engine \"{engine}\" was revoked: make a new one (iter_engine key new)"));
+        }
+        return Ok(format!("key {id} of engine \"{engine}\" is registered already"));
+    }
+    check_engine(engine).map_err(|e| match e {
+        ApiError::Status(_, m) => m,
+        _ => "bad engine name".into(),
+    })?;
+    let row = json!({
+        "id": id, "engine": engine, "label": "added on this machine by its installer", "public_key": enginekey::format_public(&key),
+        "created": now_utc(), "created_by": "iter_data engine-key add", "revoked": "", "revoked_by": "",
+        "replaces": "", "replaced_by": "",
+    });
+    store.put(TABLE, &id, NOSK, &row).await.map_err(|e| e.to_string())?;
+    Ok(format!("registered key {id} of engine \"{engine}\""))
+}
+
 /// An admin's view of a key row that is not yet revoked.
 async fn unrevoked_row(st: &AppState, id: &str) -> Result<Value, ApiError> {
     let row = st.store.get(TABLE, id, NOSK).await?.filter(|r| r.get("public_key").is_some()).ok_or_else(notfound)?;
@@ -562,6 +593,23 @@ mod api_tests {
         assert!(t.call(&right, "GET", "/api/server/tls", None).await.1["fingerprints"].is_array());
         assert_eq!(t.call(&t.signed("alice", "user"), "GET", "/api/server/tls", None).await.0, 403);
         assert_eq!(t.admin("POST", "/api/server/tls/next", None).await.0, 400, "nothing to rotate without --tls auto");
+        crate::test_db::drop(&t.db).await;
+    }
+
+    #[tokio::test]
+    async fn a_local_engine_is_registered_without_the_webui_and_reruns_are_no_ops() {
+        let t = T::new().await;
+        let k = new_key();
+        let store = t.st.store.as_ref();
+        assert!(super::add_local(store, "iter_nope", "lap9").await.is_err());
+        assert!(super::add_local(store, &pubkey(&k), "a b").await.is_err());
+        assert!(super::add_local(store, &pubkey(&k), "lap9").await.unwrap().starts_with("registered key"));
+        // it signs in like a key an admin added
+        assert!(t.login(&k).await.is_ok());
+        assert!(super::add_local(store, &pubkey(&k), "lap9").await.unwrap().contains("registered already"), "a rerun");
+        assert!(super::add_local(store, &pubkey(&k), "other").await.unwrap_err().contains("for engine \"lap9\""));
+        assert_eq!(t.admin("POST", &format!("/api/keys/{}/revoke", kid(&k)), None).await.0, 200);
+        assert!(super::add_local(store, &pubkey(&k), "lap9").await.unwrap_err().contains("revoked"), "a revoked key stays revoked");
         crate::test_db::drop(&t.db).await;
     }
 

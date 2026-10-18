@@ -49,10 +49,10 @@ struct Args {
     #[arg(long, default_value = "arango")]
     backend: String,
     /// ArangoDB server URL (ARANGO_URL env wins over the default)
-    #[arg(long, default_value = "")]
+    #[arg(long, global = true, default_value = "")]
     arango_url: String,
     /// ArangoDB database name (ARANGO_DB env wins; created if missing)
-    #[arg(long, default_value = arango::DEFAULT_DB)]
+    #[arg(long, global = true, default_value = arango::DEFAULT_DB)]
     arango_db: String,
     /// listen address (ITER_PORT, when set, replaces the default port 8400)
     #[arg(long, default_value = "")]
@@ -81,7 +81,7 @@ struct Args {
     #[arg(long)]
     tls_name: Vec<String>,
     /// .env file to load (KEY=VALUE lines; malformed lines skipped)
-    #[arg(long, default_value = "./.env")]
+    #[arg(long, global = true, default_value = "./.env")]
     env_file: String,
 
     /// GraphRAG embedding model directory (all-MiniLM-L6-v2: config.json,
@@ -89,6 +89,34 @@ struct Args {
     /// models/all-MiniLM-L6-v2 near the binary, when empty
     #[arg(long, default_value = "")]
     embed_model: String,
+
+    /// none: serve the API and webui
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// engine keys, managed on this machine (no server is started)
+    #[command(name = "engine-key", subcommand)]
+    EngineKey(EngineKeyCmd),
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum EngineKeyCmd {
+    /// register the public key of an engine on this same machine, as an admin
+    /// would in the webui's Engine keys screen. Run as the service's user with
+    /// its env file (the engine installer does:
+    /// sudo -u iter iter_data engine-key add --env-file <iter dir>/iter_data/config/data.env …);
+    /// the same key for the same engine again is a no-op
+    Add {
+        /// the engine's public key (`iter_engine key show`, the iter_… line)
+        #[arg(long)]
+        public_key: String,
+        /// the engine's name
+        #[arg(long)]
+        engine: String,
+    },
 }
 
 /// The webui, embedded so a container or Lambda deploy needs no filesystem:
@@ -163,6 +191,16 @@ async fn main() {
         std::process::exit(2);
     }
     let store: Arc<dyn storage::Storage> = Arc::new(open_arango(&args).await);
+    if let Some(Cmd::EngineKey(EngineKeyCmd::Add { public_key, engine })) = &args.cmd {
+        match keys::add_local(store.as_ref(), public_key.trim(), engine.trim()).await {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("iter_data engine-key add: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     bootstrap_admin(store.as_ref()).await;
     bootstrap_summary_agent(store.as_ref()).await;

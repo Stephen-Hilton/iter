@@ -565,6 +565,46 @@ path_link() {
 # pasted here) pins it now and stops when the server presents another one;
 # --trust-ca checks it against certificate authorities (a TLS proxy with a real
 # certificate); else the first sign-in trusts what it sees (trust on first use).
+# iter_data on this machine, which this engine reports to (a loopback URL):
+# then its certificate is read from its file and the engine's key registered
+# with `iter_data engine-key add`, so no one pastes either. Its folder comes
+# from the iter-data unit (it may be another iter dir), else this one.
+LDATA=""
+local_data_dir() {
+  local d
+  d="$(sed -n 's|^ExecStart=\(/[^ ]*\)/bin/iter_data .*|\1|p' /etc/systemd/system/iter-data.service 2>/dev/null | head -1 || true)"
+  printf '%s' "${d:-$ROOT/iter_data}"
+}
+local_data() {
+  is_loopback "$(url_host "$DATA_URL")" || return 1
+  LDATA="$(local_data_dir)"
+  [ -x "$LDATA/bin/iter_data" ] && sudo test -f "$LDATA/config/data.env"
+}
+# the certificate local iter_data serves (its own --tls-cert, else the self-signed one)
+local_fingerprint() {
+  local c
+  for c in "$LDATA/state/custom-tls.crt" "$LDATA/state/tls.crt"; do
+    sudo test -f "$c" || continue
+    printf 'sha256:%s' "$(sudo openssl x509 -in "$c" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+    return 0
+  done
+  return 1
+}
+# true once local iter_data holds this engine's key; run as iter_data's own
+# user with its env file, as the iter-data service reaches the database
+register_local() {
+  local_data || return 1
+  local pub out
+  pub="$("$BIN" key show --key-file "$KEYF" | head -1)"
+  if out="$(sudo -u iter "$LDATA/bin/iter_data" engine-key add --env-file "$LDATA/config/data.env" --public-key "$pub" --engine "$ENGINE" 2>&1)"; then
+    ok "iter_data on this machine: $(printf '%s\n' "$out" | grep -v '^\[iter_data\]' | tail -1)"
+  else
+    printf '%s\n' "$out" | grep -v '^\[iter_data\]' | tail -3 | sed 's/^/    /'
+    warn "could not register the key with iter_data on this machine (an older iter_data, without `iter_data engine-key add`?): add it in the webui"
+    return 1
+  fi
+}
+
 trust() {
   say "4b/9 iter_data's certificate"
   case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http to this machine: no certificate to trust"; return ;; esac
@@ -573,6 +613,9 @@ trust() {
     return
   fi
   local fp="$OPT_FP"
+  if [ -z "$fp" ] && [ $DRY = 0 ] && local_data && fp="$(local_fingerprint)"; then
+    ok "iter_data runs on this machine: pinning the certificate it serves ($fp)"
+  fi
   if [ -z "$fp" ] && ! has_trust "$DATA_URL"; then
     if [ $DRY = 1 ]; then printf "    [dry-run] ask for iter_data's certificate fingerprint (Enter = trust it at the first sign-in)\n"
     else fp="$(ask "Paste iter_data's certificate fingerprint (shown in the webui's 🔑 Engine keys screen, or by the iter_data installer), or press Enter to trust it at the first sign-in:" "")"; fi
@@ -613,9 +656,10 @@ key() {
   run chmod 600 "$ENVF"
   if [ $DRY = 1 ]; then
     [ -f "$KEYF" ] && ok "$KEYF exists" || printf '    [dry-run] %s key new --key-file %s --name %s\n' "$BIN" "$KEYF" "$ENGINE"
-    printf '    [dry-run] wait until iter_data accepts it (%s key status)\n' "$BIN"; return
+    printf '    [dry-run] iter_data on this machine: register it (iter_data engine-key add); else wait until iter_data accepts it (%s key status)\n' "$BIN"; return
   fi
   [ -f "$KEYF" ] || "$BIN" key new --key-file "$KEYF" --name "$ENGINE" >/dev/null
+  register_local || true
   while :; do
     if "$BIN" key status --key-file "$KEYF" --data-url "$DATA_URL" > "$TMPF" 2>&1; then
       sed 's/^/    /' "$TMPF"; ok "iter_data accepts this engine's key"; return
@@ -758,6 +802,16 @@ EOF
   else
     ok "hypridle starts at the next desktop login (this shell has no desktop session)"
   fi
+}
+
+# the webui sign-in, when iter_data runs on this machine; the first-boot admin
+# password itself, while it is still the first-boot one
+local_webui_note() {
+  local_data 2>/dev/null || return 0
+  local pw; pw="$(sudo sed -n 's/^ITER_ADMIN_PASSWORD=//p' "$LDATA/config/data.env" 2>/dev/null | head -1)"
+  printf 'webui: %s (also https://<this machine>:%s from others)\n' "$DATA_URL" "${DATA_URL##*:}"
+  if [ -n "$pw" ]; then printf '  sign in as admin, first-boot password: %s (the webui asks you to choose your own)\n' "$pw"
+  else printf '  sign in as admin with the password you chose\n'; fi
 }
 
 unit_text() {
@@ -933,6 +987,7 @@ case "$VERB" in
 Done. Engine "$ENGINE" runs as the iter-engine service and checks in with $DATA_URL.
 Next, in the webui's Settings tab: draw a serves edge from $ENGINE to each project
 (topdir ~/dev/<project>), then run \`install.sh projects\` here to clone them.
+$(local_webui_note)
   status:  install.sh status        log:  install.sh logs  ($LOGS/engine.log)
   update:  install.sh update        a new key:  $BIN key rotate   (its public key: $BIN key show)
 EOF

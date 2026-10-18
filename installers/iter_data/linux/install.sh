@@ -776,7 +776,7 @@ do_install() {
   # || true: Arch has no hostname command without inetutils
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   say "webui: $SCHEME://${ip:-127.0.0.1}:$PORT/"
-  if $SUDO grep -q '^ITER_ADMIN_PASSWORD=' "$DATA_ENV" 2>/dev/null; then say "first sign-in: admin / ITER_ADMIN_PASSWORD in $DATA_ENV"
+  if $SUDO grep -q '^ITER_ADMIN_PASSWORD=' "$DATA_ENV" 2>/dev/null; then say "first sign-in: admin, password: sudo sed -n 's/^ITER_ADMIN_PASSWORD=//p' $DATA_ENV"
   else say "sign in as admin with the password you chose"; fi
   tls_report
   if [ -n "$FRESH_ADMIN" ]; then
