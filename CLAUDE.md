@@ -45,7 +45,7 @@ committed) and one self-contained install script per program and platform. Insta
   another's files), and test with `bash -n`, `shellcheck` and `--dry-run` (Linux ones inside a container
   of the target distro: debian:bookworm, ubuntu:24.04, amazonlinux:2023).
 - Everything an installer makes lives in one folder, the iter dir (`/opt/iter`, Windows `C:\iter`, AWS stack
-  `/data/iter`; `--iter-dir` / `-IterDir` / `ITER_DIR`, always ending in `iter`): `iter_data/` and
+  `/data/iter`, docker installers under Docker Desktop `~/iter`; `--iter-dir` / `-IterDir` / `ITER_DIR`, always ending in `iter`): `iter_data/` and
   `iter_engine/` (layout in `installers/README.md`). Outside it only OS-required links (systemd units,
   `/usr/local/bin/iter_engine`) and the plist / logon task. Never add files elsewhere; older installs
   (`~/.iter`, `/etc/iter`, `/var/lib/iter`, …) are moved in by the next run, never deleted.

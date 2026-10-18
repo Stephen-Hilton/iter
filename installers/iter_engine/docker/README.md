@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 
 Prerequisites: Docker with compose v2, with your user able to run `docker`, plus curl and git on the host.
 
-Everything goes in one folder, `<iter dir>/iter_engine` (`/opt/iter/iter_engine` by default), owned by you:
+Everything goes in one folder, `<iter dir>/iter_engine` (`/opt/iter/iter_engine` by default, `~/iter/iter_engine` under Docker Desktop), owned by you:
 
 | Path | What |
 |---|---|
@@ -29,13 +29,13 @@ Everything goes in one folder, `<iter dir>/iter_engine` (`/opt/iter/iter_engine`
 | `models/all-MiniLM-L6-v2/` | the embedding model |
 | `claude/` | the container's claude CLI config |
 
-`--iter-dir DIR` (also `--iter_dir`, or `ITER_DIR`) picks the iter dir, else the one the container `iter-engine` was built in, else `/opt/iter`. It is forgiving about the ending: `/my/dir/iter/`, `/my/dir/iter` and `/my/dir` all mean `/my/dir/iter`. The script creates `/opt/iter` with sudo when it must (root-owned, 755) and `iter_engine/` under it as yours. Given another iter dir than the container's, it stops the container and moves the folder there. **Docker Desktop (macOS)** mounts only shared folders (`/Users`, `/Volumes`, `/private`, `/tmp`, `/var/folders` by default), and `/opt` is not one of them. The script checks the mount first and stops with the fix: add `/opt/iter` in Docker Desktop → Settings → Resources → File sharing, or use `--iter-dir ~/iter`.
+`--iter-dir DIR` (also `--iter_dir`, or `ITER_DIR`) picks the iter dir, else the one the container `iter-engine` was built in, else `/opt/iter` (`~/iter` under Docker Desktop). It is forgiving about the ending: `/my/dir/iter/`, `/my/dir/iter` and `/my/dir` all mean `/my/dir/iter`. The script creates `/opt/iter` with sudo when it must (root-owned, 755) and `iter_engine/` under it as yours. Given another iter dir than the container's, it stops the container and moves the folder there. **Docker Desktop** (macOS, Windows, and Docker Desktop for Linux) runs containers in a VM that sees only the folders shared with it (Settings → Resources → File sharing: the home folder is, `/opt` is not). So under Docker Desktop the default iter dir is `~/iter`; with Docker Engine on Linux it is `/opt/iter`. The script tells them apart by `docker info`. An `--iter-dir` Docker Desktop cannot see is caught before anything starts: the script checks the mount and says to share that folder or pick one under your home.
 
 The script sets up `docker/` as the build folder. Into it go `Dockerfile`, `entrypoint.sh` and `compose.yml` (copied from beside the script, else downloaded from GitHub at `--version`), the binary (from beside the script, `--binary`, or the release, sha256-checked), `.env` with the compose settings, and `compose.override.yml` with the git credential mounts. It then fetches the embedding model into `models/` and builds `iter-engine:local`. Next it makes the engine key inside the image and waits until the webui's Engine keys screen has its public key. Last, `docker compose up -d` starts the container `iter-engine` with `restart: unless-stopped` and docker's init.
 
 ## Options
 
-`--iter-dir DIR` (default `/opt/iter`), `--data-url URL` (`https://`), `--name NAME`, `--checkouts DIR` (default `~/dev`), `--version TAG`, `--binary PATH`, `--fingerprint FP` (iter_data's certificate, pinned before the first sign-in), `--trust-ca` (a TLS proxy with a real certificate), `--secrets-command CMD` / `--secrets-every N` (account tokens from a secret store, [below](#account-tokens-from-a-secret-store)), `--yes`, `--dry-run`.
+`--iter-dir DIR` (default `/opt/iter`, Docker Desktop `~/iter`), `--data-url URL` (`https://`), `--name NAME`, `--checkouts DIR` (default `~/dev`), `--version TAG`, `--binary PATH`, `--fingerprint FP` (iter_data's certificate, pinned before the first sign-in), `--trust-ca` (a TLS proxy with a real certificate), `--secrets-command CMD` / `--secrets-every N` (account tokens from a secret store, [below](#account-tokens-from-a-secret-store)), `--yes`, `--dry-run`.
 Verbs: `install` (default), `status`, `update`, `accounts`, `projects`, `logs`, `uninstall`.
 
 By hand, from `<iter dir>/iter_engine/docker`: `docker compose up -d`, `docker compose logs -f`, `docker compose down`. To run a command as the engine's user: `docker compose run --rm --no-deps engine <cmd>`. Note that `docker exec` runs as root.

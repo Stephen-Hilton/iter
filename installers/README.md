@@ -29,7 +29,8 @@ again at any time. The folder READMEs above have the details for each platform.
 ## One folder: the iter dir
 
 Every installer puts everything it makes in one folder, the **iter dir**: `/opt/iter` by default
-(Windows `C:\iter`; the AWS stack `/data/iter`, on its data volume). Choose another with `--iter-dir DIR`
+(Windows `C:\iter`; the AWS stack `/data/iter`, on its data volume; the docker installers under Docker
+Desktop `~/iter`). Choose another with `--iter-dir DIR`
 (Windows `-IterDir`, or `ITER_DIR` in the environment). The folder always ends in `iter`:
 `--iter-dir /my/dir`, `--iter-dir /my/dir/iter` and `--iter-dir /my/dir/iter/` all mean `/my/dir/iter`.
 
@@ -57,8 +58,10 @@ Every installer puts everything it makes in one folder, the **iter dir**: `/opt/
   earlier install left in the way go to `replaced-<time>/`. The database and the backups move only
   from their default places and within one filesystem; otherwise they stay where they are and the
   script records that. Keys, certificates, and so the fingerprints engines pinned, stay the same.
-- Docker Desktop (macOS, Windows) shares only the home folder by default. For the docker installers,
-  add `/opt/iter` under Settings → Resources → File sharing, or use `--iter-dir ~/iter`.
+- Docker Desktop (macOS, Windows, and Docker Desktop for Linux) runs containers in a VM that sees only
+  the folders shared with it: the home folder is, `/opt` is not (this is file sharing, not permissions,
+  so `chmod` does not help). So the docker installers default to `~/iter` under Docker Desktop (they ask
+  `docker info`) and to `/opt/iter` with Docker Engine on Linux. The native installers use no Docker.
 
 ## The first-boot admin password
 

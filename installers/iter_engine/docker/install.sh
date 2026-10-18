@@ -19,7 +19,8 @@
 #   uninstall   stop and remove the container and its image (keeps <iter dir>/iter_engine and the checkouts)
 #
 # Options:
-#   --iter-dir DIR    the folder that holds everything iter installs [/opt/iter; $ITER_DIR;
+#   --iter-dir DIR    the folder that holds everything iter installs [/opt/iter, under
+#                     Docker Desktop ~/iter; $ITER_DIR;
 #                     later runs: where it is installed]. Forgiving: /my/dir/iter/, /my/dir/iter
 #                     and /my/dir all mean /my/dir/iter. The engine's files go in
 #                     <iter dir>/iter_engine (also spelled --iter_dir)
@@ -60,9 +61,9 @@
 # from the account tokens in secrets/.env (`claude setup-token`); the host's own
 # claude login is not shared. An install from before 2026-10-18 (~/.iter) is
 # moved in once (mv, never deleted: what is not the engine's goes to
-# old-dot-iter/). Docker Desktop (macOS): the iter dir must be a shared folder
-# (Settings -> Resources -> File sharing; /opt is not shared by default), or
-# --iter-dir ~/iter.
+# old-dot-iter/). Docker Desktop (macOS, Windows, Linux): the iter dir must be a
+# folder shared with its VM (Settings -> Resources -> File sharing; the home
+# folder is, /opt is not), so the default there is ~/iter.
 #
 # HTTPS: iter_data must be https:// (it serves HTTPS by default); plain http://
 # is refused, because from inside the container iter_data is always across a
@@ -146,8 +147,17 @@ iter_dir_of() {
   printf '%s' "$d"
 }
 # where it goes: --iter-dir, else $ITER_DIR, else where the container's build
-# folder already is (<iter dir>/iter_engine/docker), else /opt/iter. A container
-# built in ~/.iter/docker is an install from before 2026-10-18.
+# folder already is (<iter dir>/iter_engine/docker), else the default below. A
+# container built in ~/.iter/docker is an install from before 2026-10-18.
+# the default iter dir: ~/iter under Docker Desktop (macOS, Windows, Linux), whose
+# containers see only the folders shared with its VM (the home folder is, /opt
+# is not); /opt/iter with Docker Engine on Linux, which mounts any host folder
+default_iter_dir() {
+  case "$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)" in
+    *"Docker Desktop"*) printf '%s' "$HOME/iter" ;;
+    *) printf '%s' /opt/iter ;;
+  esac
+}
 CUR_E="" OLD_CTX=""
 wd="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' iter-engine 2>/dev/null || true)"
 case "$wd" in
@@ -156,7 +166,7 @@ case "$wd" in
 esac
 if [ -n "$ITER_DIR_OPT" ]; then ITER_DIR="$(iter_dir_of "$ITER_DIR_OPT")"
 elif [ -n "$CUR_E" ]; then ITER_DIR="$(dirname "$CUR_E")"
-else ITER_DIR=/opt/iter; fi
+else ITER_DIR="$(default_iter_dir)"; fi
 E="$ITER_DIR/iter_engine"
 [ "$CUR_E" != "$E" ] || CUR_E=""
 [ -n "$OLD_CTX" ] || [ ! -f "$IHOME/docker/compose.yml" ] || OLD_CTX="$IHOME/docker"

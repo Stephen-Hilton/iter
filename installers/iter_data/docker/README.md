@@ -1,6 +1,6 @@
 # iter_data in Docker
 
-One container with ArangoDB Community Edition 3.12 and iter_data. The API and webui are on `https://<host>:8400` (HTTPS with a self-signed certificate, see below), and the Arango web console is on `127.0.0.1:8630` (never published beyond localhost). Everything the install makes is in one host folder, `<iter dir>/iter_data` (`/opt/iter/iter_data` by default), mounted into the container at `/var/lib/iter_data`:
+One container with ArangoDB Community Edition 3.12 and iter_data. The API and webui are on `https://<host>:8400` (HTTPS with a self-signed certificate, see below), and the Arango web console is on `127.0.0.1:8630` (never published beyond localhost). Everything the install makes is in one host folder, `<iter dir>/iter_data` (`/opt/iter/iter_data` by default, `~/iter/iter_data` under Docker Desktop), mounted into the container at `/var/lib/iter_data`:
 
 | Path | What |
 |---|---|
@@ -35,15 +35,15 @@ Or with one line (the script fetches this folder's files and the binary from the
 curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/docker/install.sh | bash -s -- --version v2026.10.17
 ```
 
-The script picks the iter dir: `--iter-dir DIR` (also `--iter_dir`, or `ITER_DIR`), else where this container's files already are, else `/opt/iter`. It is forgiving about the ending: `/my/dir/iter/`, `/my/dir/iter` and `/my/dir` all mean `/my/dir/iter`. It creates `/opt/iter` with sudo when it must (root-owned, 755) and `iter_data/` under it as yours. Given an iter dir other than the one the container uses, it stops the container and moves the folder there.
+The script picks the iter dir: `--iter-dir DIR` (also `--iter_dir`, or `ITER_DIR`), else where this container's files already are, else `/opt/iter` (`~/iter` under Docker Desktop, below). It is forgiving about the ending: `/my/dir/iter/`, `/my/dir/iter` and `/my/dir` all mean `/my/dir/iter`. It creates `/opt/iter` with sudo when it must (root-owned, 755) and `iter_data/` under it as yours. Given an iter dir other than the one the container uses, it stops the container and moves the folder there.
 
-**Docker Desktop (macOS)** mounts only shared folders (`/Users`, `/Volumes`, `/private`, `/tmp`, `/var/folders` by default), and `/opt` is not one of them. The script checks the mount first and stops with the fix: add `/opt/iter` in Docker Desktop → Settings → Resources → File sharing, or use `--iter-dir ~/iter`.
+**Docker Desktop** (macOS, Windows, and Docker Desktop for Linux) runs containers in a VM that sees only the folders shared with it (Settings → Resources → File sharing: the home folder is, `/opt` is not). So under Docker Desktop the default iter dir is `~/iter`; with Docker Engine on Linux it is `/opt/iter`. The script tells them apart by `docker info`. An `--iter-dir` Docker Desktop cannot see is caught before anything starts: the script checks the mount and says to share that folder or pick one under your home.
 
 The script checks Docker and gets the binary: `--binary PATH`, else the one in this folder, else the GitHub Release, with its sha256 checked against `SHA256SUMS`. It copies this folder's files into `docker/`, fetches the embedding model (all-MiniLM-L6-v2, about 91 MB) into `docker/models/`, writes the secrets, builds the image, starts the container, waits for `https://127.0.0.1:<port>/health` and prints the URL and the TLS certificate fingerprint.
 
 | Option | Default | |
 |---|---|---|
-| `--iter-dir DIR` | `/opt/iter` (later runs: where it is) | the folder that holds everything; iter_data's files go in `<iter dir>/iter_data` |
+| `--iter-dir DIR` | `/opt/iter`; Docker Desktop `~/iter` (later runs: where it is) | the folder that holds everything; iter_data's files go in `<iter dir>/iter_data` |
 | `--version TAG` | latest release | release to download the binary from |
 | `--binary PATH` | | use this `iter_data` linux binary |
 | `--env-file PATH` | | read `ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET` and the `ARANGO_*` settings from it |

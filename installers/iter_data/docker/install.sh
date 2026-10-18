@@ -9,7 +9,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/docker/install.sh | bash -s -- --version vYYYY.MM.DD
 #
 # Options:
-#   --iter-dir DIR       the folder that holds everything iter installs [/opt/iter; $ITER_DIR;
+#   --iter-dir DIR       the folder that holds everything iter installs [/opt/iter, under
+#                        Docker Desktop ~/iter; $ITER_DIR;
 #                        later runs: where it is installed]. Forgiving: /my/dir/iter/,
 #                        /my/dir/iter and /my/dir all mean /my/dir/iter. iter_data's files go
 #                        in <iter dir>/iter_data (also spelled --iter_dir)
@@ -63,8 +64,9 @@
 # container stopped meanwhile. A fresh install without --env-file generates the
 # secrets and prints the admin password once. Keep the JWT secret: every engine
 # and user token is signed with it. Rerun to upgrade.
-# Docker Desktop (macOS): the iter dir must be a shared folder (Settings ->
-# Resources -> File sharing; /opt is not shared by default), or --iter-dir ~/iter.
+# Docker Desktop (macOS, Windows, Linux): the iter dir must be a folder shared
+# with its VM (Settings -> Resources -> File sharing; the home folder is, /opt is
+# not), so the default there is ~/iter.
 #
 # HTTPS: iter_data makes a self-signed certificate on first start (tls.crt beside
 # its secrets in state/, kept across reinstalls) and the script prints its
@@ -212,8 +214,17 @@ do_status() {
 }
 
 # ---- where it goes: --iter-dir, else $ITER_DIR, else where the container's
-# files already are (its /var/lib/iter_data mount), else /opt/iter
+# files already are (its /var/lib/iter_data mount), else the default below
 CUR_D="" OLD_ENV="" OLD_BUILD="" VOLS=""
+# the default iter dir: ~/iter under Docker Desktop (macOS, Windows, Linux), whose
+# containers see only the folders shared with its VM (the home folder is, /opt
+# is not); /opt/iter with Docker Engine on Linux, which mounts any host folder
+default_iter_dir() {
+  case "$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)" in
+    *"Docker Desktop"*) printf '%s' "$HOME/iter" ;;
+    *) printf '%s' /opt/iter ;;
+  esac
+}
 # the docker volume mounted at a path in the container NAME
 vol_at() { docker inspect -f "{{range .Mounts}}{{if and (eq .Type \"volume\") (eq .Destination \"$1\")}}{{.Name}}{{end}}{{end}}" "$NAME" 2>/dev/null || true; }
 discover() {
@@ -228,7 +239,7 @@ discover() {
   fi
   if [ -n "$ITER_DIR_OPT" ]; then ITER_DIR="$(iter_dir_of "$ITER_DIR_OPT")"
   elif [ -n "$CUR_D" ]; then ITER_DIR="$(dirname "$CUR_D")"
-  else ITER_DIR=/opt/iter; fi
+  else ITER_DIR="$(default_iter_dir)"; fi
   set_paths
   # an install from before 2026-10-18: ~/.iter (or ~/.iter5, before that)
   local h
