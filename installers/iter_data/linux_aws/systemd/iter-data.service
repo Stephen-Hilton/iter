@@ -3,15 +3,17 @@ Description=iter iter_data (API + webui on :@PORT@, HTTPS unless --tls off)
 Requires=arangodb3.service
 After=arangodb3.service network-online.target
 Wants=network-online.target
+# the iter dir may be on its own disk
+RequiresMountsFor=@D@
 
 [Service]
 User=iter
 Group=iter
 Slice=iter.slice
-WorkingDirectory=/var/lib/iter
-Environment=HOME=/var/lib/iter
-EnvironmentFile=/etc/iter/data.env
-ExecStart=/opt/iter/bin/iter_data --backend arango --listen 0.0.0.0:@PORT@ --secret-file /var/lib/iter/iter_data.secret --env-file /var/lib/iter/.env @TLS_ARGS@
+WorkingDirectory=@D@/state
+Environment=HOME=@D@/state
+EnvironmentFile=@D@/config/data.env
+ExecStart=@D@/bin/iter_data --backend arango --listen 0.0.0.0:@PORT@ --secret-file @D@/state/iter_data.secret --env-file @D@/state/.env @TLS_ARGS@
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

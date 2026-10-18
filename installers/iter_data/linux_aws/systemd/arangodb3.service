@@ -11,8 +11,10 @@ Slice=iter.slice
 Environment=ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY=@ARANGO_MEM@
 Environment=GLIBCXX_FORCE_NEW=1
 # read by arangod only when it initialises an empty database directory
-EnvironmentFile=/etc/arangodb3/root.env
-ExecStart=/usr/sbin/arangod --configuration /etc/arangodb3/arangod.conf
+# arangod finds its ICU and time zone data here, not in /usr/share/arangodb3
+Environment=ICU_DATA=@AR_SHARE@ ICU_DATA_LEGACY=@AR_SHARE@ TZ_DATA=@AR_SHARE@/tzdata
+EnvironmentFile=@AR@/config/root.env
+ExecStart=@AR@/bin/arangod --configuration @AR@/config/arangod.conf
 LimitNOFILE=131072
 Restart=on-failure
 RestartSec=5

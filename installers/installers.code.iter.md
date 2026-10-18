@@ -31,7 +31,7 @@ straight from raw.githubusercontent.com) and it installs one program on one kind
 | `iter_engine/linux_wsl/` | the same inside a WSL2 distro (systemd=true check, keepalive logon task) |
 | `iter_engine/macos/` | the engine as the launchd agent `com.iter.engine` |
 | `iter_engine/windows/` | the native Windows engine as the logon task `iter engine` (`install.cmd` / `install.ps1`) |
-| `iter_engine/docker/` | the engine in a container, with `~/.iter` and the checkouts mounted at the host's own paths |
+| `iter_engine/docker/` | the engine in a container, with `<iter dir>/iter_engine` and the checkouts mounted at the host's own paths |
 
 ## How it works
 

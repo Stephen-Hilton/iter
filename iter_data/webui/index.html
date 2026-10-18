@@ -683,7 +683,7 @@ const pct=v=>v==null?"—":Math.round(v)+"%";
 const stopOf=n=>{const e=((sgCache&&sgCache.edges)||[]).find(x=>x.type==="bills"&&x.from==="account:"+n&&x.to==="project:"+project);const s=e&&e.settings?e.settings.stop:null;return typeof s==="number"?s:null;};
 const acctTitle=a=>`${nameOf("account",a.name)}: 5h ${pct(a.five_hour_pct)} resets ${at(a.five_hour_resets_at)||"?"} · 7d ${pct(a.seven_day_pct)} resets ${at(a.seven_day_resets_at)||"?"}${stopOf(a.name)==null?"":` · stop ${stopOf(a.name)}%`}`
   +(a.is_using_overage?" · OVERAGE":"")+(a.in_use?" · held by another engine":"")+(a.available_at?` · available ${at(a.available_at)}`:" · no estimate")
-  +(a.token==="unset"?" · NO TOKEN on the engine (not in its environment, its secrets command or ~/.iter/.env)":"");
+  +(a.token==="unset"?" · NO TOKEN on the engine (not in its environment, its secrets command or iter_engine/secrets/.env)":"");
 
 /* ---- on/off switches (2026-10-08): the server, each project, each engine and each account is
    Active or Stopped. Stopped starts nothing new; work already running finishes. A project's switch

@@ -3,23 +3,31 @@
 # API + webui on :8400, the Arango web console on 127.0.0.1:8630. With --arango-url
 # the container runs iter_data only, against an ArangoDB you already have.
 #
-#   ./install.sh [install] [options]  build the image here and (re)start the container
+#   ./install.sh [install] [options]  build the image and (re)start the container
 #   ./install.sh status [--name NAME] the container, health, the TLS certificate fingerprint;
 #                                     removes the first-boot admin password once it is changed
 #   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/docker/install.sh | bash -s -- --version vYYYY.MM.DD
 #
 # Options:
+#   --iter-dir DIR       the folder that holds everything iter installs [/opt/iter; $ITER_DIR;
+#                        later runs: where it is installed]. Forgiving: /my/dir/iter/,
+#                        /my/dir/iter and /my/dir all mean /my/dir/iter. iter_data's files go
+#                        in <iter dir>/iter_data (also spelled --iter_dir)
 #   --version TAG        release to download the binary (and, when piped, these files) from [latest]
 #   --binary PATH        use this iter_data linux binary instead of downloading one
 #   --env-file PATH      take ITER_ADMIN_PASSWORD, ITER_JWT_SECRET and the ARANGO_* settings below from it
 #   --port N             host port for the API + webui [8400; ITER_PORT]
 #   --arango-port N      host port for the Arango console on 127.0.0.1, 0 = not published [8630]
-#   --data-dir DIR       host folder for everything that persists [~/.iter/iter_data]
-#   --name NAME          container, compose project and image name [iter5]
+#   --data-dir DIR       an older install's data folder, to move into the iter dir once
+#                        [the container's mount, else ~/.iter/iter_data]
+#   --adopt-volumes      the container NAME keeps its database in docker volumes (an older
+#                        hand-made setup): copy them into the iter dir (the volumes are kept)
+#   --name NAME          container, compose project and image name [iter5]; another name
+#                        keeps its files in <iter dir>/iter_data_<name>
 #   --model-dir DIR      an all-MiniLM-L6-v2 folder to use instead of downloading it
 #   --memory SIZE        container memory cap, e.g. 6g [6g]; Arango is told 1G less
 #   --tls-cert PATH      serve this certificate (PEM, e.g. a real one for your domain) instead of
-#                        the self-signed one; needs --tls-key. Copied into the data folder.
+#                        the self-signed one; needs --tls-key. Copied into config/.
 #   --tls-key PATH       the private key (PEM) for --tls-cert
 #   --tls-name NAME      an extra DNS name or IP on the self-signed certificate (repeatable),
 #                        e.g. the name engines and browsers use; only read when it is first made
@@ -31,8 +39,8 @@
 #                        the ArangoDB in the container [local]
 #   --arango-fingerprint FP   pin that ArangoDB's certificate (sha256:<64 hex>; comma-separated
 #                        for a rotation): the way to trust a self-signed certificate
-#   --arango-ca-cert PATH     trust this CA (PEM) for its certificate instead; copied into the
-#                        data folder. With neither, only the public CAs are trusted
+#   --arango-ca-cert PATH     trust this CA (PEM) for its certificate instead; copied into
+#                        config/. With neither, only the public CAs are trusted
 #   --arango-db NAME     iter's database [iter_db; an existing install keeps its own]
 #   --arango-user NAME   the Arango user iter_data signs in as, rw on that database only [iter_user]
 #
@@ -45,12 +53,21 @@
 #   --dry-run            print every action, change nothing
 #   -h, --help           this text
 #
-# Secrets live in ~/.iter/<name>.docker.env (mode 600); a fresh install without
-# --env-file generates them and prints the admin password once. Keep the JWT
-# secret: every engine and user token is signed with it. Rerun to upgrade.
+# Everything is in <iter dir>/iter_data (owner-only), mounted into the container at
+# /var/lib/iter_data: docker/ (the build folder: Dockerfile, compose files, the
+# binary, the model), config/ (data.env = the secrets, mode 600; arango-ca.crt;
+# custom-tls.crt/.key), state/ (iter_data's own files: iter_data.secret,
+# engine_session.secret, tls.crt/.key), arango/data (the database), arango/apps,
+# backups/. An install from before 2026-10-18 (~/.iter/iter_data,
+# ~/.iter/<name>.docker.env, ~/.iter/<name>-docker) is moved in once, the
+# container stopped meanwhile. A fresh install without --env-file generates the
+# secrets and prints the admin password once. Keep the JWT secret: every engine
+# and user token is signed with it. Rerun to upgrade.
+# Docker Desktop (macOS): the iter dir must be a shared folder (Settings ->
+# Resources -> File sharing; /opt is not shared by default), or --iter-dir ~/iter.
 #
 # HTTPS: iter_data makes a self-signed certificate on first start (tls.crt beside
-# its secrets in <data-dir>/iter, kept across reinstalls) and the script prints its
+# its secrets in state/, kept across reinstalls) and the script prints its
 # fingerprint. Give that fingerprint to each engine installer (--fingerprint) or
 # compare it with `iter_engine key status`. Browsers warn about a self-signed
 # certificate; use --tls-cert/--tls-key or a TLS proxy for one they trust. The TLS
@@ -60,13 +77,14 @@ set -euo pipefail
 REPO="Stephen-Hilton/iter"
 # shellcheck disable=SC2015  # piped from curl there is no script dir: fall back to the cwd
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
-IHOME="$HOME/.iter"
+IHOME="$HOME/.iter"          # where an install from before 2026-10-18 kept its files
+ITER_DIR_OPT="${ITER_DIR:-}"
 VERSION="${ITER_VERSION:-}"
 BINARY=""
 ENV_SRC=""
 PORT="${ITER_PORT:-8400}"
 ARANGO_PORT="${ARANGO_HOST_PORT:-8630}"
-DATA_DIR="${ITER_DATA_DIR:-}"
+OLD_DATA=""
 NAME="iter5"
 MODEL_SRC=""
 MEM="${ITER_MEM_LIMIT:-6g}"
@@ -76,6 +94,7 @@ FILES=(Dockerfile compose.yml compose.console.yml entrypoint.sh)
 MODEL_SHA="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
 TLS_CERT_SRC="" TLS_KEY_SRC="" TLS_MODE="" TLS_NAMES=()
 A_URL_OPT="" A_FP_OPT="" A_CA_SRC="" A_DB_OPT="" A_USER_OPT=""
+ADOPT=0
 
 say() { echo "[iter_data/docker] $*"; }
 die() { echo "[iter_data/docker] ERROR: $*" >&2; exit 1; }
@@ -93,7 +112,9 @@ while [ $# -gt 0 ]; do
     --env-file) ENV_SRC="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --arango-port) ARANGO_PORT="$2"; shift 2 ;;
-    --data-dir) DATA_DIR="$2"; shift 2 ;;
+    --iter-dir|--iter_dir) ITER_DIR_OPT="$2"; shift 2 ;;
+    --data-dir) OLD_DATA="$2"; shift 2 ;;
+    --adopt-volumes) ADOPT=1; shift ;;
     --name) NAME="$2"; shift 2 ;;
     --model-dir) MODEL_SRC="$2"; shift 2 ;;
     --memory) MEM="$2"; shift 2 ;;
@@ -120,21 +141,39 @@ case "$TLS_MODE" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate 
 [ -z "$TLS_KEY_SRC" ] || [ -f "$TLS_KEY_SRC" ] || die "--tls-key $TLS_KEY_SRC does not exist"
 [ -z "$A_CA_SRC" ] || [ -f "$A_CA_SRC" ] || die "--arango-ca-cert $A_CA_SRC does not exist"
 
-if [ -z "$DATA_DIR" ]; then
-  DATA_DIR="$IHOME/iter_data"
-  # a machine set up before ~/.iter5 became ~/.iter keeps its data where it is
-  [ -e "$DATA_DIR" ] || [ ! -d "$HOME/.iter5/iter_data" ] || DATA_DIR="$HOME/.iter5/iter_data"
-fi
-ENV_PATH="$IHOME/$NAME.docker.env"
-CTLS_DIR="$DATA_DIR/custom-tls"
+case "$NAME" in ""|*[!A-Za-z0-9_.-]*) die "--name $NAME: letters, digits, - _ . only" ;; esac
+
+# --iter-dir: the folder that holds everything, always ending in /iter
+# (/my/dir/iter/, /my/dir/iter and /my/dir all give /my/dir/iter)
+iter_dir_of() {
+  local d="$1"
+  # shellcheck disable=SC2088  # a literal ~ typed in quotes
+  case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  while [ "${#d}" -gt 1 ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+  [ "${d##*/}" = iter ] || d="${d%/}/iter"
+  printf '%s' "$d"
+}
+PROG=iter_data; [ "$NAME" = iter5 ] || PROG="iter_data_$NAME"
 TLS_CUSTOM=""
+# set_paths: everything below <iter dir>/<PROG>
+set_paths() {
+  D="$ITER_DIR/$PROG"
+  BUILD="$D/docker"
+  CONF_DIR="$D/config"
+  STATE="$D/state"
+  ENV_PATH="$CONF_DIR/data.env"
+  CTLS_HOST_CRT="$CONF_DIR/custom-tls.crt"
+  CTLS_HOST_KEY="$CONF_DIR/custom-tls.key"
+  OLD_KEEP="$D/old-dot-iter"
+}
 
 # the certificate's fingerprint: the line iter_data logs at every start, else openssl
 # on the file (readable on Docker Desktop; on a Linux host the folder is root's)
 fingerprint() {
-  local fp crt="$DATA_DIR/iter/tls.crt"
+  local fp crt="$STATE/tls.crt"
   fp="$(docker logs "$NAME" 2>&1 | sed -n 's/.*TLS certificate fingerprint.*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | tail -1)"
-  [ -z "$TLS_CUSTOM" ] || crt="$CTLS_DIR/tls.crt"
+  [ -z "$TLS_CUSTOM" ] || crt="$CTLS_HOST_CRT"
   if [ -z "$fp" ] && [ -r "$crt" ] && command -v openssl >/dev/null; then
     fp="$(openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
     [ -z "$fp" ] || fp="sha256:$fp"
@@ -142,10 +181,10 @@ fingerprint() {
   printf '%s' "$fp"
 }
 
-# iter_data writes <data-dir>/iter/admin_password_changed once the first admin has
-# chosen their own password; then the first-boot ITER_ADMIN_PASSWORD leaves the env file
+# iter_data writes state/admin_password_changed once the first admin has chosen
+# their own password; then the first-boot ITER_ADMIN_PASSWORD leaves the env file
 admin_changed() {
-  [ -f "$DATA_DIR/iter/admin_password_changed" ] \
+  [ -f "$STATE/admin_password_changed" ] \
     || docker exec "$NAME" test -f /var/lib/iter/admin_password_changed >/dev/null 2>&1
 }
 admin_cleanup() {
@@ -158,38 +197,187 @@ admin_cleanup() {
 
 do_status() {
   local st port scheme=https h fp
-  st="$(docker inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}} since {{.State.StartedAt}}' "$NAME" 2>/dev/null || echo "missing")"
+  st="$(docker inspect -f '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}} since {{.State.StartedAt}}' "$NAME" 2>/dev/null)" || st=missing
   printf '%-12s %s\n' container "$NAME: $st"
-  port="$(docker port "$NAME" 8400/tcp 2>/dev/null | head -1 | sed 's/.*://')"
+  port="$(docker port "$NAME" 8400/tcp 2>/dev/null | head -1 | sed 's/.*://' || true)"
   [ "$(envval ITER_TLS "$ENV_PATH")" != off ] || scheme=http
   TLS_CUSTOM="$(envval ITER_TLS_CERT "$ENV_PATH")"
   if [ -n "$port" ] && h="$(curl -fsSk "$scheme://127.0.0.1:$port/health" 2>/dev/null)"; then printf '%-12s %s\n' health "$scheme://127.0.0.1:$port/ $h"
   else printf '%-12s %s\n' health "no answer${port:+ on $scheme://127.0.0.1:$port}"; fi
   if [ "$scheme" = http ]; then printf '%-12s %s\n' tls "off (plain HTTP, behind a TLS proxy)"
   else fp="$(fingerprint)"; printf '%-12s %s\n' tls "$([ -n "$TLS_CUSTOM" ] && echo custom || echo auto), certificate fingerprint ${fp:-unknown}"; fi
-  printf '%-12s %s\n' data "$DATA_DIR   secrets: $ENV_PATH"
+  printf '%-12s %s\n' files "$D   secrets: $ENV_PATH"
+  [ -z "$OLD_DATA$OLD_ENV" ] || [ -f "$ENV_PATH" ] || printf '%-12s %s\n' older "${OLD_DATA:-$OLD_ENV}: an install from before 2026-10-18; \`install.sh\` moves it into $D"
   admin_cleanup
+}
+
+# ---- where it goes: --iter-dir, else $ITER_DIR, else where the container's
+# files already are (its /var/lib/iter_data mount), else /opt/iter
+CUR_D="" OLD_ENV="" OLD_BUILD="" VOLS=""
+# the docker volume mounted at a path in the container NAME
+vol_at() { docker inspect -f "{{range .Mounts}}{{if and (eq .Type \"volume\") (eq .Destination \"$1\")}}{{.Name}}{{end}}{{end}}" "$NAME" 2>/dev/null || true; }
+discover() {
+  local src
+  # a hand-made setup with its database in named volumes (not this script's)
+  VOL_DB="$(vol_at /var/lib/arangodb3)" VOL_APPS="$(vol_at /var/lib/arangodb3-apps)" VOL_ITER="$(vol_at /var/lib/iter)"
+  VOLS="$VOL_DB$VOL_ITER"
+  src="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/iter_data"}}{{.Source}}{{end}}{{end}}' "$NAME" 2>/dev/null || true)"
+  if [ -n "$src" ] && [ -d "$src" ]; then
+    # this layout has config/ or state/; the older one has iter/ and arango/ at the top
+    if [ -d "$src/config" ] || [ -d "$src/state" ]; then CUR_D="$src"; else [ -n "$OLD_DATA" ] || OLD_DATA="$src"; fi
+  fi
+  if [ -n "$ITER_DIR_OPT" ]; then ITER_DIR="$(iter_dir_of "$ITER_DIR_OPT")"
+  elif [ -n "$CUR_D" ]; then ITER_DIR="$(dirname "$CUR_D")"
+  else ITER_DIR=/opt/iter; fi
+  set_paths
+  # an install from before 2026-10-18: ~/.iter (or ~/.iter5, before that)
+  local h
+  for h in "$IHOME" "$HOME/.iter5"; do
+    [ -n "$OLD_DATA" ] || [ ! -d "$h/iter_data" ] || OLD_DATA="$h/iter_data"
+    [ -n "$OLD_ENV" ] || [ ! -f "$h/$NAME.docker.env" ] || OLD_ENV="$h/$NAME.docker.env"
+    [ -n "$OLD_BUILD" ] || [ ! -d "$h/$NAME-docker" ] || OLD_BUILD="$h/$NAME-docker"
+  done
+  if [ -n "$OLD_DATA" ]; then
+    OLD_DATA="${OLD_DATA%/}"
+    case "$OLD_DATA" in "$D"|"$D"/*) OLD_DATA="" ;; esac
+    [ -z "$OLD_DATA" ] || [ -d "$OLD_DATA" ] || die "--data-dir $OLD_DATA does not exist"
+  fi
+  [ -z "$CUR_D" ] || [ "$CUR_D" != "$D" ] || CUR_D=""
 }
 
 # ---- 1. docker
 command -v docker >/dev/null || die "docker is not installed (https://docs.docker.com/engine/install/)"
 docker info >/dev/null 2>&1 || die "docker is installed but the daemon does not answer (start Docker, or add yourself to the docker group)"
 docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing (docker-compose-plugin)"
+discover
 if [ "$CMD" = status ]; then do_status; exit 0; fi
 DARCH="$(docker info --format '{{.Architecture}}')"
 case "$DARCH" in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; *) die "unsupported docker architecture $DARCH" ;; esac
 ASSET="iter_data-linux-$ARCH"
 say "docker $(docker version --format '{{.Server.Version}}') on $ARCH"
 
-# ---- 2. the build folder: this folder, or (piped from curl) ~/.iter/<name>-docker
+# ---- 2. the iter dir: <iter dir> (root's when it needs sudo), <iter dir>/iter_data
+# (yours, owner-only: secrets live in it; the container, as root, writes state/,
+# arango/ and backups/ into it)
+# mv as you, or with sudo where the container (root) owns the source (a Linux host)
+mvp() { if [ "$DRY" = 1 ]; then echo "  + mv $1 $2"; elif [ -O "$1" ]; then mv "$1" "$2"; else sudo mv "$1" "$2"; fi; }
+# the nearest folder that exists: can this user make DIR below it?
+can_make() { local d="$1"; while [ ! -d "$d" ]; do d="$(dirname "$d")"; done; [ -w "$d" ]; }
+make_root() {
+  [ ! -d "$ITER_DIR" ] || return 0
+  if can_make "$ITER_DIR"; then run mkdir -p "$ITER_DIR"
+  else run sudo install -d -m 755 "$ITER_DIR"; fi
+}
+make_dirs() {
+  if [ ! -d "$D" ]; then
+    if can_make "$D"; then run mkdir -p "$D"
+    else run sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$D"; fi
+  fi
+  [ "$DRY" = 1 ] || [ -w "$D" ] || die "$D is not writable by $(id -un): chown it to yourself, or pick another --iter-dir"
+  run chmod 700 "$D"
+  run mkdir -p "$BUILD" "$CONF_DIR" "$D/arango" "$D/backups"
+  run chmod 700 "$CONF_DIR"
+}
+# Docker Desktop shares only some host folders with its VM (macOS: /Users,
+# /Volumes, /private, /tmp, /var/folders): a mount of anything else fails
+check_share() {
+  if [ "$DRY" = 1 ]; then echo "  + check that docker can mount $D (docker run --rm -v $D:/x debian:bookworm-slim true)"; return; fi
+  docker run --rm -v "$D:/x" debian:bookworm-slim true >/dev/null 2>&1 && return 0
+  docker run --rm -v "$D:/x" debian:bookworm-slim true 2>&1 | tail -3 >&2 || true
+  die "docker cannot mount $D. Docker Desktop: add $ITER_DIR in Settings -> Resources -> File sharing (and Apply), or rerun with --iter-dir under your home (e.g. --iter-dir ~/iter)"
+}
+# the container stopped (not removed: compose recreates it) before its files move
+stop_container() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ] || return 0
+  say "stopping container $NAME while its files move"
+  run docker stop "$NAME"
+}
+# an install at another iter dir: its whole folder moves to this one
+relocate() {
+  [ -n "$CUR_D" ] || return 0
+  [ ! -e "$D" ] || [ -z "$(ls -A "$D" 2>/dev/null)" ] || die "$NAME's files are in $CUR_D, and $D is not empty: move one of them yourself, or rerun with --iter-dir $(dirname "$CUR_D")"
+  say "moving $CUR_D -> $D (the container's files, from its old iter dir)"
+  stop_container
+  if [ -d "$D" ]; then run rmdir "$D"; fi
+  if [ -w "$ITER_DIR" ] && [ -O "$CUR_D" ]; then run mv "$CUR_D" "$D"; else run sudo mv "$CUR_D" "$D"; fi
+}
+# the container NAME kept its database in docker volumes: copied (never moved) into
+# the iter dir with --adopt-volumes, else stop: a fresh database would start beside it
+adopt_volumes() {
+  [ -n "$VOLS" ] || return 0
+  if [ "$ADOPT" = 0 ]; then
+    die "container $NAME keeps its database in docker volumes (${VOL_DB:-none} for /var/lib/arangodb3, ${VOL_ITER:-none} for /var/lib/iter), not in a host folder: this script would start an empty database beside it. Rerun with --adopt-volumes (and --env-file with its ARANGO_ROOT_PASSWORD) to copy them into $D (the volumes stay as they are), or give another --name"
+  fi
+  [ ! -e "$D/arango/data/SERVER" ] || [ "$DRY" = 1 ] || die "$D/arango/data holds a database already: not copying volume $VOL_DB over it"
+  say "copying docker volumes into $D (the volumes are kept)"
+  stop_container
+  local v to
+  for v in "$VOL_DB:arango/data" "$VOL_APPS:arango/apps" "$VOL_ITER:state"; do
+    to="${v#*:}"; v="${v%%:*}"; [ -n "$v" ] || continue
+    run mkdir -p "$D/$to"
+    run docker run --rm -v "$v:/from:ro" -v "$D/$to:/to" debian:bookworm-slim cp -a /from/. /to/
+  done
+}
+# an install from before 2026-10-18: ~/.iter/iter_data (arango/, arango-apps/,
+# iter/, custom-tls/, arango-ca/), ~/.iter/<name>.docker.env, ~/.iter/<name>-docker
+migrate() {
+  [ -n "$OLD_DATA$OLD_ENV$OLD_BUILD" ] || return 0
+  if [ -f "$ENV_PATH" ]; then
+    say "an older install's files are still in ${OLD_DATA:-$OLD_ENV} (not moved: $D already has its own); move or delete them yourself"
+    return 0
+  fi
+  say "moving the install from before 2026-10-18 into $D"
+  stop_container
+  local f
+  if [ -n "$OLD_DATA" ]; then
+    [ ! -e "$D/arango/data" ] || [ "$DRY" = 1 ] || die "$D/arango/data exists already: not moving $OLD_DATA/arango over it"
+    [ ! -e "$OLD_DATA/arango" ] || mvp "$OLD_DATA/arango" "$D/arango/data"
+    [ ! -e "$OLD_DATA/arango-apps" ] || mvp "$OLD_DATA/arango-apps" "$D/arango/apps"
+    [ ! -e "$OLD_DATA/iter" ] || mvp "$OLD_DATA/iter" "$STATE"
+    [ ! -f "$OLD_DATA/custom-tls/tls.crt" ] || mvp "$OLD_DATA/custom-tls/tls.crt" "$CTLS_HOST_CRT"
+    [ ! -f "$OLD_DATA/custom-tls/tls.key" ] || mvp "$OLD_DATA/custom-tls/tls.key" "$CTLS_HOST_KEY"
+    [ ! -f "$OLD_DATA/arango-ca/ca.pem" ] || mvp "$OLD_DATA/arango-ca/ca.pem" "$CONF_DIR/arango-ca.crt"
+    for f in custom-tls arango-ca; do [ ! -d "$OLD_DATA/$f" ] || run rmdir "$OLD_DATA/$f" 2>/dev/null || true; done
+    # anything else in it (backups, your own files) is kept, in old-dot-iter/iter_data/
+    for f in "$OLD_DATA"/* "$OLD_DATA"/.[!.]*; do
+      [ -e "$f" ] || continue
+      case "${f##*/}" in arango|arango-apps|iter|custom-tls|arango-ca) continue ;; esac
+      run mkdir -p "$OLD_KEEP/iter_data"
+      mvp "$f" "$OLD_KEEP/iter_data/"
+    done
+    run rmdir "$OLD_DATA" || say "left $OLD_DATA (not empty)"
+  fi
+  if [ -n "$OLD_ENV" ]; then
+    # the paths inside the container moved with the files
+    if [ "$DRY" = 1 ]; then echo "  + $OLD_ENV -> $ENV_PATH (container paths of custom-tls/ and arango-ca/ rewritten)"
+    else
+      ( umask 077; sed -e 's#/var/lib/iter_data/custom-tls/tls\.crt#/var/lib/iter_data/config/custom-tls.crt#' \
+          -e 's#/var/lib/iter_data/custom-tls/tls\.key#/var/lib/iter_data/config/custom-tls.key#' \
+          -e 's#/var/lib/iter_data/arango-ca/ca\.pem#/var/lib/iter_data/config/arango-ca.crt#' "$OLD_ENV" > "$ENV_PATH" )
+      mkdir -p "$OLD_KEEP"; mv -f "$OLD_ENV" "$OLD_KEEP/"
+    fi
+  fi
+  # the old build folder is made again in docker/; kept aside, not deleted
+  [ -z "$OLD_BUILD" ] || { run mkdir -p "$OLD_KEEP"; mvp "$OLD_BUILD" "$OLD_KEEP/"; }
+  say "kept aside, not deleted: $OLD_KEEP (the old secrets file and build folder; delete it once all is well)"
+  say "moved: database $D/arango/data, iter_data's files $D/state, secrets $ENV_PATH"
+}
+say "iter dir: $ITER_DIR   (iter_data's files: $D)"
+make_root
+relocate
+make_dirs
+check_share
+adopt_volumes
+migrate
+
+# the build folder: this folder's files (a checkout or a downloaded copy), else
+# (piped from curl) fetched from GitHub at --version
 if [ -f "$HERE/Dockerfile" ] && [ -f "$HERE/compose.yml" ]; then
-  BUILD="$HERE"
-  say "building from $BUILD"
+  say "build folder $BUILD (files from $HERE)"
+  if [ "$HERE" != "$BUILD" ]; then for f in "${FILES[@]}"; do run cp "$HERE/$f" "$BUILD/$f"; done; fi
 else
-  BUILD="$IHOME/$NAME-docker"
   ref="${VERSION:-main}"
   say "no Dockerfile beside the script: fetching this folder ($ref) into $BUILD"
-  run mkdir -p "$BUILD"
   for f in "${FILES[@]}"; do
     run curl -fsSL --retry 3 -o "$BUILD/$f" "https://raw.githubusercontent.com/$REPO/$ref/installers/iter_data/docker/$f"
   done
@@ -203,6 +391,9 @@ if [ -n "$BINARY" ]; then
     run cp "$BINARY" "$BUILD/.$ASSET.tmp"
     run mv -f "$BUILD/.$ASSET.tmp" "$BUILD/$ASSET"
   fi
+elif [ -f "$HERE/$ASSET" ] && [ -z "$VERSION" ]; then
+  say "binary: $HERE/$ASSET (beside the script) -> $BUILD/$ASSET"
+  [ "$HERE" = "$BUILD" ] || { run cp "$HERE/$ASSET" "$BUILD/.$ASSET.tmp"; run mv -f "$BUILD/.$ASSET.tmp" "$BUILD/$ASSET"; }
 elif [ -f "$BUILD/$ASSET" ] && [ -z "$VERSION" ]; then
   say "binary: $BUILD/$ASSET (already in the folder)"
 else
@@ -223,7 +414,9 @@ else
 fi
 
 # ---- 4. the embedding model (all-MiniLM-L6-v2, Apache-2.0, ~91 MB)
+# (in the build folder: the image carries it at /opt/iter/models)
 MDIR="$BUILD/models/all-MiniLM-L6-v2"
+[ -n "$MODEL_SRC" ] || [ ! -f "$HERE/models/all-MiniLM-L6-v2/model.safetensors" ] || [ "$HERE" = "$BUILD" ] || MODEL_SRC="$HERE/models/all-MiniLM-L6-v2"
 if [ -f "$MDIR/model.safetensors" ] && [ "$(sha "$MDIR/model.safetensors")" = "$MODEL_SHA" ] && [ -f "$MDIR/tokenizer.json" ]; then
   say "model: $MDIR (present)"
 elif [ -n "$MODEL_SRC" ]; then
@@ -249,12 +442,9 @@ else
   fi
 fi
 
-# ---- 5. data folder and secrets
-say "data: $DATA_DIR   secrets: $ENV_PATH"
-run mkdir -p "$DATA_DIR" "$IHOME"
-# owner-only: iter_data's secrets, engine_session.secret and tls.key live in it
-run chmod 700 "$DATA_DIR"
-# true when PATH exists, or might: on a Linux host the container makes iter/ owner-only
+# ---- 5. secrets
+say "secrets: $ENV_PATH"
+# true when PATH exists, or might: on a Linux host the container makes state/ owner-only
 # as root, so this user cannot look inside it
 present() { [ -e "$1" ] || { [ -d "$(dirname "$1")" ] && ! [ -x "$(dirname "$1")" ]; }; }
 
@@ -302,13 +492,12 @@ if is_local "$OLD_URL" && [ -f "$ENV_PATH" ]; then
   STASH_ROOT="$(envval ARANGO_ROOT_PASSWORD "$ENV_PATH")"; STASH_PW="$(envval ARANGO_PASSWORD "$ENV_PATH")"
 fi
 A_FP="" A_CA="" A_PLAIN=""
-CA_DIR="$DATA_DIR/arango-ca"
-A_CA_IN=/var/lib/iter_data/arango-ca/ca.pem
+A_CA_IN=/var/lib/iter_data/config/arango-ca.crt
 if [ -z "$A_URL" ]; then
   [ -z "$A_FP_OPT$A_CA_SRC" ] || die "--arango-fingerprint / --arango-ca-cert are for an external ArangoDB (--arango-url)"
   [ -n "$A_ROOT" ] || A_ROOT="$STASH_ROOT"
   if [ -z "$A_ROOT" ]; then
-    if present "$DATA_DIR/arango/SERVER"; then
+    if present "$D/arango/data/SERVER"; then
       A_ROOT=iter4dev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
     else
       A_ROOT="$(gen 24)"; say "generated an Arango root password (kept in $ENV_PATH)"
@@ -340,9 +529,8 @@ else
   fi
   if [ -n "$A_CA_SRC" ]; then
     A_CA="$A_CA_IN"
-    say "ArangoDB CA: $A_CA_SRC (copied into $CA_DIR)"
-    run mkdir -p "$CA_DIR"
-    run install -m 644 "$A_CA_SRC" "$CA_DIR/ca.pem"
+    say "ArangoDB CA: $A_CA_SRC (copied to $CONF_DIR/arango-ca.crt)"
+    run install -m 644 "$A_CA_SRC" "$CONF_DIR/arango-ca.crt"
   else
     A_CA="$(apick ARANGO_CA_CERT)"
   fi
@@ -361,24 +549,24 @@ if [ -n "$ADMIN_PW" ] && admin_changed; then
   say "the admin has chosen their own password: ITER_ADMIN_PASSWORD is left out of $ENV_PATH"; ADMIN_PW=""
 fi
 if [ -z "$JWT" ]; then
-  if present "$DATA_DIR/iter/iter_data.secret"; then
-    say "no ITER_JWT_SECRET given: iter_data keeps using $DATA_DIR/iter/iter_data.secret"
+  if present "$STATE/iter_data.secret"; then
+    say "no ITER_JWT_SECRET given: iter_data keeps using $STATE/iter_data.secret"
   else
     JWT="$(gen 48)"; say "generated a new ITER_JWT_SECRET"
   fi
 fi
 if [ -z "$ADMIN_PW" ]; then
   # iter_data only reads it when it creates admin, i.e. on an empty database
-  if [ -z "$A_URL" ] && present "$DATA_DIR/arango/SERVER"; then say "existing database: admin keeps its password"
-  elif [ -n "$A_URL" ] && present "$DATA_DIR/iter/iter_data.secret"; then say "iter_data has run here before: admin keeps its password"
+  if [ -z "$A_URL" ] && present "$D/arango/data/SERVER"; then say "existing database: admin keeps its password"
+  elif [ -n "$A_URL" ] && present "$STATE/iter_data.secret"; then say "iter_data has run here before: admin keeps its password"
   else ADMIN_PW="$(gen 20)"; FRESH_ADMIN=1; fi
 fi
 
 # TLS: the flags given now, else what the secrets file kept from an earlier run.
-# A certificate of your own is copied to <data-dir>/custom-tls/ (owner-only) and
-# read by iter_data at /var/lib/iter_data/custom-tls/ inside the container.
-CTLS_CERT=/var/lib/iter_data/custom-tls/tls.crt
-CTLS_KEY=/var/lib/iter_data/custom-tls/tls.key
+# A certificate of your own is copied to config/custom-tls.crt + .key (owner-only)
+# and read by iter_data at /var/lib/iter_data/config/ inside the container.
+CTLS_CERT=/var/lib/iter_data/config/custom-tls.crt
+CTLS_KEY=/var/lib/iter_data/config/custom-tls.key
 TLS_OFF="$(pick ITER_TLS)"; [ "$TLS_OFF" = off ] || TLS_OFF=""
 TLS_CUSTOM="$(pick ITER_TLS_CERT)"
 NAMES="$(pick ITER_TLS_NAMES)"
@@ -388,16 +576,14 @@ case "$TLS_MODE" in
 esac
 if [ -n "$TLS_CERT_SRC" ]; then
   TLS_OFF=""; TLS_CUSTOM="$CTLS_CERT"
-  say "TLS: serving your certificate $TLS_CERT_SRC (copied into $CTLS_DIR)"
-  run mkdir -p "$CTLS_DIR"
-  run chmod 700 "$CTLS_DIR"
-  run install -m 644 "$TLS_CERT_SRC" "$CTLS_DIR/tls.crt"
-  run install -m 600 "$TLS_KEY_SRC" "$CTLS_DIR/tls.key"
+  say "TLS: serving your certificate $TLS_CERT_SRC (copied to $CTLS_HOST_CRT)"
+  run install -m 644 "$TLS_CERT_SRC" "$CTLS_HOST_CRT"
+  run install -m 600 "$TLS_KEY_SRC" "$CTLS_HOST_KEY"
 fi
 if [ ${#TLS_NAMES[@]} -gt 0 ]; then NAMES="$(IFS=,; echo "${TLS_NAMES[*]}")"; fi
 if [ "$TLS_OFF" = off ]; then say "TLS: off (plain HTTP): only for iter_data behind a TLS proxy; engines refuse plain http across a network"
-elif [ -n "$TLS_CUSTOM" ]; then [ -n "$TLS_CERT_SRC" ] || say "TLS: your certificate in $CTLS_DIR (kept from the last run)"
-else say "TLS: a self-signed certificate (made on first start, kept in $DATA_DIR/iter)${NAMES:+, extra names $NAMES}"; fi
+elif [ -n "$TLS_CUSTOM" ]; then [ -n "$TLS_CERT_SRC" ] || say "TLS: your certificate $CTLS_HOST_CRT (kept from the last run)"
+else say "TLS: a self-signed certificate (made on first start, kept in $STATE)${NAMES:+, extra names $NAMES}"; fi
 if [ "$DRY" = 1 ]; then
   echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_* settings, TLS settings"
 else
@@ -429,7 +615,7 @@ esac
 compose=(docker compose -p "$NAME" -f "$BUILD/compose.yml")
 [ "$ARANGO_PORT" = 0 ] || compose+=(-f "$BUILD/compose.console.yml")
 say "building image $NAME:latest and starting container $NAME (:$PORT$([ "$ARANGO_PORT" = 0 ] || echo ", console 127.0.0.1:$ARANGO_PORT"))"
-export ITER_NAME="$NAME" ITER_PORT="$PORT" ARANGO_HOST_PORT="$ARANGO_PORT" ITER_DATA_DIR="$DATA_DIR" \
+export ITER_NAME="$NAME" ITER_PORT="$PORT" ARANGO_HOST_PORT="$ARANGO_PORT" ITER_DATA_DIR="$D" \
   ITER_ENV_PATH="$ENV_PATH" ITER_MEM_LIMIT="$MEM" ITER_ARANGO_MEMORY="$AMEM"
 run "${compose[@]}" up -d --build
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # entrypoint of the iter engine container. With ITER_UID / ITER_GID /
 # ITER_HOME_DIR set (compose.yml), it runs the command as that uid/gid with
-# HOME = ITER_HOME_DIR, the host user's own home path, so the engine's
-# ~/.iter and the ~/dev/<project> checkouts are the same absolute paths inside
-# and outside. Without them it runs the command as is (`docker run --rm image
+# HOME = ITER_HOME_DIR, the host user's own home path, so the engine's folder
+# (ITER_HOME = <iter dir>/iter_engine) and the ~/dev/<project> checkouts are the
+# same absolute paths inside and outside. Without them it runs the command as is (`docker run --rm image
 # iter_engine --help`). No command = the engine itself.
 set -euo pipefail
 
 if [ $# -eq 0 ]; then
   : "${ITER_DATA_URL:?ITER_DATA_URL is not set}" "${ITER_ENGINE:?ITER_ENGINE is not set}"
-  h="${ITER_HOME_DIR:-$HOME}"
+  : "${ITER_HOME:?ITER_HOME is not set: the folder of the engine, <iter dir>/iter_engine}"
   set -- iter_engine --data-url "$ITER_DATA_URL" --name "$ITER_ENGINE" \
-    --env-file "$h/.iter/.env" --key-file "$h/.iter/engine.key"
+    --env-file "$ITER_HOME/secrets/.env" --key-file "$ITER_HOME/secrets/engine.key"
   # ITER_SECRETS_COMMAND is read by iter_engine itself; the interval is a flag
   [ -z "${ITER_SECRETS_EVERY:-}" ] || set -- "$@" --secrets-every "$ITER_SECRETS_EVERY"
 fi

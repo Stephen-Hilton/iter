@@ -6,8 +6,9 @@
 # not touched), plus iter_data's env and secret files (secrets,
 # engine_session.secret, the TLS certificate), as one tar in $ITER_BACKUP_DIR;
 # the newest $ITER_BACKUP_KEEP are kept. Run by iter-backup.timer (install.sh)
-# as user iter, with /etc/iter/data.env and /etc/iter/backup.env in its
-# environment. Works the same against a local or an external ArangoDB
+# as user iter, with config/data.env and config/backup.env in its environment;
+# it finds them, state/ and arango/bin in iter_data's folder, the one above
+# this script's bin/. Works the same against a local or an external ArangoDB
 # (ARANGO_URL); over https the certificate is checked first against
 # ARANGO_CERT_FINGERPRINT or ARANGO_CA_CERT, because arangodump does not.
 #
@@ -19,8 +20,10 @@
 # Arango's own system collections are left out: iter_user may not restore them,
 # and iter_data recreates what it needs from them (its named graph) at start.
 set -euo pipefail
-: "${ARANGO_PASSWORD:?ARANGO_PASSWORD is not set (run via iter-backup.service, or with /etc/iter/data.env exported)}"
-DEST="${ITER_BACKUP_DIR:-/var/backups/iter}"
+D="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+export PATH="$D/arango/bin:$PATH"
+: "${ARANGO_PASSWORD:?ARANGO_PASSWORD is not set (run via iter-backup.service, or with config/data.env exported)}"
+DEST="${ITER_BACKUP_DIR:-$D/backups}"
 KEEP="${ITER_BACKUP_KEEP:-28}"
 URL="${ARANGO_URL:-http://127.0.0.1:8529}"
 USER_="${ARANGO_USER:-iter_user}"
@@ -55,7 +58,7 @@ check_cert() {
   fi
 }
 
-ARGS=(--server.endpoint "$ENDPOINT" --server.username "$USER_" --server.password "$ARANGO_PASSWORD"
+ARGS=(--configuration none --server.endpoint "$ENDPOINT" --server.username "$USER_" --server.password "$ARANGO_PASSWORD"
       --server.database "$DB" --include-system-collections false --log.level warning)
 tmp=$(mktemp -d)                      # dump on the local disk, then one copy out
 trap 'rm -rf "$tmp"' EXIT
@@ -73,9 +76,9 @@ fi
 ts=$(date -u +%Y%m%d-%H%M%SZ)
 check_cert
 arangodump "${ARGS[@]}" --threads 2 --output-directory "$tmp/db"
-cp -a /etc/iter/data.env "$tmp/"
+cp -a "$D/config/data.env" "$tmp/"
 for f in iter_data.secret engine_session.secret tls.crt tls.key custom-tls.crt custom-tls.key .env; do
-  if [ -f "/var/lib/iter/$f" ]; then cp -a "/var/lib/iter/$f" "$tmp/"; fi
+  if [ -f "$D/state/$f" ]; then cp -a "$D/state/$f" "$tmp/"; fi
 done
 mkdir -p "$DEST"
 tar -C "$tmp" -cf "$DEST/.iter5-$ts.tar.part" .

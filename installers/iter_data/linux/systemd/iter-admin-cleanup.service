@@ -1,8 +1,8 @@
 [Unit]
-Description=iter: remove ITER_ADMIN_PASSWORD from /etc/iter/data.env (and its SSM copy on AWS)
+Description=iter: remove ITER_ADMIN_PASSWORD from iter_data's config/data.env (and its SSM copy on AWS)
 
 [Service]
 Type=oneshot
 # stays "active" after it ran, so the path unit does not start it again and again
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/iter-admin-cleanup
+ExecStart=@D@/bin/iter-admin-cleanup

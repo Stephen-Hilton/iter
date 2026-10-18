@@ -16,10 +16,14 @@
 #   accounts    ask for each account token the served projects name
 #   projects    clone each served project that has no checkout yet (on the host)
 #   logs        follow the container's log
-#   uninstall   stop and remove the container and its image (keeps ~/.iter and the checkouts)
+#   uninstall   stop and remove the container and its image (keeps <iter dir>/iter_engine and the checkouts)
 #
 # Options:
-#   --data-url URL    iter_data URL, https:// (else asked; kept in ~/.iter/engine.conf).
+#   --iter-dir DIR    the folder that holds everything iter installs [/opt/iter; $ITER_DIR;
+#                     later runs: where it is installed]. Forgiving: /my/dir/iter/, /my/dir/iter
+#                     and /my/dir all mean /my/dir/iter. The engine's files go in
+#                     <iter dir>/iter_engine (also spelled --iter_dir)
+#   --data-url URL    iter_data URL, https:// (else asked; kept in config/engine.conf).
 #                     iter_data on this same host: https://host.docker.internal:<port>, not
 #                     127.0.0.1 (the script rewrites 127.0.0.1 and localhost)
 #   --name NAME       this engine's name, unique per machine (default: the hostname)
@@ -34,8 +38,8 @@
 #   --secrets-command CMD  a shell command printing KEY=value lines (the account tokens,
 #                     from a secret store); it runs INSIDE the container (add the CLI it
 #                     needs to the Dockerfile), at startup and every --secrets-every
-#                     minutes, values in memory only. Kept in ~/.iter/engine.conf and
-#                     ~/.iter/docker/secrets_command; "none" removes it. With it, the
+#                     minutes, values in memory only. Kept in config/engine.conf and
+#                     docker/secrets_command; "none" removes it. With it, the
 #                     accounts step asks for no tokens.
 #   --secrets-every N  minutes between secrets-command runs [5]
 #   --yes             answer yes to every question; update while work runs
@@ -43,26 +47,31 @@
 #   -h, --help        this text
 #   ($ITER_RELEASE_URL: download the binary and SHA256SUMS from this base URL instead)
 #
-# What it sets up: ~/.iter/docker = the build folder (Dockerfile, entrypoint.sh,
-# compose.yml from beside this script, else from GitHub at --version; the
-# iter_engine-linux-<arch> binary; .env with the compose settings;
-# compose.override.yml mounting the git credentials it finds read-only:
-# ~/.ssh, ~/.gitconfig, ~/.git-credentials, ~/.config/gh). ~/.iter (key, .env
-# with account tokens, engine.conf, models/, claude/ = the container's claude
-# config) and the checkouts are mounted at the same absolute paths, and the
-# container runs as your uid/gid with HOME = your home path, so files it
-# writes are yours and ~/dev/<project> topdirs match. Credentials for claude
-# come from the account tokens in ~/.iter/.env (`claude setup-token`); the
-# host's own claude login is not shared.
+# What it sets up, all in <iter dir>/iter_engine (yours): docker/ = the build
+# folder (Dockerfile, entrypoint.sh, compose.yml from beside this script, else
+# from GitHub at --version; the iter_engine-linux-<arch> binary; .env with the
+# compose settings; compose.override.yml mounting the git credentials it finds
+# read-only: ~/.ssh, ~/.gitconfig, ~/.git-credentials, ~/.config/gh), config/
+# (engine.conf, server_trust.json), secrets/ (engine.key, .env with the account
+# tokens), models/, claude/ (the container's claude config). That folder and the
+# checkouts are mounted at the same absolute paths (ITER_HOME = the folder), and
+# the container runs as your uid/gid with HOME = your home path, so files it
+# writes are yours and ~/dev/<project> topdirs match. Credentials for claude come
+# from the account tokens in secrets/.env (`claude setup-token`); the host's own
+# claude login is not shared. An install from before 2026-10-18 (~/.iter) is
+# moved in once (mv, never deleted: what is not the engine's goes to
+# old-dot-iter/). Docker Desktop (macOS): the iter dir must be a shared folder
+# (Settings -> Resources -> File sharing; /opt is not shared by default), or
+# --iter-dir ~/iter.
 #
 # HTTPS: iter_data must be https:// (it serves HTTPS by default); plain http://
 # is refused, because from inside the container iter_data is always across a
 # network, even on this host. The engine pins iter_data's certificate
-# fingerprint in ~/.iter/server_trust.json: --fingerprint (or the fingerprint
+# fingerprint in config/server_trust.json: --fingerprint (or the fingerprint
 # pasted when asked) runs `iter_engine key trust` in the image right after it
 # is built and stops if the server presents another certificate; without one,
 # the first sign-in trusts the certificate it sees (compare: install.sh status).
-# Key commands, in ~/.iter/docker: docker compose run --rm --no-deps engine
+# Key commands, in <iter dir>/iter_engine/docker: docker compose run --rm --no-deps engine
 # iter_engine key show (the public key) | key rotate (a new key, signed by the
 # current one, no webui step) | key status.
 set -euo pipefail
@@ -70,19 +79,15 @@ set -euo pipefail
 REPO_SLUG="Stephen-Hilton/iter"
 HERE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; fi
+# where an install from before 2026-10-18 kept everything
 IHOME="$HOME/.iter"
-# iter_engine (in the image, with HOME = your home path) keeps its key and
-# server_trust.json in ~/.iter, the mounted folder
-CONF="$IHOME/engine.conf"
-ENVF="$IHOME/.env"
-KEYF="$IHOME/engine.key"
-MODEL="$IHOME/models/all-MiniLM-L6-v2"
-CTX="$IHOME/docker"
+ITER_DIR_OPT="${ITER_DIR:-}"
 
 VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_CHECKOUTS="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|update|accounts|projects|logs|uninstall) VERB="$1" ;;
+    --iter-dir|--iter_dir) ITER_DIR_OPT="${2:?--iter-dir needs a folder}"; shift ;;
     --data-url) OPT_URL="${2:?--data-url needs a URL}"; shift ;;
     --name) OPT_NAME="${2:?--name needs a name}"; shift ;;
     --checkouts) OPT_CHECKOUTS="${2:?--checkouts needs a folder}"; shift ;;
@@ -128,6 +133,40 @@ expand() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s/%s' "$HOME
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 [ "$(id -u)" != 0 ] || die "run this as your own user, not root (the container runs as you)"
+
+# --iter-dir: the folder that holds everything, always ending in /iter
+# (/my/dir/iter/, /my/dir/iter and /my/dir all give /my/dir/iter)
+iter_dir_of() {
+  local d="$1"
+  # shellcheck disable=SC2088  # a literal ~ typed in quotes
+  case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  while [ "${#d}" -gt 1 ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+  [ "${d##*/}" = iter ] || d="${d%/}/iter"
+  printf '%s' "$d"
+}
+# where it goes: --iter-dir, else $ITER_DIR, else where the container's build
+# folder already is (<iter dir>/iter_engine/docker), else /opt/iter. A container
+# built in ~/.iter/docker is an install from before 2026-10-18.
+CUR_E="" OLD_CTX=""
+wd="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' iter-engine 2>/dev/null || true)"
+case "$wd" in
+  */iter_engine/docker) [ ! -d "$wd" ] || CUR_E="${wd%/docker}" ;;
+  */docker) [ ! -f "$wd/compose.yml" ] || OLD_CTX="$wd" ;;
+esac
+if [ -n "$ITER_DIR_OPT" ]; then ITER_DIR="$(iter_dir_of "$ITER_DIR_OPT")"
+elif [ -n "$CUR_E" ]; then ITER_DIR="$(dirname "$CUR_E")"
+else ITER_DIR=/opt/iter; fi
+E="$ITER_DIR/iter_engine"
+[ "$CUR_E" != "$E" ] || CUR_E=""
+[ -n "$OLD_CTX" ] || [ ! -f "$IHOME/docker/compose.yml" ] || OLD_CTX="$IHOME/docker"
+# iter_engine (in the image, ITER_HOME = this folder) keeps its key, env file
+# and server_trust.json here, the mounted folder
+CONF="$E/config/engine.conf"
+ENVF="$E/secrets/.env"
+KEYF="$E/secrets/engine.key"
+MODEL="$E/models/all-MiniLM-L6-v2"
+CTX="$E/docker"
 [ $DRY = 0 ] || printf '\033[1mdry run:\033[0m every action is printed, nothing is changed\n'
 
 # the image's platform is the Docker host's (Docker Desktop on Apple silicon = arm64)
@@ -143,13 +182,15 @@ load_conf() {
   [ -n "$DATA_URL" ] || DATA_URL="$(confval DATA_URL)"
   [ -n "$ENGINE" ] || ENGINE="$(confval ENGINE)"
   [ -n "$CHECKOUTS" ] || CHECKOUTS="${OPT_CHECKOUTS:-$(envval ITER_CHECKOUTS "$CTX/.env")}"
+  # (an install moved in from ~/.iter: its build folder's settings)
+  [ -n "$CHECKOUTS" ] || CHECKOUTS="$(envval ITER_CHECKOUTS "$E/old-dot-iter/docker/.env")"
   [ $SC_GIVEN = 1 ] || [ -n "$SECRETS_COMMAND" ] || SECRETS_COMMAND="$(confval SECRETS_COMMAND)"
   [ -n "$SECRETS_EVERY" ] || SECRETS_EVERY="$(confval SECRETS_EVERY)"
 }
 
 # ------------------------------------------------------------------ secrets command
 # --secrets-command / --secrets-every: given now, else kept in engine.conf. The
-# container gets it as ITER_SECRETS_COMMAND="sh ~/.iter/docker/secrets_command"
+# container gets it as ITER_SECRETS_COMMAND="sh <iter dir>/iter_engine/docker/secrets_command"
 # (a file, so the command needs no quoting through compose) and ITER_SECRETS_EVERY.
 SECRETS_COMMAND="" SECRETS_EVERY=""
 SC_FILE="$CTX/secrets_command"
@@ -190,10 +231,10 @@ in_image() { dc run --rm --no-deps -T engine "$@"; }
 image_ready() { [ -f "$CTX/compose.yml" ] && docker image inspect iter-engine:local >/dev/null 2>&1; }
 # ------------------------------------------------------------------ iter_data over HTTPS
 # iter_data serves HTTPS with its own (self-signed) certificate. The engine pins
-# that certificate's fingerprint in ~/.iter/server_trust.json (one entry per
+# that certificate's fingerprint in config/server_trust.json (one entry per
 # scheme://host:port), and plain http:// is only for this machine. The script's
 # own API calls check the certificate the same way.
-TRUSTF="$IHOME/server_trust.json"
+TRUSTF="$E/config/server_trust.json"
 # the trust file's key for a URL: scheme://host:port, lowercased
 trust_origin() {
   local u="${1%/}" s r hp port=80
@@ -219,7 +260,7 @@ check_url() {
     *) die "$1: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" ;;
   esac
 }
-# does ~/.iter/server_trust.json have an entry for this URL yet?
+# does config/server_trust.json have an entry for this URL yet?
 has_trust() { [ -f "$TRUSTF" ] && grep -qF "\"$(trust_origin "$1")\"" "$TRUSTF"; }
 # PINOPT = curl options (used inside the image, where curl, jq and openssl are) that check iter_data's certificate as the engine does:
 # none for http:// to this machine or a --ca trust; for a pinned certificate, -k
@@ -286,6 +327,92 @@ docker_ok() {
   fi
 }
 
+# ------------------------------------------------------------------ the iter dir
+# <iter dir> (root's when it needs sudo), <iter dir>/iter_engine (yours: the
+# container runs as you and writes into it)
+can_make() { local d="$1"; while [ ! -d "$d" ]; do d="$(dirname "$d")"; done; [ -w "$d" ]; }
+make_dirs() {
+  if [ ! -d "$ITER_DIR" ]; then
+    if can_make "$ITER_DIR"; then run mkdir -p "$ITER_DIR"; else run sudo install -d -m 755 "$ITER_DIR"; fi
+  fi
+  relocate
+  if [ ! -d "$E" ]; then
+    if can_make "$E"; then run mkdir -p "$E"; else run sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" "$E"; fi
+  fi
+  [ $DRY = 1 ] || [ -w "$E" ] || die "$E is not writable by $(id -un): chown it to yourself, or pick another --iter-dir"
+  run mkdir -p "$E/config" "$E/secrets" "$E/models" "$E/claude" "$CTX"
+  run chmod 700 "$E/secrets"
+}
+# an install at another iter dir: its container stops and its folder moves here
+relocate() {
+  [ -n "$CUR_E" ] || return 0
+  [ ! -e "$E" ] || [ -z "$(ls -A "$E" 2>/dev/null)" ] || die "the engine's files are in $CUR_E, and $E is not empty: move one of them yourself, or rerun with --iter-dir $(dirname "$CUR_E")"
+  say "moving $CUR_E -> $E"
+  run bash -c "cd '$CUR_E/docker' && docker compose --progress quiet down"
+  [ ! -d "$E" ] || run rmdir "$E"
+  if [ -w "$ITER_DIR" ]; then run mv "$CUR_E" "$E"; else run sudo mv "$CUR_E" "$E"; fi
+}
+# Docker Desktop shares only some host folders with its VM (macOS: /Users,
+# /Volumes, /private, /tmp, /var/folders): a mount of anything else fails
+check_share() {
+  if [ $DRY = 1 ]; then printf '    [dry-run] check that docker can mount %s\n' "$E"; return; fi
+  docker run --rm -v "$E:/x" debian:bookworm-slim true >/dev/null 2>&1 && { ok "docker can mount $E"; return; }
+  docker run --rm -v "$E:/x" debian:bookworm-slim true 2>&1 | tail -3 >&2 || true
+  die "docker cannot mount $E. Docker Desktop: add $ITER_DIR in Settings -> Resources -> File sharing (and Apply), or rerun with --iter-dir under your home (e.g. --iter-dir ~/iter)"
+}
+# an install from before 2026-10-18 kept everything in ~/.iter (~/.iter5 before
+# that): its container stops, and each file moves to its place here. Anything
+# else of the engine's goes to old-dot-iter/ (moved, never deleted); iter_data's
+# files there (iter_data/, *.docker.env, *-docker/) are left for its installer.
+migrate() {
+  local old="$IHOME" f n
+  [ -d "$old" ] || { [ -d "$HOME/.iter5" ] && [ ! -L "$HOME/.iter5" ] && old="$HOME/.iter5"; } || return 0
+  [ -d "$old" ] || return 0
+  [ -f "$old/engine.conf" ] || [ -f "$old/engine.key" ] || [ -d "$old/docker" ] || return 0
+  if [ -f "$CONF" ] || [ -f "$KEYF" ]; then
+    warn "an older install's files are still in $old (not moved: $E already has its own); move or delete them yourself"; return 0
+  fi
+  say "moving the install from before 2026-10-18 ($old) into $E"
+  if [ -n "$OLD_CTX" ] && [ -f "$OLD_CTX/compose.yml" ]; then
+    if [ "$(docker inspect -f '{{.State.Running}}' iter-engine 2>/dev/null)" = true ]; then
+      yes_no "the container iter-engine stops while its files move (work running in it stops): go on?" || die "nothing moved; set the engine's projects Draining, wait, then run this again"
+    fi
+    run bash -c "cd '$OLD_CTX' && docker compose --progress quiet down"
+  fi
+  for f in engine.conf server_trust.json; do [ ! -e "$old/$f" ] || run mv "$old/$f" "$E/config/$f"; done
+  for f in "$old"/engine.key "$old"/engine.key.* "$old"/.env; do [ ! -e "$f" ] || run mv "$f" "$E/secrets/"; done
+  # config/ and secrets/: a newer iter_engine already wrote there (pinned certificates)
+  local sub; for sub in config secrets; do
+    [ -d "$old/$sub" ] || continue
+    for f in "$old/$sub"/* "$old/$sub"/.[!.]*; do [ ! -e "$f" ] || [ -e "$E/$sub/${f##*/}" ] || run mv "$f" "$E/$sub/"; done
+    run rmdir "$old/$sub" 2>/dev/null || true
+  done
+  if [ -d "$old/models" ]; then
+    for f in "$old"/models/*; do [ ! -e "$f" ] || [ -e "$E/models/${f##*/}" ] || run mv "$f" "$E/models/"; done
+    run rmdir "$old/models" 2>/dev/null || true
+  fi
+  [ ! -d "$old/claude" ] || [ -n "$(ls -A "$E/claude" 2>/dev/null)" ] || { run rmdir "$E/claude"; run mv "$old/claude" "$E/claude"; }
+  # the rest of the engine's (the old build folder, logs, models left over): kept aside
+  for f in "$old"/* "$old"/.[!.]*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    n="${f##*/}"
+    case "$n" in iter_data|*.docker.env|*-docker|data.env) continue ;; esac
+    # (in a dry run these are still here)
+    case "$n" in engine.conf|server_trust.json|engine.key|engine.key.*|.env|claude|models|config|secrets) [ $DRY = 0 ] || continue ;; esac
+    run mkdir -p "$E/old-dot-iter"
+    run mv "$f" "$E/old-dot-iter/"
+  done
+  if run rmdir "$old" 2>/dev/null; then
+    ok "moved $old into $E (and removed the empty $old)"
+    # ~/.iter5 was a link to ~/.iter: kept beside the rest
+    if [ -L "$HOME/.iter5" ]; then run mv "$HOME/.iter5" "$E/old-dot-iter/iter5-link"; fi
+  else
+    local left=""; for f in "$old"/* "$old"/.[!.]*; do [ ! -e "$f" ] || left="$left ${f##*/}"; done
+    ok "moved the engine's files from $old into $E; $old keeps what is not the engine's:$left"
+  fi
+  [ ! -d "$E/old-dot-iter" ] || ok "kept aside, not deleted: $E/old-dot-iter (the old build folder and the like; delete it once all is well)"
+}
+
 settings() {
   say "2/8 iter_data, this engine's name, the checkouts folder"
   load_conf
@@ -312,8 +439,8 @@ settings() {
   local co; co="$(ask "the host folder that holds the project checkouts [${CHECKOUTS:-$HOME/dev}]:" "${CHECKOUTS:-$HOME/dev}")"
   co="$(expand "$co")"; co="${co%/}"
   case "$co" in /*) ;; *) die "the checkouts folder must be an absolute path" ;; esac
-  case "$co" in "$HOME"|"$IHOME"|"$IHOME"/*) die "the checkouts folder must be a folder of its own (e.g. ~/dev), not $co" ;; esac
-  run mkdir -p "$IHOME" "$co" "$IHOME/claude" "$IHOME/models"
+  case "$co" in "$HOME"|"$ITER_DIR"|"$ITER_DIR"/*) die "the checkouts folder must be a folder of its own (e.g. ~/dev), not $co" ;; esac
+  run mkdir -p "$co"
   DATA_URL="$url" ENGINE="$name" CHECKOUTS="$co"
   secrets_settings
   conf_text | write_file "$CONF"
@@ -375,6 +502,7 @@ compose_settings() {
 ITER_UID=$(id -u)
 ITER_GID=$(id -g)
 ITER_HOST_HOME=$HOME
+ITER_ENGINE_DIR=$E
 ITER_CHECKOUTS=$CHECKOUTS
 ITER_DATA_URL=$DATA_URL
 ITER_ENGINE=$ENGINE
@@ -405,8 +533,8 @@ build_files() {
   context_files; binary; compose_settings
 }
 
-# the embedding model on the host, in ~/.iter/models (the container reads it
-# through the ~/.iter mount; without it the engine downloads it itself)
+# the embedding model on the host, in models/ (the container reads it
+# through its mount of the engine folder; without it the engine downloads it itself)
 model() {
   say "4/8 embedding model"
   local base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
@@ -431,7 +559,7 @@ image() {
 }
 
 # iter_data's certificate, before the first sign-in (in the image, which writes
-# ~/.iter/server_trust.json through the ~/.iter mount): --fingerprint (or the one
+# config/server_trust.json through its mount): --fingerprint (or the one
 # pasted here) pins it now and stops when the server presents another one;
 # --trust-ca checks it against certificate authorities (a TLS proxy with a real
 # certificate); else the first sign-in trusts what it sees (trust on first use).
@@ -546,7 +674,7 @@ projects() {
 status() {
   load_conf
   [ -n "${ENGINE:-}" ] && [ -f "$CTX/compose.yml" ] || die "not installed yet: run install.sh"
-  printf 'engine     %s -> %s\ncheckouts  %s\ncontainer  %s\n' "$ENGINE" "$DATA_URL" "$CHECKOUTS" \
+  printf 'engine     %s -> %s\nfiles      %s\ncheckouts  %s\ncontainer  %s\n' "$ENGINE" "$DATA_URL" "$E" "$CHECKOUTS" \
     "$(docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}' iter-engine 2>/dev/null || echo missing)"
   if image_ready; then in_image iter_engine key status --key-file "$KEYF" --data-url "$DATA_URL" || true; fi
   if command -v jq >/dev/null && assignments; then jq -r '.projects[] | "project    \(.project)  \(.topdir)  \(.state)"' "$TMPF"; else echo "project    (none served, or jq missing)"; fi
@@ -554,8 +682,9 @@ status() {
 }
 
 update() {
+  make_dirs; check_share; migrate
   load_conf
-  [ -n "${ENGINE:-}" ] && [ -f "$CTX/compose.yml" ] || die "not installed yet: run install.sh"
+  [ -n "${ENGINE:-}" ] && [ -f "$CONF" ] || die "not installed yet: run install.sh"
   say "update"
   if [ $YES = 0 ] && command -v jq >/dev/null && [ "$(api "/api/engines/$ENGINE")" = 200 ]; then
     local n; n="$(jq -r '.running // 0' "$TMPF" 2>/dev/null || echo 0)"
@@ -573,13 +702,14 @@ uninstall() {
     run dc down --rmi local
     ok "container and image removed"
   else ok "no $CTX/compose.yml: nothing to stop"; fi
-  ok "kept $IHOME (key, tokens, model, claude/, docker/) and the checkouts; delete them by hand when this machine is done with iter"
+  ok "kept $E (key, tokens, model, claude/, docker/) and the checkouts; delete them by hand when this machine is done with iter"
   ok "in the webui, remove the engine's key (Engine keys) and its serves edges"
 }
 
 case "$VERB" in
   install)
-    docker_ok; settings; build_files; model; image; trust; key; up
+    docker_ok; say "iter dir: $ITER_DIR (the engine's files: $E)"; make_dirs; check_share; migrate
+    settings; build_files; model; image; trust; key; up
     say "8/8 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }
@@ -590,6 +720,7 @@ Next, in the webui's Settings tab: draw a serves edge from $ENGINE to each proje
 (topdir inside $CHECKOUTS, e.g. ~/dev/<project>), then run \`install.sh projects\`.
   status:  install.sh status        log:  install.sh logs
   update:  install.sh update        (rebuilds the image: a newer iter_engine and claude CLI)
+  files:   $E
   a new key (in $CTX):  docker compose run --rm --no-deps engine iter_engine key rotate
                         (its public key: ... iter_engine key show)
 EOF

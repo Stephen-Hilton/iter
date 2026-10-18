@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Deploy iter5 locally.
 #
-#   ./deploy.sh docker   the all-in-one container (ArangoDB CE + iter_data), http://127.0.0.1:8400:
+#   ./deploy.sh docker [installer options]
+#                        the all-in-one container (ArangoDB CE + iter_data), https://127.0.0.1:8400:
 #                        builds iter_data-linux-<arch> with installers/build.sh (a bullseye
-#                        container), then runs installers/iter_data/docker/install.sh
+#                        container), then runs installers/iter_data/docker/install.sh (extra
+#                        options go to it, e.g. --adopt-volumes for a container on docker volumes)
 #   ./deploy.sh local    native iter_data (release build) against a dev Arango container on :8529
 #
 # The container keeps everything that persists (database, Arango apps,
-# iter_data's files) in one host folder, ITER_DATA_DIR [~/.iter/iter_data; an
-# existing ~/.iter5/iter_data from before the rename is kept where it is].
+# iter_data's files) in one host folder, <iter dir>/iter_data, with the iter dir
+# ITER_DIR [~/iter: Docker Desktop shares the home folder, not /opt]. An older
+# data folder (ITER_DATA_DIR, or ~/.iter/iter_data / ~/.iter5/iter_data) is moved in.
 # Secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) come from ITER_ENV_FILE,
 # default the repo root .env.
 # Release binaries land in bin/<os>-<arch>/ (rm+cp, never cp-over: macOS kills
@@ -16,6 +19,7 @@
 set -euo pipefail
 
 MODE="${1:-docker}"
+[ $# = 0 ] || shift
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 case "$(uname -s)" in
   Linux*) OS=linux ;; Darwin*) OS=macos ;; MINGW*|MSYS*|CYGWIN*) OS=windows ;; *) OS="$(uname -s | tr A-Z a-z)" ;;
@@ -27,8 +31,10 @@ RUN="$ROOT/run"
 PORT="${ITER_PORT:-8400}"
 ENV_FILE="${ITER_ENV_FILE:-$ROOT/.env}"
 ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iter4dev}"
-DATA_DIR="${ITER_DATA_DIR:-$HOME/.iter/iter_data}"
-[ -n "${ITER_DATA_DIR:-}" ] || [ -e "$DATA_DIR" ] || [ ! -d "$HOME/.iter5/iter_data" ] || DATA_DIR="$HOME/.iter5/iter_data"
+ITER_DIR="${ITER_DIR:-$HOME/iter}"
+# an older data folder to move into the iter dir, when there is one
+OLD_DATA="${ITER_DATA_DIR:-}"
+for d in "$HOME/.iter/iter_data" "$HOME/.iter5/iter_data"; do [ -n "$OLD_DATA" ] || [ ! -d "$d" ] || OLD_DATA="$d"; done
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 mkdir -p "$BIN" "$RUN"
 
@@ -78,12 +84,12 @@ case "$MODE" in
     echo "[deploy] building iter_data-linux-$DARCH (installers/build.sh, placed in installers/iter_data/docker/)"
     "$ROOT/installers/build.sh" --only "iter_data-linux-$DARCH"
     "$ROOT/installers/fetch_model.sh"
-    echo "[deploy] building + starting the iter5 container (data: $DATA_DIR)"
-    # secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) from $ENV_FILE -> ~/.iter/iter5.docker.env;
+    echo "[deploy] building + starting the iter5 container (data: $ITER_DIR/iter_data)"
+    # secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) from $ENV_FILE -> <iter dir>/iter_data/config/data.env;
     # the Arango root password from ARANGO_ROOT_PASSWORD [iter4dev] unless that file or $ENV_FILE has one
     ARANGO_ROOT_PASSWORD="$ARANGO_PW" "$ROOT/installers/iter_data/docker/install.sh" \
-      --env-file "$ENV_FILE" --port "$PORT" --data-dir "$DATA_DIR" --name iter5 \
-      --arango-port "${ARANGO_HOST_PORT:-8630}" --model-dir "$ROOT/models/all-MiniLM-L6-v2"
+      --env-file "$ENV_FILE" --port "$PORT" --iter-dir "$ITER_DIR" ${OLD_DATA:+--data-dir "$OLD_DATA"} --name iter5 \
+      --arango-port "${ARANGO_HOST_PORT:-8630}" --model-dir "$ROOT/models/all-MiniLM-L6-v2" ${@+"$@"}
     SCHEME=https
     ;;
   local)

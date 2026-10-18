@@ -15,10 +15,13 @@
 #   accounts    ask for each account token the served projects name
 #   projects    clone each served project that has no checkout yet
 #   logs        follow the engine log
-#   uninstall   stop and remove the service and the binary (keeps ~/.iter's key, tokens, model)
+#   uninstall   stop and remove the service and the binary (keeps the key, tokens, model)
 #
 # Options:
-#   --data-url URL    iter_data URL (else asked; kept in ~/.iter/engine.conf)
+#   --iter-dir DIR    the one folder everything goes in, always ending in /iter (/my/dir,
+#                     /my/dir/iter and /my/dir/iter/ all mean /my/dir/iter); also $ITER_DIR;
+#                     later runs find it from the service [/opt/iter]
+#   --data-url URL    iter_data URL (else asked; kept in iter_engine/config/engine.conf)
 #   --name NAME       this engine's name, unique per machine (default: the hostname)
 #   --version TAG     release to download, e.g. v2026.10.17 (else $ITER_VERSION, else latest)
 #   --binary PATH     install this iter_engine file instead of downloading one
@@ -29,7 +32,7 @@
 #   --secrets-command CMD  a shell command printing KEY=value lines (the account tokens,
 #                     from a secret store: aws ssm / secretsmanager, op, security, vault);
 #                     the engine runs it at startup and every --secrets-every minutes and
-#                     keeps the values in memory only. Kept in ~/.iter/engine.conf and put
+#                     keeps the values in memory only. Kept in config/engine.conf and put
 #                     on the service's command line; "none" removes it. With it, the
 #                     accounts step asks for no tokens.
 #   --secrets-every N  minutes between secrets-command runs [5]
@@ -38,23 +41,28 @@
 #   -h, --help        this text
 #   ($ITER_RELEASE_URL: download the binary and SHA256SUMS from this base URL instead)
 #
-# Steps of `install`: packages (git, curl, jq, poppler; asks first) -> the
-# claude CLI (Anthropic's installer) -> iter_data URL + engine name
-# (~/.iter/engine.conf) -> iter_engine into ~/.iter/bin (the asset next to this
-# script, else the GitHub Release, sha256-checked) -> the embedding model into
-# ~/.iter/models -> the engine key (`iter_engine key new`: paste its public key
+# Steps of `install`: the iter dir (moves an older ~/.iter in) -> packages
+# (git, curl, jq, poppler; asks first) -> the claude CLI (Anthropic's
+# installer) -> iter_data URL + engine name (config/engine.conf) -> iter_engine
+# into bin/ (the asset next to this script, else the GitHub Release,
+# sha256-checked) -> the embedding model into models/ -> the engine key (`iter_engine key new`: paste its public key
 # into the webui's Engine keys screen; the script waits until iter_data accepts
 # it) -> a laptop: no suspend (asks) -> Omarchy: no lock screen (asks) -> the
 # iter-engine systemd service -> account tokens and project checkouts.
 #
-# Everything this machine keeps for iter is in ~/.iter: bin/iter_engine, the key
-# (engine.key), the env file with account tokens (.env), engine.conf, models/
-# and the logs (engine.log, engine.err.log).
+# Everything this machine keeps for the engine is in one folder,
+# <iter dir>/iter_engine (owned by you): bin/iter_engine, config/ (engine.conf,
+# server_trust.json), secrets/ (mode 700: the key engine.key, the env file
+# with account tokens .env), models/, logs/ (engine.log, engine.err.log), and
+# systemd/iter-engine.service (owned by root: systemd runs it). Outside it only
+# links: /etc/systemd/system/iter-engine.service (a copy when the iter dir is
+# not on the root filesystem) and /usr/local/bin/iter_engine. An install from
+# before 2026-10-18 (~/.iter) is moved in by the next install or update.
 #
 # HTTPS: iter_data must be https:// (iter_data serves HTTPS by default; plain
 # http:// is refused unless iter_data runs on this machine: 127.0.0.1,
 # localhost, ::1). The engine pins iter_data's certificate fingerprint in
-# ~/.iter/server_trust.json: --fingerprint (or the fingerprint pasted when
+# config/server_trust.json: --fingerprint (or the fingerprint pasted when
 # asked) runs `iter_engine key trust` right after the binary is installed and
 # stops if the server presents another certificate; without one, the first
 # sign-in trusts the certificate it sees (compare: iter_engine key status).
@@ -65,22 +73,15 @@ set -euo pipefail
 REPO_SLUG="Stephen-Hilton/iter"
 HERE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; fi
-IHOME="$HOME/.iter"
-# iter_engine keeps its files (key, server_trust.json) in $ITER_HOME, else ~/.iter:
-# the service reads ~/.iter, so this script's own iter_engine calls do too
-export ITER_HOME="$IHOME"
-CONF="$IHOME/engine.conf"
-ENVF="$IHOME/.env"
-KEYF="$IHOME/engine.key"
-BIN="$IHOME/bin/iter_engine"
-MODEL="$IHOME/models/all-MiniLM-L6-v2"
-UNIT=/etc/systemd/system/iter-engine.service
 export PATH="$HOME/.local/bin:$PATH"
 
 VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
+ITER_DIR_OPT="${ITER_DIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|update|accounts|projects|logs|uninstall) VERB="$1" ;;
+    --iter-dir|--iter_dir) ITER_DIR_OPT="${2:?--iter-dir needs a folder}"; shift ;;
+    --iter-dir=*|--iter_dir=*) ITER_DIR_OPT="${1#*=}" ;;
     --data-url) OPT_URL="${2:?--data-url needs a URL}"; shift ;;
     --name) OPT_NAME="${2:?--name needs a name}"; shift ;;
     --version) VERSION="${2:?--version needs a tag}"; shift ;;
@@ -119,7 +120,14 @@ ask_secret() {
   if [ -r /dev/tty ] && { : < /dev/tty; } 2>/dev/null; then printf '    %s ' "$1" > /dev/tty; IFS= read -rs a < /dev/tty || true; printf '\n' > /dev/tty; fi
   printf '%s' "$a"
 }
-confval() { [ -f "$CONF" ] && grep -E "^$1=" "$CONF" | tail -1 | cut -d= -f2- || true; }
+# engine.conf; before a move (or in a dry run) the one in the installed iter dir,
+# or in an older ~/.iter
+confval() {
+  local f="$CONF"
+  [ -f "$f" ] || [ -z "$OLD_ROOT" ] || f="$OLD_ROOT/iter_engine/config/engine.conf"
+  [ -f "$f" ] || f="$OLDH/engine.conf"
+  [ -f "$f" ] && grep -E "^$1=" "$f" | tail -1 | cut -d= -f2- || true
+}
 envval() { [ -f "$2" ] && grep -E "^[[:space:]]*$1=" "$2" | tail -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//' | tr -d '\r' || true; }
 # shellcheck disable=SC2088  # the topdir arrives as text with a literal ~
 expand() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
@@ -135,6 +143,52 @@ case "$(uname -m)" in
   *) die "no iter_engine build for $(uname -m)" ;;
 esac
 ASSET="iter_engine-linux-$ARCH"
+
+# ------------------------------------------------------------------ the iter dir
+# --iter-dir: the folder that holds everything, always ending in /iter
+# (/my/dir/iter/, /my/dir/iter and /my/dir all give /my/dir/iter)
+iter_dir_of() {
+  local d="$1"
+  # shellcheck disable=SC2088  # a literal ~ typed in quotes
+  case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  while [ "${#d}" -gt 1 ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+  [ "${d##*/}" = iter ] || d="${d%/}/iter"
+  printf '%s' "$d"
+}
+UNIT=/etc/systemd/system/iter-engine.service
+PATH_LINK=/usr/local/bin/iter_engine
+OLDH="$HOME/.iter"   # the engine's folder before 2026-10-18
+# the iter dir the engine is installed in: the unit links to <iter dir>/iter_engine/systemd/
+# (read from the link itself, so a folder moved by hand still counts), or a copy's
+# ExecStart is <iter dir>/iter_engine/bin/iter_engine, or the iter_engine PATH link
+installed_iter_dir() {
+  local t
+  t="$(readlink "$UNIT" 2>/dev/null || true)"
+  case "$t" in /*/iter_engine/systemd/iter-engine.service) printf '%s' "${t%/iter_engine/systemd/iter-engine.service}"; return ;; esac
+  if [ -f "$UNIT" ]; then
+    t="$(sed -n 's|^ExecStart=\(/[^ ]*\)/iter_engine/bin/iter_engine .*|\1|p' "$UNIT" 2>/dev/null | head -1 || true)"
+    [ -z "$t" ] || { printf '%s' "$t"; return; }
+  fi
+  # an install that stopped before its service: the PATH link made at step 4
+  t="$(readlink "$PATH_LINK" 2>/dev/null || true)"
+  case "$t" in /*/iter_engine/bin/iter_engine) printf '%s' "${t%/iter_engine/bin/iter_engine}" ;; esac
+}
+OLD_ROOT="$(installed_iter_dir)"
+if [ -n "$ITER_DIR_OPT" ]; then ROOT="$(iter_dir_of "$ITER_DIR_OPT")"; else ROOT="${OLD_ROOT:-/opt/iter}"; fi
+case "$ROOT" in *[[:space:]]*) die "--iter-dir $ROOT: a folder without spaces (the systemd unit names it)" ;; esac
+IHOME="$ROOT/iter_engine"
+# iter_engine keeps its files (key, server_trust.json) in $ITER_HOME; the service
+# sets it, so this script's own iter_engine calls do too
+export ITER_HOME="$IHOME"
+CONF="$IHOME/config/engine.conf"
+TRUSTF="$IHOME/config/server_trust.json"
+ENVF="$IHOME/secrets/.env"
+KEYF="$IHOME/secrets/engine.key"
+BIN="$IHOME/bin/iter_engine"
+MODEL="$IHOME/models/all-MiniLM-L6-v2"
+LOGS="$IHOME/logs"
+UNIT_SRC="$IHOME/systemd/iter-engine.service"
 
 DATA_URL="" ENGINE=""
 load_conf() { # fills what this run has not set yet
@@ -186,22 +240,107 @@ accounts_from_command() { # VARS...
   done
 }
 
-# ~/.iter5 became ~/.iter (2026-10-11): move it once; ~/.iter5 stays as a link
-migrate_home() {
-  if [ -d "$HOME/.iter5" ] && [ ! -L "$HOME/.iter5" ]; then
-    if [ -e "$IHOME" ]; then warn "both ~/.iter5 and ~/.iter exist: using ~/.iter; move what you need from ~/.iter5 by hand"
-    else run mv "$HOME/.iter5" "$IHOME" && run ln -s "$IHOME" "$HOME/.iter5" && ok "moved ~/.iter5 to ~/.iter (~/.iter5 links to it)"; fi
+# ------------------------------------------------------------------ the iter dir, and moving in
+# sudo for a path this user cannot change
+maysudo() { if [ -w "$1" ]; then echo ""; else echo sudo; fi; }
+# the nearest existing folder at or above a path
+existing() { local p="$1"; while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; printf '%s' "$p"; }
+
+# <iter dir> (root's when it has to be made with sudo) and iter_engine/ in it (yours)
+make_dirs() {
+  local s
+  if [ ! -d "$ROOT" ]; then
+    s="$(maysudo "$(existing "$ROOT")")"
+    run $s install -d -m 755 "$ROOT"
   fi
+  if [ ! -d "$IHOME" ]; then
+    s="$(maysudo "$ROOT")"
+    run $s install -d -o "$(id -un)" -g "$(id -gn)" -m 755 "$IHOME"
+  elif [ ! -w "$IHOME" ]; then
+    warn "$IHOME is not yours: making it yours (sudo chown -R)"; run sudo chown -R "$(id -un):$(id -gn)" "$IHOME"
+  fi
+  run mkdir -p "$IHOME/bin" "$IHOME/config" "$IHOME/secrets" "$IHOME/models" "$LOGS"
+  run chmod 700 "$IHOME/secrets"
+}
+
+# move FROM to TO. The older folder is the live install (a finished move leaves
+# it empty), so its file takes the place: what is in the way at TO (left from an
+# earlier install) is set aside in replaced-<time>/. Nothing is overwritten or deleted.
+STAMP="$(date +%Y%m%d%H%M%S)"
+move_to() {
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  local to="$2"
+  if [ -e "$to" ] || [ -L "$to" ]; then
+    case "$to" in
+      "$IHOME/old-dot-iter/"*) to="$to.$STAMP" ;;
+      *) local aside="$IHOME/replaced-$STAMP/${to#"$IHOME"/}"
+         run mkdir -p "$(dirname "$aside")"; run mv "$to" "$aside"
+         warn "$to was there already (from an earlier install): set aside in $IHOME/replaced-$STAMP" ;;
+    esac
+  fi
+  run mkdir -p "$(dirname "$to")"
+  run mv "$1" "$to"
+}
+
+# an older engine folder (~/.iter, ~/.iter5) into the new layout, the service stopped first
+move_old_home() {  # move_old_home DIR
+  local o="$1" e n
+  [ -d "$o" ] && [ ! -L "$o" ] || return 0
+  say "moving $o into $IHOME"
+  [ ! -f "$UNIT" ] || ! grep -q "^ExecStart=$o/" "$UNIT" 2>/dev/null || run sudo systemctl stop iter-engine
+  for e in "$o"/* "$o"/.[!.]* "$o"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    n="$(basename "$e")"
+    case "$n" in
+      engine.conf|server_trust.json) move_to "$e" "$IHOME/config/$n" ;;
+      engine.key*|.env) move_to "$e" "$IHOME/secrets/$n" ;;
+      engine.log|engine.err.log) move_to "$e" "$LOGS/$n" ;;
+      bin) move_to "$e/iter_engine" "$BIN"; run rmdir "$e" 2>/dev/null || move_to "$e" "$IHOME/old-dot-iter/bin" ;;
+      # config/ and secrets/: a newer iter_engine already wrote there (pinned certificates)
+      models|logs|config|secrets)
+        local f; for f in "$e"/* "$e"/.[!.]*; do [ -e "$f" ] && move_to "$f" "$IHOME/$n/$(basename "$f")"; done
+        run rmdir "$e" 2>/dev/null || move_to "$e" "$IHOME/old-dot-iter/$n" ;;
+      # iter_data's files from an older install: its own installer reads them there
+      iter_data|data.env|*.docker.env|*-docker) ;;
+      *) move_to "$e" "$IHOME/old-dot-iter/$n" ;;
+    esac
+  done
+  [ ! -d "$IHOME/secrets" ] || run chmod -R go-rwx "$IHOME/secrets"
+  if run rmdir "$o" 2>/dev/null; then ok "moved $o into $IHOME"
+  else ok "moved the engine's files from $o into $IHOME (left in $o: $(find "$o" -mindepth 1 -maxdepth 1 -printf '%f '))"; fi
+  [ ! -d "$IHOME/old-dot-iter" ] || ok "files the engine does not use are kept in $IHOME/old-dot-iter"
+}
+
+# step 0: make the iter dir; move an install from another iter dir, or an older ~/.iter, into it
+place() {
+  say "0/9 the iter dir: $ROOT"
+  if [ -n "$OLD_ROOT" ] && [ "$OLD_ROOT" != "$ROOT" ] && [ -d "$OLD_ROOT/iter_engine" ]; then
+    [ ! -e "$IHOME" ] || die "the engine is installed in $OLD_ROOT, and $IHOME exists too: move or remove one of them first"
+    say "moving the engine from $OLD_ROOT to $ROOT"
+    # sudo when either side's folder is not this user's to change
+    local s=""; [ -w "$OLD_ROOT" ] && [ -w "$(existing "$ROOT")" ] || s=sudo
+    [ -z "$s" ] || [ $DRY = 1 ] || sudo -n true 2>/dev/null || sudo -v || die "moving it needs sudo: nothing was changed"
+    run sudo systemctl stop iter-engine
+    [ -d "$ROOT" ] || run $(maysudo "$(existing "$ROOT")") install -d -m 755 "$ROOT"
+    run $s mv "$OLD_ROOT/iter_engine" "$IHOME"
+    [ -w "$IHOME" ] || [ $DRY = 1 ] || run sudo chown "$(id -un):$(id -gn)" "$IHOME"
+    run $(maysudo "$OLD_ROOT") rmdir "$OLD_ROOT" 2>/dev/null || true
+  fi
+  make_dirs
+  # ~/.iter5 became ~/.iter on 2026-10-11; both now move into the iter dir
+  [ ! -L "$HOME/.iter5" ] || [ "$(readlink "$HOME/.iter5")" != "$OLDH" ] || run rm -f "$HOME/.iter5"
+  move_old_home "$HOME/.iter5"
+  move_old_home "$OLDH"
+  ok "$IHOME"
 }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 TMPF="$WORK/api"
 # ------------------------------------------------------------------ iter_data over HTTPS
 # iter_data serves HTTPS with its own (self-signed) certificate. The engine pins
-# that certificate's fingerprint in ~/.iter/server_trust.json (one entry per
+# that certificate's fingerprint in config/server_trust.json (one entry per
 # scheme://host:port), and plain http:// is only for this machine. The script's
 # own API calls check the certificate the same way.
-TRUSTF="$IHOME/server_trust.json"
 # the trust file's key for a URL: scheme://host:port, lowercased
 trust_origin() {
   local u="${1%/}" s r hp port=80
@@ -227,7 +366,7 @@ check_url() {
     *) die "$1: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" ;;
   esac
 }
-# does ~/.iter/server_trust.json have an entry for this URL yet?
+# does config/server_trust.json have an entry for this URL yet?
 has_trust() { [ -f "$TRUSTF" ] && grep -qF "\"$(trust_origin "$1")\"" "$TRUSTF"; }
 # PINOPT = curl options that check iter_data's certificate as the engine does:
 # none for http:// to this machine or a --ca trust; for a pinned certificate, -k
@@ -260,8 +399,17 @@ pin_opts() {
 # prints the status (000 when iter_data cannot be reached or its certificate is
 # not the trusted one). Read-only, so it runs in a dry run.
 api() {
-  local tok=""
-  [ -x "$BIN" ] && [ -f "$KEYF" ] && tok="$("$BIN" key session --key-file "$KEYF" --data-url "$DATA_URL" 2>/dev/null || true)"
+  local tok="" home="$IHOME" o="$OLD_ROOT/iter_engine"
+  if [ ! -f "$KEYF" ] && [ -n "$OLD_ROOT" ] && [ -f "$o/secrets/engine.key" ]; then
+    # still in the iter dir it is moving from: ask with that folder's binary, key and pin
+    local BIN="$o/bin/iter_engine" KEYF="$o/secrets/engine.key" TRUSTF="$o/config/server_trust.json"
+    home="$o"
+  elif [ ! -f "$KEYF" ] && [ -f "$OLDH/engine.key" ] && [ -x "$OLDH/bin/iter_engine" ]; then
+    # an older ~/.iter not moved yet: ask with its own binary, key and pinned certificate
+    local BIN="$OLDH/bin/iter_engine" KEYF="$OLDH/engine.key" TRUSTF="$OLDH/server_trust.json"
+    home="$OLDH"
+  fi
+  [ -x "$BIN" ] && [ -f "$KEYF" ] && tok="$(ITER_HOME="$home" "$BIN" key session --key-file "$KEYF" --data-url "$DATA_URL" 2>/dev/null || true)"
   if [ -z "$tok" ] || ! pin_opts; then echo 000; return 0; fi
   curl -sS --max-time 15 ${PINOPT[@]+"${PINOPT[@]}"} -H "authorization: Bearer $tok" -o "$TMPF" -w '%{http_code}' "$DATA_URL$1" 2>/dev/null || echo 000
 }
@@ -300,7 +448,7 @@ get_binary() {
   NEWBIN="$WORK/$ASSET"; ok "downloaded $ASSET ${VERSION:-(latest)}, sha256 ok"
 }
 
-# installs $NEWBIN as ~/.iter/bin/iter_engine (temp name + mv, never cp over a
+# installs $NEWBIN as bin/iter_engine (temp name + mv, never cp over a
 # running binary); CHANGED=1 when the file is new
 install_binary() {
   CHANGED=0
@@ -390,7 +538,7 @@ settings() {
     [ -n "$name" ] || die "an engine name unique to this machine is needed (--name NAME)" ;;
   esac
   case "$name" in *[!A-Za-z0-9_.-]*|"") die "engine name \"$name\": letters, digits, - _ . only" ;; esac
-  run mkdir -p "$IHOME"
+  run mkdir -p "$IHOME/config"
   DATA_URL="$url" ENGINE="$name"
   secrets_settings
   conf_text | write_file "$CONF"
@@ -403,6 +551,14 @@ settings() {
 binary() {
   say "4/9 iter_engine"
   install_binary
+  path_link
+}
+
+# iter_engine on PATH: /usr/local/bin/iter_engine -> bin/iter_engine
+path_link() {
+  [ "$(readlink "$PATH_LINK" 2>/dev/null)" != "$BIN" ] || { ok "$PATH_LINK -> $BIN"; return; }
+  if [ -e "$PATH_LINK" ] && [ ! -L "$PATH_LINK" ]; then warn "$PATH_LINK is a file, not a link: left alone (run $BIN)"; return; fi
+  if run sudo ln -sfn "$BIN" "$PATH_LINK"; then ok "$PATH_LINK -> $BIN"; else warn "could not link $PATH_LINK (run $BIN)"; fi
 }
 
 # iter_data's certificate, before the first sign-in: --fingerprint (or the one
@@ -431,8 +587,7 @@ trust() {
 }
 
 # the embedding model (sentence-transformers/all-MiniLM-L6-v2, Apache-2.0,
-# ~91 MB), checksum-verified; the engine finds ~/.iter/models beside its
-# binary. Without it the engine downloads the model itself on first use.
+# ~91 MB), checksum-verified; the engine finds models/ beside its bin/. Without it the engine downloads the model itself on first use.
 model() {
   say "5/9 embedding model"
   local base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
@@ -452,7 +607,8 @@ model() {
 
 key() {
   say "6/9 engine key"
-  run mkdir -p "$IHOME"
+  run mkdir -p "$IHOME/secrets"
+  run chmod 700 "$IHOME/secrets"
   [ -f "$ENVF" ] || run touch "$ENVF"
   run chmod 600 "$ENVF"
   if [ $DRY = 1 ]; then
@@ -569,16 +725,19 @@ unit_text() {
 [Unit]
 Description=iter engine $ENGINE
 Wants=network-online.target
+# the iter dir may be on its own disk
+RequiresMountsFor=$IHOME
 After=network-online.target iter-data.service
 
 [Service]
 User=$(id -un)
 WorkingDirectory=$IHOME
 Environment=HOME=$HOME
+Environment=ITER_HOME=$IHOME
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$BIN --data-url $DATA_URL --env-file $ENVF --key-file $KEYF --name $ENGINE$(secrets_args)
-StandardOutput=append:$IHOME/engine.log
-StandardError=append:$IHOME/engine.err.log
+StandardOutput=append:$LOGS/engine.log
+StandardError=append:$LOGS/engine.err.log
 Restart=on-failure
 RestartSec=10
 # a stop takes the agent sessions and shells it started with it
@@ -595,17 +754,32 @@ need_systemd() {
   die "systemd is not running: the engine runs as a systemd service"
 }
 
+# the unit: systemd/iter-engine.service in the iter dir, owned by root (systemd
+# runs it as root, so the user and the agents must not be able to change it),
+# linked into /etc/systemd/system; copied there instead when the iter dir is not
+# on the root filesystem (systemd reads units before other disks are mounted).
+# True when it changed.
+write_unit() {
+  local same=0
+  if [ -f "$UNIT_SRC" ] && [ "$(unit_text)" = "$(cat "$UNIT_SRC")" ] && [ -f "$UNIT" ] && [ "$(cat "$UNIT")" = "$(cat "$UNIT_SRC")" ]; then same=1; fi
+  [ $same = 0 ] || { ok "$UNIT_SRC is current"; return 1; }
+  run sudo install -d -o root -g root -m 755 "$IHOME/systemd"
+  unit_text | write_file "$UNIT_SRC" sudo
+  if [ "$(stat -c %d "$(existing "$IHOME")")" = "$(stat -c %d /)" ]; then run sudo ln -sfn "$UNIT_SRC" "$UNIT"
+  else [ ! -L "$UNIT" ] || run sudo rm -f "$UNIT"; run sudo install -m 644 "$UNIT_SRC" "$UNIT"; warn "$ROOT is not on the root filesystem: $UNIT is a copy of $UNIT_SRC"; fi
+  run sudo systemctl daemon-reload
+}
+
 service() {
   say "8/9 iter-engine service"
   need_systemd
-  if [ -f "$UNIT" ] && [ "$(unit_text)" = "$(cat "$UNIT")" ]; then ok "$UNIT is current"
-  else unit_text | write_file "$UNIT" sudo; run sudo systemctl daemon-reload; fi
+  write_unit || true
   run sudo systemctl enable -q iter-engine
   run sudo systemctl restart iter-engine
   [ $DRY = 1 ] && return
   sleep 3
-  systemctl is-active -q iter-engine || { tail -20 "$IHOME/engine.err.log" 2>/dev/null; die "iter-engine did not start"; }
-  ok "iter-engine is running (log: $IHOME/engine.log)"
+  systemctl is-active -q iter-engine || { tail -20 "$LOGS/engine.err.log" 2>/dev/null; die "iter-engine did not start"; }
+  ok "iter-engine is running (log: $LOGS/engine.log)"
 }
 
 assignments() { # the engine's assignments into $TMPF; false when it has none yet
@@ -662,11 +836,12 @@ projects() {
 status() {
   load_conf
   [ -n "${ENGINE:-}" ] || die "not installed yet: run install.sh"
-  printf 'engine   %s -> %s\nservice  %s\n' "$ENGINE" "$DATA_URL" "$(systemctl is-active iter-engine 2>/dev/null || true)"
+  [ ! -d "$OLDH" ] || [ -L "$OLDH" ] || [ ! -f "$OLDH/engine.key" ] || warn "an older install is in $OLDH: install.sh install (or update) moves it into $IHOME"
+  printf 'engine   %s -> %s\nservice  %s\niter dir %s\n' "$ENGINE" "$DATA_URL" "$(systemctl is-active iter-engine 2>/dev/null || true)" "$ROOT"
   if [ -x "$BIN" ]; then printf 'binary   %s (sha256 %s)\n' "$BIN" "$(sha "$BIN" | cut -c1-12)"; "$BIN" key status --key-file "$KEYF" --data-url "$DATA_URL" || true
   else printf 'binary   %s missing\n' "$BIN"; fi
   if assignments; then jq -r '.projects[] | "project  \(.project)  \(.topdir)  \(.state)"' "$TMPF"; else echo "project  (none served)"; fi
-  tail -3 "$IHOME/engine.log" 2>/dev/null || true
+  tail -3 "$LOGS/engine.log" 2>/dev/null || true
 }
 
 update() {
@@ -677,33 +852,38 @@ update() {
     local n; n="$(jq -r '.running // 0' "$TMPF" 2>/dev/null || echo 0)"
     [ "${n:-0}" -eq 0 ] 2>/dev/null || die "engine \"$ENGINE\" runs $n item(s) and a restart stops them: set its projects Draining and wait, or rerun with --yes"
   fi
+  local moved=0
+  { [ -n "$OLD_ROOT" ] && [ "$OLD_ROOT" = "$ROOT" ]; } || moved=1
+  place
   install_binary
-  if [ $CHANGED = 1 ] && [ -f "$UNIT" ]; then
+  path_link
+  if [ -e "$UNIT" ] || [ -L "$UNIT" ]; then
     need_systemd
-    [ "$(unit_text)" = "$(cat "$UNIT")" ] || { unit_text | write_file "$UNIT" sudo; run sudo systemctl daemon-reload; }
-    run sudo systemctl restart iter-engine
-    ok "iter-engine restarted"
+    if write_unit || [ $CHANGED = 1 ] || [ $moved = 1 ]; then
+      run sudo systemctl restart iter-engine
+      ok "iter-engine restarted"
+    fi
   fi
 }
 
 uninstall() {
   say "uninstall the iter engine"
-  if [ -f "$UNIT" ]; then
+  if [ -e "$UNIT" ] || [ -L "$UNIT" ]; then
     run sudo systemctl disable --now iter-engine
-    run sudo rm -f "$UNIT"
+    run sudo rm -f "$UNIT" "$UNIT_SRC"
     run sudo systemctl daemon-reload
     ok "service removed"
   else ok "no iter-engine service"; fi
+  [ "$(readlink "$PATH_LINK" 2>/dev/null)" != "$BIN" ] || run sudo rm -f "$PATH_LINK"
   [ -e "$BIN" ] && run rm -f "$BIN" && ok "removed $BIN"
   [ -f /etc/systemd/logind.conf.d/iter-engine.conf ] && warn "suspend stays off; undo: sudo rm /etc/systemd/logind.conf.d/iter-engine.conf && sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target"
   ok "kept $IHOME (key, tokens, model, logs) and the project checkouts; delete them by hand when this machine is done with iter"
   ok "in the webui, remove the engine's key (Engine keys) and its serves edges"
 }
 
-migrate_home
 case "$VERB" in
   install)
-    packages; claude_cli; settings; binary; trust; model; key; power; desktop; service
+    place; packages; claude_cli; settings; binary; trust; model; key; power; desktop; service
     say "9/9 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }
@@ -712,7 +892,7 @@ case "$VERB" in
 Done. Engine "$ENGINE" runs as the iter-engine service and checks in with $DATA_URL.
 Next, in the webui's Settings tab: draw a serves edge from $ENGINE to each project
 (topdir ~/dev/<project>), then run \`install.sh projects\` here to clone them.
-  status:  install.sh status        log:  install.sh logs  ($IHOME/engine.log)
+  status:  install.sh status        log:  install.sh logs  ($LOGS/engine.log)
   update:  install.sh update        a new key:  $BIN key rotate   (its public key: $BIN key show)
 EOF
     ;;
@@ -720,6 +900,6 @@ EOF
   accounts) accounts ;;
   status) status ;;
   update) update ;;
-  logs) run tail -n 50 -F "$IHOME/engine.log" "$IHOME/engine.err.log" ;;
+  logs) run tail -n 50 -F "$LOGS/engine.log" "$LOGS/engine.err.log" ;;
   uninstall) uninstall ;;
 esac

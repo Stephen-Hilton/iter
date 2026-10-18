@@ -2,7 +2,7 @@
 //! serving every project the settings graph assigns to it (spec §4).
 //!
 //! Startup: `iter_engine --data-url <url> --env-file <path> [--name <name>]`.
-//! The engine signs in with its own key (`~/.iter/engine.key`, key.rs) over
+//! The engine signs in with its own key (`<iter dir>/iter_engine/secrets/engine.key`, key.rs) over
 //! TLS it pins (trust.rs); the env file holds the LLM tokens (`token_envar`s)
 //! and other secrets. Nothing else is read from disk: projects, checkouts
 //! and accounts come from `GET /api/engines/{name}/assignments`.
@@ -53,10 +53,10 @@ struct Args {
     /// iter_data URL (else $ITER_DATA_URL)
     #[arg(long)]
     data_url: Option<String>,
-    /// env file: the accounts' token_envars and other secrets [~/.iter/.env]
+    /// env file: the accounts' token_envars and other secrets [<iter dir>/iter_engine/secrets/.env]
     #[arg(long)]
     env_file: Option<String>,
-    /// the engine key it signs in with [~/.iter/engine.key] (`iter_engine key new`)
+    /// the engine key it signs in with [<iter dir>/iter_engine/secrets/engine.key] (`iter_engine key new`)
     #[arg(long)]
     key_file: Option<String>,
     /// engine name (default: this machine's short hostname)
@@ -123,7 +123,7 @@ fn main() {
     // seed the env store (and, once, the process environment) from the env
     // file; token reads from here on go through envstore::get, and the file
     // is re-read while running (account hot reload)
-    let env_file = args.env_file.clone().unwrap_or_else(|| key::iter_home().join(".env").to_string_lossy().into_owned());
+    let env_file = args.env_file.clone().unwrap_or_else(|| key::home_file("secrets", ".env").to_string_lossy().into_owned());
     let key_file = args.key_file.clone().map(std::path::PathBuf::from).unwrap_or_else(key::default_key_file);
     envstore::init(&env_file, &[]);
     let secrets_command = args.secrets_command.clone().or_else(|| std::env::var("ITER_SECRETS_COMMAND").ok()).unwrap_or_default();

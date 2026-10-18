@@ -3,7 +3,7 @@ Description=iter: remove the first-boot admin password once the admin has chosen
 
 [Path]
 # iter_data writes this when the first admin changes the first-boot password
-PathExists=/var/lib/iter/admin_password_changed
+PathExists=@D@/state/admin_password_changed
 
 [Install]
 WantedBy=multi-user.target

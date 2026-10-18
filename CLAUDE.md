@@ -40,14 +40,19 @@ committed) and one self-contained install script per program and platform. Insta
   binary at glibc ≤ 2.31), commit, push, then `installers/build.sh --release` to tag
   `vYYYY.MM.DD[.N]` and publish the release. `--release` refuses a dirty tree or an unpushed HEAD.
 - **When a change alters what an installed machine needs** (a new flag or env var, a port, a file under
-  `~/.iter`, a package, a service setting, a new platform), update every affected install script and its
+  the iter dir, a package, a service setting, a new platform), update every affected install script and its
   README under `installers/<program>/<platform>/`, keep each folder self-contained (no folder sources
   another's files), and test with `bash -n`, `shellcheck` and `--dry-run` (Linux ones inside a container
   of the target distro: debian:bookworm, ubuntu:24.04, amazonlinux:2023).
+- Everything an installer makes lives in one folder, the iter dir (`/opt/iter`, Windows `C:\iter`, AWS stack
+  `/data/iter`; `--iter-dir` / `-IterDir` / `ITER_DIR`, always ending in `iter`): `iter_data/` and
+  `iter_engine/` (layout in `installers/README.md`). Outside it only OS-required links (systemd units,
+  `/usr/local/bin/iter_engine`) and the plist / logon task. Never add files elsewhere; older installs
+  (`~/.iter`, `/etc/iter`, `/var/lib/iter`, …) are moved in by the next run, never deleted.
 - Services the installers create: engine = systemd `iter-engine` (Linux, WSL), launchd `com.iter.engine`
-  (macOS, logs `~/.iter/logs/`), logon task `iter engine` (Windows), container `iter-engine` (docker);
-  iter_data = systemd `arangodb3` + `iter-data` (Linux, AL2023, binary `/opt/iter/bin/iter_data`, config
-  `/etc/iter/data.env`) or container `iter5` (docker). `installers/iter_data/aws/iter_data.cfn.yaml` is a
+  (macOS), logon task `iter engine` (Windows), container `iter-engine` (docker); iter_data = systemd
+  `arangodb3` + `iter-data` (Linux, AL2023, binary `<iter dir>/iter_data/bin/iter_data`, config
+  `<iter dir>/iter_data/config/data.env`) or container `iter5` (docker). `installers/iter_data/aws/iter_data.cfn.yaml` is a
   CloudFormation stack whose first boot runs the release's `linux_aws/install.sh`; keep its parameters in
   step with that script's options and lint it with `cfn-lint`.
 - `installers/README.md` and `installers/installers.code.iter.md` describe the layout; update them when a
@@ -57,10 +62,10 @@ committed) and one self-contained install script per program and platform. Insta
 
 - Engines sign in only with their own Ed25519 key (`iter_engine key new|show|rotate`); never add a user-token
   path for engines. Engine sessions and people's tokens use separate signing secrets.
-- iter_data serves HTTPS (`--tls auto` by default); engines pin its certificate fingerprint (`~/.iter/server_trust.json`,
+- iter_data serves HTTPS (`--tls auto` by default); engines pin its certificate fingerprint (`iter_engine/config/server_trust.json`,
   `iter_engine key trust`) and refuse plain `http://` except to this machine. Tests and the local dev loop use `--tls off`
   on 127.0.0.1 only.
-- Account tokens: process environment > `--secrets-command` > `~/.iter/.env`. Never log a value, never write the
+- Account tokens: process environment > `--secrets-command` > `iter_engine/secrets/.env`. Never log a value, never write the
   secrets command's output to disk, and keep `envstore::scrub` on every child process the engine starts.
 - People: the first admin and admin-set passwords must be changed at first sign-in (`must_change_password`);
   password changes need the current password and 12+ characters and end other sessions; sign-ins are rate-limited.

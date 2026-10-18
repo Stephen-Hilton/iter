@@ -6,7 +6,7 @@
 //! leaves the machine: no command prints it; only the public key is shown
 //! and pasted into the webui's Engine keys screen.
 //!
-//! `new` writes the key file (`~/.iter/engine.key`) when there is none, else
+//! `new` writes the key file (`<iter dir>/iter_engine/secrets/engine.key`) when there is none, else
 //! the next key beside it (`engine.key.next`), which a running engine signs
 //! in with once an admin rotates it in the Engine keys screen (client.rs
 //! `adopt_next`). `rotate` does the same with no admin step: it makes a new
@@ -35,7 +35,7 @@ enum Action {
     /// make this machine's engine key (the next key when one exists) and
     /// print its public key, to add in the webui's Engine keys screen
     New {
-        /// key file [~/.iter/engine.key]
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
         #[arg(long)]
         key_file: Option<String>,
         /// the engine name to add it under [this machine's short hostname]
@@ -45,7 +45,7 @@ enum Action {
     /// sign in with the key and print the session token, for a script's own
     /// API calls (the installers/iter_engine scripts, deploy.ps1); exit 1 when iter_data refuses
     Session {
-        /// key file [~/.iter/engine.key]
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
         #[arg(long)]
         key_file: Option<String>,
         /// iter_data URL [$ITER_DATA_URL]
@@ -54,7 +54,7 @@ enum Action {
     },
     /// print this machine's public key and its id (never the private key)
     Show {
-        /// key file [~/.iter/engine.key]
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
         #[arg(long)]
         key_file: Option<String>,
     },
@@ -62,7 +62,7 @@ enum Action {
     /// because the current key signs it; the old key keeps working for an
     /// hour for agents still running. A revoked key cannot rotate.
     Rotate {
-        /// key file [~/.iter/engine.key]
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
         #[arg(long)]
         key_file: Option<String>,
         /// iter_data URL [$ITER_DATA_URL]
@@ -90,7 +90,7 @@ enum Action {
     /// sign in with each key and say whether iter_data accepts it; exit 0
     /// when the current key is accepted
     Status {
-        /// key file [~/.iter/engine.key]
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
         #[arg(long)]
         key_file: Option<String>,
         /// iter_data URL [$ITER_DATA_URL]
@@ -99,17 +99,55 @@ enum Action {
     },
 }
 
-/// `~/.iter`: the engine's own files (key, env file, trusted server
-/// certificates, binary, logs). `$ITER_HOME` moves it (tests, containers).
+/// The engine's own folder (`<iter dir>/iter_engine`, `/opt/iter/iter_engine`
+/// by default): `bin/`, `config/` (engine.conf, server_trust.json),
+/// `secrets/` (engine.key, .env), `models/`, `logs/`. `$ITER_HOME` names it
+/// (the installers' services set it); else the folder above this binary's
+/// `bin/` when it holds `config/` or `secrets/`; else the old `~/.iter`.
 pub fn iter_home() -> PathBuf {
     if let Some(h) = std::env::var_os("ITER_HOME").filter(|h| !h.is_empty()) {
         return PathBuf::from(h);
     }
+    if let Some(h) = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| home_of_exe(&e)) {
+        return h;
+    }
     iter_core::platform::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".iter")
 }
 
+/// `<home>/bin/iter_engine` -> `<home>`, when `<home>` is laid out as the
+/// engine's folder (has `config/` or `secrets/`).
+fn home_of_exe(exe: &Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let home = bin.parent()?;
+    (home.join("config").is_dir() || home.join("secrets").is_dir()).then(|| home.to_path_buf())
+}
+
+/// `<home>/<sub>/<name>`, or the old flat `<home>/<name>` while the home is
+/// still flat (an install from before 2026-10-18 that has not been moved
+/// yet): its own files, and new ones too, so it stays one layout.
+pub fn home_file(sub: &str, name: &str) -> PathBuf {
+    home_file_in(&iter_home(), sub, name)
+}
+
+fn home_file_in(home: &Path, sub: &str, name: &str) -> PathBuf {
+    let new = home.join(sub).join(name);
+    let old = home.join(name);
+    if new.exists() {
+        return new;
+    }
+    if old.exists() {
+        return old;
+    }
+    let laid_out = home.join("config").is_dir() || home.join("secrets").is_dir();
+    let flat = ["engine.key", ".env", "server_trust.json", "engine.conf"].iter().any(|f| home.join(f).exists());
+    if flat && !laid_out { old } else { new }
+}
+
 pub fn default_key_file() -> PathBuf {
-    iter_home().join("engine.key")
+    home_file("secrets", "engine.key")
 }
 
 pub fn run(args: KeyArgs) {
@@ -379,6 +417,37 @@ mod tests {
         }
         assert_eq!(status(&file, None), 2);
         assert_eq!(status(&dir.join("missing.key"), None), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_home_is_the_folder_above_bin_once_it_is_laid_out() {
+        let dir = std::env::temp_dir().join(format!("iter-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("iter").join("iter_engine");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let exe = home.join("bin").join("iter_engine");
+        assert_eq!(home_of_exe(&exe), None, "no config/ or secrets/ yet");
+        std::fs::create_dir_all(home.join("secrets")).unwrap();
+        assert_eq!(home_of_exe(&exe), Some(home.clone()));
+        assert_eq!(home_of_exe(&dir.join("target").join("release").join("iter_engine")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_flat_home_stays_flat_and_a_new_one_is_laid_out() {
+        let dir = std::env::temp_dir().join(format!("iter-homefile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (flat, fresh) = (dir.join("flat"), dir.join("fresh"));
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(flat.join("engine.key"), "k").unwrap();
+        assert_eq!(home_file_in(&flat, "secrets", "engine.key"), flat.join("engine.key"));
+        assert_eq!(home_file_in(&flat, "config", "server_trust.json"), flat.join("server_trust.json"), "a new file in a flat home stays flat");
+        assert_eq!(home_file_in(&fresh, "config", "server_trust.json"), fresh.join("config").join("server_trust.json"));
+        std::fs::create_dir_all(flat.join("secrets")).unwrap();
+        assert_eq!(home_file_in(&flat, "config", "server_trust.json"), flat.join("config").join("server_trust.json"), "laid out: the new place");
+        assert_eq!(home_file_in(&flat, "secrets", "engine.key"), flat.join("engine.key"), "until it moves, the old key is used");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

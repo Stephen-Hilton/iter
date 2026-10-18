@@ -1,14 +1,15 @@
-# iter engine in a container. install.sh copies this into ~/.iter/docker and
-# writes the .env beside it (ITER_UID, ITER_GID, ITER_HOST_HOME, ITER_CHECKOUTS,
-# ITER_DATA_URL, ITER_ENGINE, ITER_SECRETS_COMMAND, ITER_SECRETS_EVERY), plus compose.override.yml with the git
-# credentials it found (~/.ssh, ~/.gitconfig, ...), mounted read-only.
+# iter engine in a container. install.sh copies this into <iter dir>/iter_engine/docker
+# and writes the .env beside it (ITER_UID, ITER_GID, ITER_HOST_HOME, ITER_ENGINE_DIR,
+# ITER_CHECKOUTS, ITER_DATA_URL, ITER_ENGINE, ITER_SECRETS_COMMAND, ITER_SECRETS_EVERY),
+# plus compose.override.yml with the git credentials it found (~/.ssh, ~/.gitconfig,
+# ...), mounted read-only.
 #   docker compose up -d        docker compose logs -f        docker compose down
 #
-# ~/.iter (engine.conf, engine.key, server_trust.json = iter_data's pinned
-# certificate, .env with the account tokens, models/,
-# claude/ = the container's claude CLI config) and the checkouts folder are
-# mounted at the SAME absolute paths as on the host: the serves edges' topdirs
-# (~/dev/<project>) must mean the same folder inside and outside.
+# <iter dir>/iter_engine (config/: engine.conf, server_trust.json = iter_data's pinned
+# certificate; secrets/: engine.key, .env with the account tokens; models/; claude/ =
+# the container's claude CLI config) and the checkouts folder are mounted at the SAME
+# absolute paths as on the host: the serves edges' topdirs (~/dev/<project>) must mean
+# the same folder inside and outside.
 name: iter-engine
 services:
   engine:
@@ -26,16 +27,18 @@ services:
       ITER_HOME_DIR: ${ITER_HOST_HOME:?run install.sh (it writes .env)}
       ITER_DATA_URL: ${ITER_DATA_URL:?run install.sh (it writes .env)}
       ITER_ENGINE: ${ITER_ENGINE:?run install.sh (it writes .env)}
-      ITER_EMBED_MODEL: ${ITER_HOST_HOME}/.iter/models/all-MiniLM-L6-v2
-      CLAUDE_CONFIG_DIR: ${ITER_HOST_HOME}/.iter/claude
+      # the engine's own folder: key, env file, trusted certificates
+      ITER_HOME: ${ITER_ENGINE_DIR:?run install.sh (it writes .env)}
+      ITER_EMBED_MODEL: ${ITER_ENGINE_DIR}/models/all-MiniLM-L6-v2
+      CLAUDE_CONFIG_DIR: ${ITER_ENGINE_DIR}/claude
       # account tokens from a secret store (install.sh --secrets-command): a shell
       # command printing KEY=value lines, run inside the container; values stay in
       # the engine's memory. Environment variables given here (or docker -e) win
-      # over it, and it wins over ~/.iter/.env.
+      # over it, and it wins over secrets/.env.
       ITER_SECRETS_COMMAND: ${ITER_SECRETS_COMMAND:-}
       ITER_SECRETS_EVERY: ${ITER_SECRETS_EVERY:-}
     volumes:
-      - ${ITER_HOST_HOME}/.iter:${ITER_HOST_HOME}/.iter
+      - ${ITER_ENGINE_DIR}:${ITER_ENGINE_DIR}
       - ${ITER_CHECKOUTS:?run install.sh (it writes .env)}:${ITER_CHECKOUTS}
     # iter_data on this host: https://host.docker.internal:<port> (127.0.0.1 is the
     # container; the engine refuses plain http to anything but itself)

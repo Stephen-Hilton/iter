@@ -12,12 +12,16 @@ set -u
 ARANGO_URL="${ARANGO_URL:-http://127.0.0.1:8529}"
 export ARANGO_URL
 export ARANGO_USER="${ARANGO_USER:-iter_user}"
-# the one data mount (a host folder in compose.yml); /var/lib/arangodb3,
-# /var/lib/arangodb3-apps and /var/lib/iter are links into it
-mkdir -p /var/lib/iter_data/iter
+# the one data mount (the host's <iter dir>/iter_data, compose.yml);
+# /var/lib/arangodb3, /var/lib/arangodb3-apps and /var/lib/iter are links into it
+if [ -d /var/lib/iter_data/iter ] && [ ! -e /var/lib/iter_data/state ]; then
+  echo "[iter_data] /var/lib/iter_data holds the layout from before 2026-10-18 (iter/, arango/): run install.sh, which moves it into <iter dir>/iter_data" >&2
+  exit 2
+fi
+mkdir -p /var/lib/iter_data/state /var/lib/iter_data/backups
 # iter_data's own files (iter_data.secret, engine_session.secret, tls.key,
 # arango_user.pw) are owner-only, and so is the folder that holds them
-chmod 700 /var/lib/iter_data/iter
+chmod 700 /var/lib/iter_data/state
 
 host="${ARANGO_URL#*://}"; host="${host%%/*}"
 case "$host" in \[*) host="${host%%]*}"; host="${host#[}" ;; *) host="${host%%:*}" ;; esac
@@ -29,12 +33,12 @@ if [ "$LOCAL" = 1 ]; then
     echo "[iter_data] set ARANGO_ROOT_PASSWORD (or ARANGO_NO_AUTH=1): refusing to start an unauthenticated guess" >&2
     exit 2
   fi
-  mkdir -p /var/lib/iter_data/arango /var/lib/iter_data/arango-apps
+  mkdir -p /var/lib/iter_data/arango/data /var/lib/iter_data/arango/apps
   # iter_data signs in as its own user (rw on its database only); root creates it
   # on the first start. Its password is never root's: without one of its own, one
   # is made once and kept beside iter_data's other secrets.
   if [ -z "${ARANGO_PASSWORD:-}" ] || [ "${ARANGO_PASSWORD:-}" = "${ARANGO_ROOT_PASSWORD:-}" ]; then
-    pwf=/var/lib/iter_data/iter/arango_user.pw
+    pwf=/var/lib/iter_data/state/arango_user.pw
     if [ ! -s "$pwf" ]; then
       (umask 077; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 > "$pwf")
     fi

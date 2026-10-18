@@ -65,6 +65,14 @@ Parameters:
     Description: >-
       The address range allowed to reach iter_data on IterPort, e.g. your office or VPN range
       (203.0.113.0/24) or 0.0.0.0/0 for anywhere. Engines connect here too.
+  IterDir:
+    Type: String
+    Default: /data/iter
+    AllowedPattern: '^/data(/[A-Za-z0-9._-]+)*/iter$'
+    Description: >-
+      The one folder that holds everything of iter_data (program, config, secrets, ArangoDB and its
+      database, backups), on the encrypted data volume mounted at /data so it outlives the instance.
+      It ends in /iter.
   IterPort:
     Type: Number
     Default: 8400
@@ -235,11 +243,13 @@ Resources:
             grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /data xfs defaults,nofail 0 2" >> /etc/fstab
             mountpoint -q /data || mount /data
 
+            # everything of iter_data goes in one folder on the data volume
+            iterd='${IterDir}/iter_data'
             # tells iter-admin-cleanup (installed by linux_aws/install.sh) which SSM copy of
             # the first-boot admin password to delete once the admin has chosen their own
-            mkdir -p /etc/iter
-            printf 'STACK=%s\nREGION=%s\n' '${AWS::StackName}' '${AWS::Region}' > /etc/iter/aws.env
-            chmod 644 /etc/iter/aws.env
+            mkdir -p "$iterd/config"
+            printf 'STACK=%s\nREGION=%s\n' '${AWS::StackName}' '${AWS::Region}' > "$iterd/config/aws.env"
+            chmod 644 "$iterd/config/aws.env"
 
             version='${IterVersion}'
             if [ "$version" = latest ]; then
@@ -297,11 +307,11 @@ Resources:
             # shellcheck disable=SC2086  # tls_names, arango_opts and env_opt are several words on purpose
             curl -fsSL --retry 5 "https://raw.githubusercontent.com/Stephen-Hilton/iter/$version/installers/iter_data/linux_aws/install.sh" \
               | bash -s -- install --version "$version" --port ${IterPort} \
-                  --db-dir /data/arangodb3 --backup-dir /data/backups $tls_names $arango_opts $env_opt
+                  --iter-dir '${IterDir}' $tls_names $arango_opts $env_opt
             rm -f "$envf"
 
-            pw=$(sed -n 's/^ITER_ADMIN_PASSWORD=//p' /etc/iter/data.env | head -1)
-            [ -n "$pw" ] || { echo "no ITER_ADMIN_PASSWORD in /etc/iter/data.env"; false; }
+            pw=$(sed -n 's/^ITER_ADMIN_PASSWORD=//p' "$iterd/config/data.env" | head -1)
+            [ -n "$pw" ] || { echo "no ITER_ADMIN_PASSWORD in $iterd/config/data.env"; false; }
             aws ssm put-parameter --region '${AWS::Region}' --name '/iter/${AWS::StackName}/admin-password' \
               --type SecureString --overwrite --value "$pw" >/dev/null
             unset pw
@@ -310,8 +320,8 @@ Resources:
             curl -fsSk "https://127.0.0.1:${IterPort}/health" | grep -q '"ok":true'
 
             # the certificate's fingerprint (SHA-256 of its DER), for engines to pin
-            fp=$(openssl x509 -in /var/lib/iter/tls.crt -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
-            [ -n "$fp" ] || { echo "no TLS certificate at /var/lib/iter/tls.crt"; false; }
+            fp=$(openssl x509 -in "$iterd/state/tls.crt" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
+            [ -n "$fp" ] || { echo "no TLS certificate at $iterd/state/tls.crt"; false; }
             aws ssm put-parameter --region '${AWS::Region}' --name '/iter/${AWS::StackName}/tls-fingerprint' \
               --type String --overwrite --value "sha256:$fp" >/dev/null
             echo "TLS certificate fingerprint: sha256:$fp"

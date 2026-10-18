@@ -23,7 +23,7 @@ The commands that switch iter5 on and prove the whole thing works.
 
 - **`deploy.sh <mode>`.** `docker` builds `iter_data-linux-<arch>` with
   `installers/build.sh` and runs `installers/iter_data/docker/install.sh`,
-  which writes `~/.iter/iter5.docker.env` from the repo `.env`
+  which writes `<iter dir>/iter_data/config/data.env` (iter dir `~/iter`) from the repo `.env`
   (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`; read key by key, never sourced)
   and brings up container `iter5`. `local` builds
   release `iter_data` and `iter_engine` into `bin/` (remove-then-copy: macOS

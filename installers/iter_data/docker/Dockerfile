@@ -50,17 +50,19 @@ COPY entrypoint.sh /usr/local/bin/iter-entrypoint.sh
 # GraphRAG embedding model (install.sh fetches it into models/)
 COPY models/all-MiniLM-L6-v2 /opt/iter/models/all-MiniLM-L6-v2
 
-# Everything that persists lives under one mount, /var/lib/iter_data:
-# arango/ (the database), arango-apps/ (Arango's Foxx app dir), iter/ (iter_data's
-# secret files, engine_session.secret, the TLS certificate tls.crt/tls.key and the .env
-# file; custom-tls/ holds a certificate of your own). The paths arangod and its entrypoint hardcode are links
-# into it; the entrypoint creates the subdirectories.
+# Everything that persists lives under one mount, /var/lib/iter_data = the host's
+# <iter dir>/iter_data: arango/data (the database), arango/apps (Arango's Foxx app
+# dir), state/ (iter_data's secret files, engine_session.secret, the TLS certificate
+# tls.crt/tls.key and the .env file), config/ (the secrets file install.sh writes,
+# a certificate of your own: custom-tls.crt/.key, an ArangoDB CA: arango-ca.crt),
+# backups/. The paths arangod and its entrypoint hardcode are links into it; the
+# entrypoint creates the subdirectories.
 RUN chmod +x /usr/local/bin/iter-entrypoint.sh /usr/local/bin/arango-entrypoint.sh \
  && ln -s arangod /usr/sbin/arango-init-database \
  && mkdir -p /var/lib/iter_data \
- && ln -s /var/lib/iter_data/arango /var/lib/arangodb3 \
- && ln -s /var/lib/iter_data/arango-apps /var/lib/arangodb3-apps \
- && ln -s /var/lib/iter_data/iter /var/lib/iter
+ && ln -s /var/lib/iter_data/arango/data /var/lib/arangodb3 \
+ && ln -s /var/lib/iter_data/arango/apps /var/lib/arangodb3-apps \
+ && ln -s /var/lib/iter_data/state /var/lib/iter
 
 # ARANGO_DB is left unset: iter_data's default is iter_db, and the entrypoint keeps
 # an older install on its database iter5. ARANGO_URL elsewhere = no arangod here.

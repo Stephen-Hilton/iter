@@ -32,7 +32,7 @@
 //!     and never in the process environment, so a token rotated in the store
 //!     reaches the engine within minutes, with no restart. A failed run keeps
 //!     the values of the last good one;
-//!  3. the env_file (`~/.iter/.env`), hot-reloaded as above.
+//!  3. the env_file (`<iter dir>/iter_engine/secrets/.env`), hot-reloaded as above.
 //!
 //! Account tokens are never handed to a child process except the one a
 //! Claude session bills to (as `CLAUDE_CODE_OAUTH_TOKEN`): `scrub` removes

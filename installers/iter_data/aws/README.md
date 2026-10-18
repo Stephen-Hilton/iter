@@ -7,7 +7,7 @@ One CloudFormation stack gives you a running iter_data server on EC2. It is the
 |---|---|
 | EC2 instance | Amazon Linux 2023 (newest AMI, resolved by AWS), Graviton `arm64` or `x86_64`, IMDSv2 only |
 | first-boot script | resolves the iter release (the latest, or `IterVersion`), runs that release's `installers/iter_data/linux_aws/install.sh` (ArangoDB + iter_data + backups as systemd services), waits for `/health` |
-| EBS data volume | encrypted gp3, mounted at `/data` (database `/data/arangodb3`, backups `/data/backups`); kept as a snapshot when the stack is deleted or replaced |
+| EBS data volume | encrypted gp3, mounted at `/data`, holding the whole iter dir `/data/iter` (`IterDir`, `--iter-dir`): iter_data's program, config, secrets, database (`iter_data/arango/data`) and backups (`iter_data/backups`); kept as a snapshot when the stack is deleted or replaced |
 | security group | only the iter_data port (8400) from `AllowedCidr`; SSH only if you give `SshCidr`; ArangoDB is never reachable |
 | Elastic IP | a fixed address for the web page and for engines |
 | IAM role | Session Manager access, and put/get/delete on its own `/iter/<stack>/*` parameters only (which include an external ArangoDB's `arango-*` ones) |
@@ -40,12 +40,12 @@ Then:
 ./install.sh fingerprint   # iter_data's TLS certificate fingerprint (from SSM)
 ```
 
-Open the `Url` output (`https://<Elastic IP>:8400`), sign in as `admin` and choose your own password (the webui asks at the first sign-in; 12 characters or more). The instance then deletes `/iter/<stack>/admin-password` and the `ITER_ADMIN_PASSWORD` line in `/etc/iter/data.env` (`iter-admin-cleanup`, told the stack by `/etc/iter/aws.env`). Then and point engines at that URL
+Open the `Url` output (`https://<Elastic IP>:8400`), sign in as `admin` and choose your own password (the webui asks at the first sign-in; 12 characters or more). The instance then deletes `/iter/<stack>/admin-password` and the `ITER_ADMIN_PASSWORD` line in `/data/iter/iter_data/config/data.env` (`iter-admin-cleanup`, told the stack by `config/aws.env` beside it). Then and point engines at that URL
 (`installers/iter_engine/<platform>/`) with the fingerprint: `install.sh --data-url https://<Elastic IP>:8400 --fingerprint sha256:…`.
 
 ## HTTPS
 
-iter_data serves HTTPS with a self-signed certificate it makes on first boot (`/var/lib/iter/tls.crt`, kept
+iter_data serves HTTPS with a self-signed certificate it makes on first boot (`/data/iter/iter_data/state/tls.crt`, kept
 across reinstalls). Its names are the Elastic IP and, once the instance metadata (IMDSv2) shows the Elastic IP
 attached, its public DNS name; engines ignore names, because they pin the certificate's **fingerprint**
 (`sha256:` + 64 hex). The first boot stores it in `/iter/<stack>/tls-fingerprint`. Give it to each engine
@@ -89,7 +89,7 @@ ARANGO_PASSWORD='a password for iter_user' ARANGO_ROOT_PASSWORD='root, only if i
 | `ARANGO_ROOT_PASSWORD` (SSM SecureString `/iter/<stack>/arango-root-password`) | only needed while the user or database does not exist yet; leave it out when your ArangoDB admin created them |
 
 The passwords never pass through CloudFormation: `install.sh` stores them in SSM (it prints `<$ARANGO_PASSWORD>`,
-never the value), and the first boot reads them into `/etc/iter/data.env` (root:iter 640). From the
+never the value), and the first boot reads them into `/data/iter/iter_data/config/data.env` (root:iter 640). From the
 console, create those SSM parameters yourself before the stack. A certificate from a public CA (for
 example ACM behind a load balancer) needs neither the fingerprint nor the CA file. With an external ArangoDB
 the data volume holds only the backups, which dump iter's database alone (`arangodump --server.database`),
@@ -123,7 +123,7 @@ allows internal business use of a dataset under 100 GB.
 ## Upgrade, access, delete
 
 - **Upgrade iter_data:** connect with Session Manager (`aws ssm start-session --target <InstanceId>`) and run
-  `curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux_aws/install.sh | sudo bash -s -- install --version <tag> --db-dir /data/arangodb3 --backup-dir /data/backups`.
+  `curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux_aws/install.sh | sudo bash -s -- install --version <tag>` (it finds `/data/iter` from the installed units). A stack made before 2026-10-18 keeps its database in `/data/arangodb3` and its backups in `/data/backups`; that run moves everything else into the iter dir and records where those two are.
   Changing `IterVersion` on the stack does not upgrade a running instance: it only applies at first boot.
 - **Logs:** `/var/log/iter-bootstrap.log` (first boot), `journalctl -u iter-data -u arangodb3`.
 - **Delete:** `./install.sh delete`. The data volume is kept as an EBS snapshot (restore it to a new volume

@@ -26,8 +26,39 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 Every script takes `--help` and `--dry-run` (print every action, change nothing) and can be run
 again at any time. The folder READMEs above have the details for each platform.
 
-Installed locations: engine `~/.iter/bin/iter_engine` (Windows `%USERPROFILE%\.iter\bin\iter_engine.exe`),
-iter_data `/opt/iter/bin/iter_data`.
+## One folder: the iter dir
+
+Every installer puts everything it makes in one folder, the **iter dir**: `/opt/iter` by default
+(Windows `C:\iter`; the AWS stack `/data/iter`, on its data volume). Choose another with `--iter-dir DIR`
+(Windows `-IterDir`, or `ITER_DIR` in the environment). The folder always ends in `iter`:
+`--iter-dir /my/dir`, `--iter-dir /my/dir/iter` and `--iter-dir /my/dir/iter/` all mean `/my/dir/iter`.
+
+```
+<iter dir>/
+  iter_data/      bin/ config/ state/ models/ backups/ systemd/ arango/{bin,share,config,data,apps}
+  iter_engine/    bin/ config/ secrets/ models/ logs/ systemd/
+```
+
+- `iter_data/` is root's, run by the `iter` user. `iter_engine/` belongs to the user the engine runs as,
+  except `iter_engine/systemd/`, which is root's: systemd runs that unit, so the user and its agents must
+  not be able to change it.
+- Outside the folder there are only what the OS requires, as links where it can follow them: the systemd
+  units (links in `/etc/systemd/system`, or copies when the iter dir is on another disk than `/`),
+  `/etc/sysctl.d/60-arangodb.conf`, the `/usr/local/bin/iter_engine` link, the macOS launchd plist in
+  `~/Library/LaunchAgents`, and the Windows logon task.
+- Later runs (`status`, `update`, `uninstall`) find the iter dir from the installed service, so
+  `--iter-dir` is only needed the first time. A run with another `--iter-dir` moves the folder there.
+- The engine's service sets `ITER_HOME=<iter dir>/iter_engine`. `iter_engine` run by hand finds its folder
+  from its own path (`<folder>/bin/iter_engine`).
+- **An install from before 2026-10-18** is moved into the iter dir by the next `install` or `update`.
+  For the engine that is `~/.iter`; for iter_data, `/etc/iter`, `/var/lib/iter`, `/opt/iter/bin`,
+  `/var/lib/arangodb3` and `/usr/sbin/arangod`. Files are moved, never deleted, with the services
+  stopped meanwhile. Files the engine does not use go to `iter_engine/old-dot-iter/`, and files an
+  earlier install left in the way go to `replaced-<time>/`. The database and the backups move only
+  from their default places and within one filesystem; otherwise they stay where they are and the
+  script records that. Keys, certificates, and so the fingerprints engines pinned, stay the same.
+- Docker Desktop (macOS, Windows) shares only the home folder by default. For the docker installers,
+  add `/opt/iter` under Settings → Resources → File sharing, or use `--iter-dir ~/iter`.
 
 ## The first-boot admin password
 
@@ -79,7 +110,7 @@ Every engine installer takes `--secrets-command CMD` (`-SecretsCommand` on Windo
 (minutes, default 5): a command printing the account tokens as `KEY=value` lines (AWS SSM Parameter Store or
 Secrets Manager, 1Password, the macOS Keychain; recipes in each folder's README). The engine runs it at
 startup and every N minutes and keeps the values in memory only; environment variables the service starts
-with win over it, and it wins over `~/.iter/.env`. With it, the installers ask for no tokens.
+with win over it, and it wins over `iter_engine/secrets/.env`. With it, the installers ask for no tokens.
 
 ## HTTPS and the certificate fingerprint
 
@@ -93,7 +124,7 @@ again.
 
 Engines never accept plain `http://` across a network: an engine installer stops on an `http://` URL
 unless iter_data runs on that same machine (127.0.0.1, localhost, ::1). Each engine pins iter_data's
-fingerprint in `~/.iter/server_trust.json`:
+fingerprint in `iter_engine/config/server_trust.json`:
 
 1. Install iter_data and copy the fingerprint it prints.
 2. Install each engine with `--data-url https://<host>:8400 --fingerprint sha256:…` (Windows:

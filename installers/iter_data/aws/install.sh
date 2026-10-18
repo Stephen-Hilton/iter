@@ -25,6 +25,8 @@
 #   --instance-type TYPE   [t4g.large for arm64, t3.large for x86_64]
 #   --volume-gib N         database volume size [50]
 #   --port N               iter_data port [8400]
+#   --iter-dir DIR         the folder on the data volume (/data) that holds everything of
+#                          iter_data, its database and backups included; always ends in /iter [/data/iter]
 #   --ssh-cidr CIDR        also open SSH to this range (default: none; use Session Manager)
 #   --key-name NAME        EC2 key pair for SSH
 #   --arango-url URL       use this ArangoDB (https://host:8529) instead of installing one on the
@@ -51,7 +53,7 @@ REPO=Stephen-Hilton/iter
 FOLDER=installers/iter_data/aws
 TEMPLATE=iter_data.cfn.yaml
 
-CMD=deploy STACK=iter-data VPC="" SUBNET="" CIDR="" VERSION=latest ARCH=arm64 ITYPE="" VOL=50 PORT=8400
+CMD=deploy STACK=iter-data VPC="" SUBNET="" CIDR="" VERSION=latest ARCH=arm64 ITYPE="" VOL=50 PORT=8400 IDIR=""
 SSH_CIDR="" KEY="" DRY=0
 A_URL="" A_FP="" A_CA="" A_DB="" A_USER="" A_PLAIN=""
 AWSARGS=()
@@ -72,6 +74,7 @@ while [ $# -gt 0 ]; do
     --instance-type) ITYPE="$2"; shift 2 ;;
     --volume-gib) VOL="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
+    --iter-dir|--iter_dir) IDIR="$2"; shift 2 ;;
     --ssh-cidr) SSH_CIDR="$2"; shift 2 ;;
     --key-name) KEY="$2"; shift 2 ;;
     --arango-url) A_URL="$2"; shift 2 ;;
@@ -173,6 +176,12 @@ params=("IterVersion=$VERSION" "Architecture=$ARCH" "InstanceType=$ITYPE" "DataV
 [ -z "$A_DB" ] || params+=("ArangoDb=$A_DB")
 [ -z "$A_USER" ] || params+=("ArangoUser=$A_USER")
 [ -z "$A_PLAIN" ] || params+=("ArangoAllowPlainHttp=true")
+if [ -n "$IDIR" ]; then
+  # forgiving like the install scripts: /data/x, /data/x/iter and /data/x/iter/ all mean /data/x/iter
+  while [ "${#IDIR}" -gt 1 ] && [ "${IDIR%/}" != "$IDIR" ]; do IDIR="${IDIR%/}"; done
+  [ "${IDIR##*/}" = iter ] || IDIR="$IDIR/iter"
+  case "$IDIR" in /data/*) params+=("IterDir=$IDIR") ;; *) die "--iter-dir $IDIR: a folder on the data volume, /data/..." ;; esac
+fi
 
 # what the first boot reads from SSM for an external ArangoDB (before the stack, so it is there)
 if [ -n "${ARANGO_PASSWORD:-}" ]; then put_secret arango-password ARANGO_PASSWORD; fi
@@ -193,7 +202,7 @@ awsc cloudformation describe-stacks --stack-name "$STACK" \
   --query 'Stacks[0].Outputs[].[OutputKey, OutputValue]' --output text
 say "admin password: $0 password --stack-name $STACK   (or the AdminPasswordParameter output in SSM)"
 say "  you must change it at the first sign-in (the webui asks; a new password needs 12+ characters);"
-say "  the instance then deletes it from SSM and from /etc/iter/data.env"
+say "  the instance then deletes it from SSM and from iter_data/config/data.env"
 say "TLS certificate fingerprint: $0 fingerprint --stack-name $STACK   (the TlsFingerprintParameter output)"
 say "  give it to each engine installer (--fingerprint sha256:...) or compare it with \`iter_engine key status\`;"
 say "  the Url is https:// with a self-signed certificate, so browsers warn until you accept it (or put a TLS proxy in front)"

@@ -1,19 +1,21 @@
 #!/bin/bash
 # iter-admin-cleanup: once the first admin has chosen their own password, the
 # first-boot ITER_ADMIN_PASSWORD is no longer used: remove it from
-# /etc/iter/data.env (everything else stays, root:iter 640) and, on an AWS stack
-# (/etc/iter/aws.env names STACK= and REGION=), delete the SSM parameter
+# config/data.env (everything else stays, root:iter 640) and, on an AWS stack
+# (config/aws.env names STACK= and REGION=), delete the SSM parameter
 # /iter/<stack>/admin-password. iter_data writes the marker
-# /var/lib/iter/admin_password_changed at that moment. Run as root by
+# state/admin_password_changed at that moment. Both folders are in iter_data's
+# folder, the one above this script's bin/. Run as root by
 # iter-admin-cleanup.service (started by iter-admin-cleanup.path when the marker
 # appears) and by install.sh (install, status). Idempotent.
 set -euo pipefail
-MARKER=/var/lib/iter/admin_password_changed
-ENVF=/etc/iter/data.env
-AWSENV=/etc/iter/aws.env
+D="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+MARKER="$D/state/admin_password_changed"
+ENVF="$D/config/data.env"
+AWSENV="$D/config/aws.env"
 [ -f "$MARKER" ] || { echo "iter-admin-cleanup: no $MARKER yet (the first admin has not chosen a password): nothing to do"; exit 0; }
 if [ -f "$ENVF" ] && grep -q '^ITER_ADMIN_PASSWORD=' "$ENVF"; then
-  t="$(mktemp /etc/iter/.data.env.XXXXXX)"
+  t="$(mktemp "$D/config/.data.env.XXXXXX")"
   grep -v '^ITER_ADMIN_PASSWORD=' "$ENVF" > "$t" || true
   chown root:iter "$t"
   chmod 640 "$t"

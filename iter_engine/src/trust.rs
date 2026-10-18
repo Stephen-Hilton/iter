@@ -3,7 +3,7 @@
 //! iter_data serves HTTPS with a certificate of its own (iter_data tls.rs).
 //! The engine does not ask a certificate authority about it: it pins the
 //! certificate's fingerprint (the SHA-256 of its DER) in
-//! `~/.iter/server_trust.json`, one entry per server origin, owner-only.
+//! `<iter dir>/iter_engine/config/server_trust.json`, one entry per server origin, owner-only.
 //!
 //! - **First contact** (no entry yet): the only calls allowed are the
 //!   unauthenticated health check and the signed sign-in. The sign-in signs
@@ -80,7 +80,7 @@ pub fn refuse_reason(url: &str) -> Option<String> {
 }
 
 fn trust_file() -> PathBuf {
-    crate::key::iter_home().join(TRUST_FILE)
+    crate::key::home_file("config", TRUST_FILE)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

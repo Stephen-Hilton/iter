@@ -1,6 +1,6 @@
 # iter engine in a container: Debian bookworm-slim + git, bash, the claude CLI
 # and the prebuilt iter_engine for this platform (no compiling). install.sh
-# builds it in ~/.iter/docker with compose.yml; by hand, from a folder that
+# builds it in <iter dir>/iter_engine/docker with compose.yml; by hand, from a folder that
 # holds this file, entrypoint.sh and iter_engine-linux-<arch>:
 #   docker build -t iter-engine:local .
 FROM debian:bookworm-slim

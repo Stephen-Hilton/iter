@@ -16,10 +16,13 @@ Modes:
   projects    clone each served project that has no checkout yet
   start | stop    the engine process (the logon task runs `start`)
   logs        follow the engine log
-  uninstall   stop the engine, remove its logon task and binary (keeps ~\.iter's key, tokens, model)
+  uninstall   stop the engine, remove its logon task, binary and PATH entry (keeps the key, tokens, model)
 
 Options:
-  -DataUrl URL     iter_data URL (else asked; kept in ~\.iter\engine.conf)
+  -IterDir DIR     the folder that holds everything iter puts on this machine [C:\iter];
+                   always ends in \iter: C:\my\dir\iter\, C:\my\dir\iter and C:\my\dir all give
+                   C:\my\dir\iter (also $env:ITER_DIR; later runs find it from the logon task)
+  -DataUrl URL     iter_data URL (else asked; kept in <iter dir>\iter_engine\config\engine.conf)
   -Name NAME       this engine's name, unique per machine (default: the hostname)
   -Version TAG     release to download, e.g. v2026.10.17 (else $env:ITER_VERSION, else latest)
   -Binary PATH     install this iter_engine.exe instead of downloading one
@@ -30,7 +33,7 @@ Options:
   -SecretsCommand CMD  a command (run by cmd /C) printing KEY=value lines: the account
                    tokens, from a secret store (aws ssm / secretsmanager, op, ...); the
                    engine runs it at startup and every -SecretsEvery minutes and keeps the
-                   values in memory only. Kept in ~\.iter\engine.conf and put on the
+                   values in memory only. Kept in config\engine.conf and put on the
                    engine's command line; "none" removes it. With it, the accounts step
                    asks for no tokens.
   -SecretsEvery N  minutes between secrets-command runs [5]
@@ -40,32 +43,39 @@ Options:
 
 The steps of `install`: tools (Git for Windows, whose bash runs the shell
 steps; the claude CLI; asks before winget) -> iter_data URL + engine name
-(~\.iter\engine.conf) -> iter_engine.exe into ~\.iter\bin (the asset next to
-this script, else the GitHub Release, sha256-checked) -> the embedding model
-into ~\.iter\models -> the engine key (`iter_engine key new`: paste its public
-key into the webui's Engine keys screen; the script waits until iter_data
-accepts it) -> a laptop: no sleep on AC power (asks) -> the logon task
-"iter engine" (runs ~\.iter\bin\iter-engine.ps1 start, a copy of this script)
--> account tokens and project checkouts.
+(config\engine.conf) -> iter_engine.exe into bin\ (the asset next to this
+script, else the GitHub Release, sha256-checked; bin\ goes on the user PATH)
+-> the embedding model into models\ -> the engine key (`iter_engine key new`:
+paste its public key into the webui's Engine keys screen; the script waits
+until iter_data accepts it) -> a laptop: no sleep on AC power (asks) -> the
+logon task "iter engine" (runs bin\iter-engine.ps1 start, a copy of this
+script) -> account tokens and project checkouts.
 
 HTTPS: iter_data must be https:// (iter_data serves HTTPS by default; plain
 http:// is refused unless iter_data runs on this machine: 127.0.0.1, localhost,
 ::1). The engine pins iter_data's certificate fingerprint in
-~\.iter\server_trust.json: -Fingerprint (or the fingerprint pasted when asked)
+config\server_trust.json: -Fingerprint (or the fingerprint pasted when asked)
 runs `iter_engine key trust` right after the binary is installed and stops if
 the server presents another certificate; without one, the first sign-in trusts
 the certificate it sees (compare: iter_engine key status). Other key commands:
 `iter_engine key show` (print the public key), `iter_engine key rotate` (a new
 key, signed by the current one, no webui step).
 
-Everything this machine keeps for iter is in ~\.iter: bin\iter_engine.exe, the
-key (engine.key), server_trust.json (iter_data's pinned certificate), the env
-file with account tokens (.env), engine.conf, models\, engine.pid and the logs
-(engine.log, engine.err.log).
+Everything this machine keeps for iter is in <iter dir>\iter_engine (C:\iter\iter_engine):
+  bin\       iter_engine.exe, iter-engine.ps1 (the logon task's copy of this script)
+  config\    engine.conf, server_trust.json (iter_data's pinned certificate)
+  secrets\   engine.key, .env (account tokens); only this user (and SYSTEM) may read it
+  models\    the embedding model
+  logs\      engine.log, engine.err.log, engine.pid
+The engine runs with ITER_HOME set to that folder. An install from before
+2026-10-18 in ~\.iter is moved there once (install, update); files the script
+does not know go to old-dot-iter\, and ~\.iter is removed only when empty.
 #>
 param(
     [ValidateSet('install', 'status', 'update', 'accounts', 'projects', 'start', 'stop', 'logs', 'uninstall')]
     [string]$Mode = 'install',
+    [Alias('Iter_Dir')]
+    [string]$IterDir = '',
     [string]$DataUrl = '',
     [string]$Name = '',
     [string]$Version = $env:ITER_VERSION,
@@ -86,22 +96,59 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $RepoSlug = 'Stephen-Hilton/iter'
 $Asset = 'iter_engine-windows-x86_64.exe'   # also on ARM64 Windows, through its x64 emulation
 $Here = $PSScriptRoot
-$IterHome = Join-Path $HOME '.iter'
-# iter_engine keeps its files (key, server_trust.json) in $env:ITER_HOME, else ~\.iter:
-# the engine process reads ~\.iter, so this script's own iter_engine calls do too
+$TaskName = 'iter engine'
+$OldHome = Join-Path $HOME '.iter'   # the engine's folder before 2026-10-18
+
+# -IterDir: the folder that holds everything, always ending in \iter
+# (C:\my\dir\iter\, C:\my\dir\iter and C:\my\dir all give C:\my\dir\iter)
+function Resolve-IterDir([string]$d) {
+    $d = $d.Trim()
+    if ($d -eq '~' -or $d -match '^~[\\/]') { $d = $HOME + $d.Substring(1) }
+    # relative to the current location; the folder need not exist yet
+    $d = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($d)
+    while ($d.Length -gt 1 -and ($d.EndsWith('\') -or $d.EndsWith('/')) -and $d -notmatch '^[A-Za-z]:[\\/]$') { $d = $d.Substring(0, $d.Length - 1) }
+    if ((Split-Path -Leaf $d) -ne 'iter') { $d = Join-Path $d 'iter' }
+    return $d
+}
+
+# the iter dir of an existing install: this script running as the logon task's copy
+# (<iter dir>\iter_engine\bin\iter-engine.ps1), else the task's -File argument; '' if none
+function Find-InstalledIterDir {
+    $paths = @()
+    if ($PSCommandPath) { $paths += $PSCommandPath }
+    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($t -and $t.Actions -and "$($t.Actions[0].Arguments)" -match '-File\s+"([^"]+)"') { $paths += $Matches[1] }
+    foreach ($p in $paths) {
+        $bin = Split-Path $p
+        $eng = Split-Path $bin
+        if ((Split-Path -Leaf $p) -eq 'iter-engine.ps1' -and (Split-Path -Leaf $bin) -eq 'bin' -and (Split-Path -Leaf $eng) -eq 'iter_engine') { return (Split-Path $eng) }
+    }
+    return ''
+}
+
+$script:Installed = Find-InstalledIterDir
+$Root = if ($IterDir) { Resolve-IterDir $IterDir }
+        elseif ($env:ITER_DIR) { Resolve-IterDir $env:ITER_DIR }
+        elseif ($script:Installed) { $script:Installed }
+        else { Join-Path "$env:SystemDrive\" 'iter' }
+$IterHome = Join-Path $Root 'iter_engine'
+# iter_engine finds its files (key, server_trust.json, .env) through $env:ITER_HOME:
+# the engine process gets it from Start-Engine, and this script's own calls too
 $env:ITER_HOME = $IterHome
-$TrustFile = Join-Path $IterHome 'server_trust.json'
 $BinDir = Join-Path $IterHome 'bin'
+$ConfDir = Join-Path $IterHome 'config'
+$SecretsDir = Join-Path $IterHome 'secrets'
+$LogDir = Join-Path $IterHome 'logs'
 $Exe = Join-Path $BinDir 'iter_engine.exe'
 $Launcher = Join-Path $BinDir 'iter-engine.ps1'
-$Conf = Join-Path $IterHome 'engine.conf'
-$EnvFile = Join-Path $IterHome '.env'
-$KeyFile = Join-Path $IterHome 'engine.key'
-$PidFile = Join-Path $IterHome 'engine.pid'
-$Log = Join-Path $IterHome 'engine.log'
-$ErrLog = Join-Path $IterHome 'engine.err.log'
+$Conf = Join-Path $ConfDir 'engine.conf'
+$TrustFile = Join-Path $ConfDir 'server_trust.json'
+$EnvFile = Join-Path $SecretsDir '.env'
+$KeyFile = Join-Path $SecretsDir 'engine.key'
+$PidFile = Join-Path $LogDir 'engine.pid'
+$Log = Join-Path $LogDir 'engine.log'
+$ErrLog = Join-Path $LogDir 'engine.err.log'
 $ModelDir = Join-Path $IterHome 'models\all-MiniLM-L6-v2'
-$TaskName = 'iter engine'
 $script:Engine = ''
 $script:SecretsCmd = ''
 $script:SecretsEvery = ''
@@ -191,7 +238,7 @@ function Get-Bearer {
 
 # ------------------------------------------------------------------ iter_data over HTTPS
 # iter_data serves HTTPS with its own (self-signed) certificate. The engine pins
-# that certificate's fingerprint in ~\.iter\server_trust.json (one entry per
+# that certificate's fingerprint in config\server_trust.json (one entry per
 # scheme://host:port), and plain http:// is only for this machine. This script's
 # own API calls check the certificate the same way (IterPinnedGet below).
 
@@ -301,17 +348,124 @@ function Sum-For($sumsFile, $asset) {
     return ''
 }
 
+# ------------------------------------------------------------------ the iter dir
+
+# bin\ config\ secrets\ models\ logs\ under <iter dir>\iter_engine; secrets\ readable
+# by this user (and SYSTEM) only
+function Initialize-Layout {
+    if ($DryRun) { Dry "create $IterHome\{bin,config,secrets,models,logs}; secrets\ for $env:USERNAME (and SYSTEM) only"; return }
+    try { foreach ($d in $BinDir, $ConfDir, $SecretsDir, $LogDir, (Join-Path $IterHome 'models')) { New-Item -ItemType Directory -Force $d | Out-Null } }
+    catch { throw "cannot create ${IterHome}: $($_.Exception.Message) (choose another place with -IterDir, or create $Root as an administrator and give $env:USERNAME write access)" }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Invoke-Native "icacls $SecretsDir (owner only)" { icacls $SecretsDir /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' /Q }
+    foreach ($f in Get-ChildItem $SecretsDir -Force -File) {
+        Invoke-Native "icacls $($f.FullName) (owner only)" { icacls $f.FullName /inheritance:r /grant:r "*${sid}:F" '*S-1-5-18:F' /Q }
+    }
+    Ok "$IterHome (secrets\ for $env:USERNAME only)"
+}
+
+# move a file or folder into $dest (created); when $dest already has one of that
+# name it goes to old-dot-iter\ instead, so nothing is overwritten or deleted
+# The older folder is the live install (a finished move leaves it empty), so its
+# file takes the place: what is in the way (left from an earlier install) is set
+# aside in replaced-<time>\. Nothing is overwritten or deleted.
+$Stamp = Get-Date -Format 'yyyyMMddHHmmss'
+function Move-Into($item, [string]$dest) {
+    $target = Join-Path $dest $item.Name
+    if (Test-Path -LiteralPath $target) {
+        $aside = Join-Path $IterHome "replaced-$Stamp"
+        if ($dest -eq (Join-Path $IterHome 'old-dot-iter')) { $target = "$target.$Stamp" }
+        elseif ($DryRun) { Dry "set aside $target -> $aside\" }
+        else {
+            New-Item -ItemType Directory -Force $aside | Out-Null
+            Move-Item -LiteralPath $target -Destination (Join-Path $aside $item.Name)
+            Warn "$target was there already (from an earlier install): set aside in $aside"
+        }
+    }
+    if ($DryRun) { Dry "move $($item.FullName) -> $target"; return }
+    New-Item -ItemType Directory -Force $dest | Out-Null
+    Move-Item -LiteralPath $item.FullName -Destination $target
+}
+
+# an install from before 2026-10-18 kept everything flat in ~\.iter: each file goes
+# to its folder here, what the script does not know to old-dot-iter\, and ~\.iter
+# is removed only once it is empty
+function Move-OldHome {
+    if (-not (Test-Path $OldHome -PathType Container)) { return }
+    Say "moving the old $OldHome into $IterHome"
+    Stop-Engine (Join-Path $OldHome 'engine.pid')
+    $script:Relocated = $true   # the logon task still names ~\.iter: registered again
+    foreach ($i in Get-ChildItem $OldHome -Force) {
+        switch -Wildcard ($i.Name) {
+            'bin' { foreach ($b in Get-ChildItem $i.FullName -Force) { Move-Into $b $BinDir } }
+            'logs' { foreach ($l in Get-ChildItem $i.FullName -Force) { Move-Into $l $LogDir } }
+            'models' { foreach ($m in Get-ChildItem $i.FullName -Force) { Move-Into $m (Join-Path $IterHome 'models') } }
+            # a newer iter_engine already wrote here (pinned certificates)
+            'config' { foreach ($c in Get-ChildItem $i.FullName -Force) { Move-Into $c $ConfDir } }
+            'secrets' { foreach ($c in Get-ChildItem $i.FullName -Force) { Move-Into $c $SecretsDir } }
+            'engine.conf' { Move-Into $i $ConfDir }
+            'server_trust.json' { Move-Into $i $ConfDir }
+            'engine.key*' { Move-Into $i $SecretsDir }
+            '.env' { Move-Into $i $SecretsDir }
+            'engine*.log' { Move-Into $i $LogDir }
+            'engine.pid' { Move-Into $i $LogDir }
+            default { Move-Into $i (Join-Path $IterHome 'old-dot-iter') }
+        }
+    }
+    if ($DryRun) { Dry "remove $OldHome once it is empty"; return }
+    foreach ($d in 'bin', 'logs', 'models', 'config', 'secrets') {
+        $p = Join-Path $OldHome $d
+        if ((Test-Path $p) -and -not (Get-ChildItem $p -Force)) { Remove-Item $p }
+    }
+    if (Get-ChildItem $OldHome -Force) { Warn "$OldHome still holds files (left as they were)" }
+    else { Remove-Item $OldHome; Ok "moved $OldHome to $IterHome (files it did not know: old-dot-iter\)" }
+}
+
+# installed at another iter dir than the one asked for: stop the engine there and
+# move its folder here (the logon task is registered again for the new place)
+function Move-IterDir {
+    if (-not $script:Installed -or $script:Installed -eq $Root) { return }
+    $old = Join-Path $script:Installed 'iter_engine'
+    if (-not (Test-Path $old)) { return }
+    if (Test-Path $IterHome) { throw "the engine is installed in $old, and $IterHome exists too: move what you need by hand, or run with -IterDir $($script:Installed)" }
+    Say "moving the engine from $old to $IterHome"
+    Stop-Engine (Join-Path $old 'logs\engine.pid')
+    Remove-UserPath (Join-Path $old 'bin')
+    $script:Relocated = $true
+    if ($DryRun) { Dry "move $old -> $IterHome"; return }
+    New-Item -ItemType Directory -Force $Root | Out-Null
+    if ([IO.Path]::GetPathRoot($old) -eq [IO.Path]::GetPathRoot($IterHome)) { Move-Item -LiteralPath $old -Destination $IterHome }
+    else { Copy-Item -LiteralPath $old -Destination $IterHome -Recurse; Remove-Item -LiteralPath $old -Recurse -Force }   # another drive: copy, then the old copy goes
+    if (-not (Get-ChildItem $script:Installed -Force)) { Remove-Item $script:Installed }
+    Ok "moved to $IterHome"
+}
+
+function Get-UserPathPart { return @("$([Environment]::GetEnvironmentVariable('Path', 'User'))" -split ';' | Where-Object { $_ }) }
+# bin\ on the user PATH, once
+function Add-UserPath([string]$dir) {
+    $parts = Get-UserPathPart
+    if ($parts | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') }) { Ok "$dir is on the user PATH"; return }
+    Step "add $dir to the user PATH" { [Environment]::SetEnvironmentVariable('Path', ((@($parts) + $dir) -join ';'), 'User'); $env:Path = "$dir;$env:Path" }
+    Ok "$dir on the user PATH (new shells find iter_engine)"
+}
+function Remove-UserPath([string]$dir) {
+    $parts = Get-UserPathPart
+    $keep = @($parts | Where-Object { $_.TrimEnd('\') -ine $dir.TrimEnd('\') })
+    if ($keep.Count -eq $parts.Count) { return }
+    Step "remove $dir from the user PATH" { [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), 'User') }
+}
+
 # ------------------------------------------------------------------ the engine process
 
-function Get-EngineProcess {
-    if (-not (Test-Path $PidFile)) { return $null }
-    $p = Get-Process -Id ([int](Get-Content $PidFile -Raw).Trim()) -ErrorAction SilentlyContinue
+function Get-EngineProcess([string]$pidFile = $PidFile) {
+    if (-not (Test-Path $pidFile)) { return $null }
+    $p = Get-Process -Id ([int](Get-Content $pidFile -Raw).Trim()) -ErrorAction SilentlyContinue
     if ($p -and $p.ProcessName -eq 'iter_engine') { return $p }
     return $null
 }
 
-function Stop-Engine {
-    $p = Get-EngineProcess
+function Stop-Engine([string]$pidFile = $PidFile) {
+    $p = Get-EngineProcess $pidFile
     if (-not $p) { return }
     if ($DryRun) { Dry "stop iter_engine (pid $($p.Id)) and its agent sessions (taskkill /T)"; return }
     Say "stopping iter_engine (pid $($p.Id))"
@@ -320,7 +474,7 @@ function Stop-Engine {
     taskkill /T /F /PID $p.Id 2>&1 | Out-Null
     $ErrorActionPreference = $eap
     $p.WaitForExit(10000) | Out-Null
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 
 function Start-Engine {
@@ -338,7 +492,8 @@ function Start-Engine {
     # one quoted command line: Start-Process joins an argument array without quoting
     $engineArgs = ($engineArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
     if ($DryRun) { Dry "start (hidden) $Exe $engineArgs > $Log 2> $ErrLog"; return }
-    New-Item -ItemType Directory -Force $IterHome | Out-Null
+    New-Item -ItemType Directory -Force $LogDir | Out-Null
+    $env:ITER_HOME = $IterHome   # the engine finds its key, trust file and .env here
     $p = Start-Process -FilePath $Exe -ArgumentList $engineArgs -WorkingDirectory $IterHome -WindowStyle Hidden `
         -RedirectStandardOutput $Log -RedirectStandardError $ErrLog -PassThru
     Set-Content $PidFile $p.Id
@@ -385,7 +540,7 @@ function Get-NewBinary {
     return $f
 }
 
-# install it as ~\.iter\bin\iter_engine.exe; true when the file changed. Windows
+# install it as bin\iter_engine.exe; true when the file changed. Windows
 # will not overwrite a running .exe: the engine is stopped first (and started
 # again by the caller).
 function Install-Binary {
@@ -460,7 +615,7 @@ function Step-Settings {
     }
     if ($script:SecretsEvery) { $lines += "SECRETS_EVERY=$($script:SecretsEvery)" }
     Step "write $Conf ($($lines -join ', '))" {
-        New-Item -ItemType Directory -Force $IterHome | Out-Null
+        New-Item -ItemType Directory -Force $ConfDir | Out-Null
         [IO.File]::WriteAllLines($Conf, [string[]]$lines)
     }
     $script:DataUrl = $url; $script:Engine = $n
@@ -473,6 +628,7 @@ function Step-Settings {
 function Step-Binary {
     Say '3/8 iter_engine'
     $script:Changed = Install-Binary
+    Add-UserPath $BinDir
 }
 
 # iter_data's certificate, before the first sign-in: -Fingerprint (or the one pasted
@@ -507,8 +663,8 @@ function Step-Trust {
 }
 
 # the embedding model (sentence-transformers/all-MiniLM-L6-v2, Apache-2.0,
-# ~91 MB), checksum-verified; the engine finds ~\.iter\models beside its
-# binary. Without it the engine downloads the model itself on first use.
+# ~91 MB), checksum-verified; the engine finds models\ beside its
+# bin\. Without it the engine downloads the model itself on first use.
 function Step-Model {
     Say '4/8 embedding model'
     $base = 'https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main'
@@ -534,7 +690,7 @@ function Step-Key {
         if (Test-Path $KeyFile) { Ok "$KeyFile exists" } else { Dry "$Exe key new --key-file $KeyFile --name $($script:Engine)" }
         Dry "wait until iter_data accepts it ($Exe key status)"; return
     }
-    New-Item -ItemType Directory -Force $IterHome | Out-Null
+    New-Item -ItemType Directory -Force $SecretsDir | Out-Null
     if (-not (Test-Path $EnvFile)) { New-Item -ItemType File $EnvFile | Out-Null }
     if (-not (Test-Path $KeyFile)) { & $Exe key new --key-file $KeyFile --name $script:Engine | ForEach-Object { "    $_" } }
     $first = $true
@@ -572,14 +728,11 @@ function Step-Power {
     } else { Warn 'a sleeping laptop stops its agents mid-run' }
 }
 
-# a logon task runs a copy of this script (~\.iter\bin\iter-engine.ps1 start),
-# so the engine starts at logon without the download or checkout it came from
-function Step-Service {
-    Say '7/8 start at logon'
-    if ($PSCommandPath -and ((Resolve-Path $PSCommandPath).Path -ne $Launcher)) {
-        Step "copy this script to $Launcher" { New-Item -ItemType Directory -Force $BinDir | Out-Null; Copy-Item $PSCommandPath $Launcher -Force }
-    } elseif (-not $PSCommandPath) { throw 'run this script from a file (not piped into Invoke-Expression): the logon task needs a copy of it' }
-    $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Launcher`" start"
+# a logon task runs a copy of this script (bin\iter-engine.ps1 start), so the
+# engine starts at logon without the download or checkout it came from; the copy
+# finds its iter dir from where it sits (and -IterDir says it too)
+function Register-LogonTask {
+    $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Launcher`" start -IterDir `"$Root`""
     Step "register the logon task '$TaskName': powershell.exe $taskArgs" {
         $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $taskArgs -WorkingDirectory $IterHome
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -588,6 +741,14 @@ function Step-Service {
             -Description "iter: start iter_engine '$($script:Engine)' against $($script:DataUrl)" | Out-Null
     }
     Ok "logon task '$TaskName'"
+}
+
+function Step-Service {
+    Say '7/8 start at logon'
+    if ($PSCommandPath -and ((Resolve-Path $PSCommandPath).Path -ne $Launcher)) {
+        Step "copy this script to $Launcher" { New-Item -ItemType Directory -Force $BinDir | Out-Null; Copy-Item $PSCommandPath $Launcher -Force }
+    } elseif (-not $PSCommandPath) { throw 'run this script from a file (not piped into Invoke-Expression): the logon task needs a copy of it' }
+    Register-LogonTask
     # the conf may have changed: a running engine restarts with it
     if ($script:Changed -or (Get-EngineProcess)) { Stop-Engine }
     Start-Engine
@@ -653,6 +814,7 @@ function Step-Projects {
 function Show-Status {
     Load-Conf
     Write-Host "engine   $($script:Engine) -> $($script:DataUrl)"
+    Write-Host "folder   $IterHome"
     $p = Get-EngineProcess
     if ($p) { Write-Host "process  running (pid $($p.Id), started $($p.StartTime))" } else { Write-Host 'process  not running' }
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -673,12 +835,13 @@ function Do-Update {
     Say 'update iter_engine'
     $e = Get-Api "/api/engines/$($script:Engine)"
     if ($e -and $e.running -gt 0 -and -not $Yes) { throw "engine '$($script:Engine)' runs $($e.running) item(s) and a restart stops them: set its projects Draining and wait, or rerun with -Yes" }
-    $wasRunning = [bool](Get-EngineProcess)
+    $wasRunning = $script:WasRunning -or [bool](Get-EngineProcess)
     $changed = Install-Binary
     if ($PSCommandPath -and (Test-Path $Launcher) -and ((Resolve-Path $PSCommandPath).Path -ne $Launcher)) {
         Step "refresh $Launcher" { Copy-Item $PSCommandPath $Launcher -Force }
     }
-    if ($changed -and $wasRunning) { Start-Engine }
+    if ($script:Relocated) { Register-LogonTask; Add-UserPath $BinDir }
+    if (($changed -or $script:Relocated) -and $wasRunning) { Start-Engine }
 }
 
 function Do-Uninstall {
@@ -689,11 +852,20 @@ function Do-Uninstall {
         Ok "logon task '$TaskName' removed"
     }
     foreach ($f in $Exe, $Launcher) { if (Test-Path $f) { Step "remove $f" { Remove-Item $f -Force }; Ok "removed $f" } }
-    Ok "kept $IterHome (key, tokens, model, logs) and the project checkouts; delete them by hand when this machine is done with iter"
+    Remove-UserPath $BinDir
+    Ok "kept $IterHome (config\, secrets\, models\, logs\) and the project checkouts; delete them by hand when this machine is done with iter"
     Ok "in the webui, remove the engine's key (Engine keys) and its serves edges"
 }
 
 if ($DryRun) { Write-Host 'dry run: every action is printed, nothing is changed' }
+$script:Relocated = $false
+$script:WasRunning = $false
+if ($Mode -in 'install', 'update') {
+    # an engine running from the old place (or ~\.iter) is stopped by the move; update starts it again
+    $script:WasRunning = [bool]((Get-EngineProcess (Join-Path $OldHome 'engine.pid')) -or
+        ($script:Installed -and (Get-EngineProcess (Join-Path $script:Installed 'iter_engine\logs\engine.pid'))))
+    Move-IterDir; Move-OldHome; Initialize-Layout
+}
 switch ($Mode) {
     'install' {
         Step-Tools; Step-Settings; Step-Binary; Step-Trust; Step-Model; Step-Key; Step-Power; Step-Service
