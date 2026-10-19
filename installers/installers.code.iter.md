@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-17 17:00:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:01:38Z", last_tested: ""}
 ---
 # installers — prebuilt binaries and their install scripts
 
@@ -78,8 +78,7 @@ that user's password, and keep root's password for iter_data to create the user 
 start. `--arango-url` (or `ARANGO_URL`) points them at an existing ArangoDB instead, with
 `--arango-fingerprint` / `--arango-ca-cert` for its certificate and `--arango-db` / `--arango-user`.
 linux and linux_aws then install only the Arango clients and drop the `arangodb3` unit and dependency;
-docker skips arangod; aws passes them as stack parameters, with the passwords and CA in SSM. Existing
-installs keep the database `iter5`. `iter-backup` dumps only that database, as iter's user, checking an
+docker skips arangod; aws passes them as stack parameters, with the passwords and CA in SSM. `iter-backup` dumps only that database, as iter's user, checking an
 https certificate first; `install.sh restore FILE` loads it back.
 
 The first-boot admin password must be changed at the first sign-in; once iter_data writes
