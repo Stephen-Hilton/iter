@@ -1,4 +1,4 @@
-//! `GET /api/projects/{p}/graph/view` (iter5): the project graph in the
+//! `GET /api/projects/{p}/graph/view` (iter): the project graph in the
 //! shape the Project graph tab draws. Built on the fly from the stored nodes
 //! and derived edges (nodes.rs):
 //!
@@ -287,7 +287,7 @@ pub fn build(g: &Graph, project_rec: &Value) -> Value {
     let designed = g.live().filter(|n| n.file_state == "designed").count();
     json!({
         "summary": {
-            "project": g.project, "generator": "iter5 iter_data graph/view", "project_node": project_id,
+            "project": g.project, "generator": "iter iter_data graph/view", "project_node": project_id,
             "served": g.served, "build": project_rec.get("build").cloned().unwrap_or(Value::Null),
             "file_sync": {"pending": pending, "designed": designed, "synced": pending == 0 && designed == 0, "states": crate::nodes::state_counts(g)},
             "counts": {

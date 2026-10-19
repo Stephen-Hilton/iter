@@ -3,7 +3,7 @@
 //
 //   settings graph   engine `mbp`, signed in with its own Ed25519 key;
 //                    account `main` (of provider:mock, held by mbp, bills the project)
-//   project graph    a realistic iter5 graph — project node, philosophy + reqs,
+//   project graph    a realistic iter graph — project node, philosophy + reqs,
 //                    two contexts, containers, components, two connection nodes
 //                    (supplies / connects), test nodes with results and logs, two
 //                    use cases + actors, built on `mbp` (build → files/pending →
@@ -103,7 +103,7 @@ async function seedProject(admin, eng, name, opts) {
 
   const out = { name, ids };
   if (opts.built) {
-    const b = await admin.post(`${P}/build`, { engine: 'mbp', topdir: `/tmp/iter5_pw/${name}`, queue_plan: false });
+    const b = await admin.post(`${P}/build`, { engine: 'mbp', topdir: `/tmp/iter_pw/${name}`, queue_plan: false });
     out.build = b;
     // the engine writes every file and acks it
     const pend = (await eng.get(`${P}/files/pending`)).pending;

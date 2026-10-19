@@ -25,7 +25,7 @@
     get(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window: fine */ } }
   };
-  const POS_KEY = "iter5.intro";
+  const POS_KEY = "iter.intro";
 
   let copies = []; // copy-button payloads for the current render
   function code(caption, text) {

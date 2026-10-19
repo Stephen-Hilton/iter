@@ -118,7 +118,10 @@ async fn graph_crud_validation_and_inferred_types() {
 
     // nodes: create, refuse duplicates / bad types / bad records
     t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "project", "name": "p1", "settings": {"desc": "x"}}))).await;
-    t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "iter_engine", "name": "mbp", "settings": {}}))).await;
+    // an engine node needs its host, and one engine per host
+    assert_eq!(t.call("adm", "POST", "/api/settings/nodes", Some(json!({"type": "iter_engine", "name": "nohost", "settings": {}}))).await.0, 400);
+    t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "iter_engine", "name": "mbp", "settings": {"host": "mbp.local"}}))).await;
+    assert_eq!(t.call("adm", "POST", "/api/settings/nodes", Some(json!({"type": "iter_engine", "name": "mbp2", "settings": {"host": "MBP.local"}}))).await.0, 409);
     let acct = t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "account", "name": "main", "settings": {"token_envar": "CLAUDE_TOKEN_MAIN", "provider": "mock"}}))).await;
     assert_eq!(acct["id"], "account:main");
     assert!(t.edge("of", "account:main", "provider:mock").await.unwrap().is_active(), "an account is `of` its provider");
@@ -171,7 +174,8 @@ async fn graph_crud_validation_and_inferred_types() {
 async fn placeholders_moves_and_copy() {
     let t = T::new().await;
     for (ty, name) in [("project", "p1"), ("project", "p2"), ("iter_engine", "e1"), ("iter_engine", "e2")] {
-        t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": ty, "name": name}))).await;
+        let settings = if ty == "iter_engine" { json!({"host": format!("{name}.local")}) } else { json!({}) };
+        t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": ty, "name": name, "settings": settings}))).await;
     }
     let e = t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "iter_engine:e1", "to": "project:p1", "tag": "t", "settings": {"topdir": "/a"}}))).await;
     let id = e["id"].as_str().unwrap().to_string();
@@ -200,6 +204,12 @@ async fn placeholders_moves_and_copy() {
         assert!(!ed.is_active());
         assert_eq!(ed.settings["topdir"], "/a");
     }
+    // ?edges=delete leaves nothing behind: the node's edges go too, none park on the placeholder
+    t.ok("adm", "POST", "/api/settings/nodes", Some(json!({"type": "iter_engine", "name": "e3", "settings": {"host": "e3.local"}}))).await;
+    t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "iter_engine:e3", "to": "project:p1", "settings": {"topdir": "/c"}}))).await;
+    t.ok("adm", "DELETE", "/api/settings/nodes/iter_engine:e3?edges=delete", None).await;
+    assert!(t.edges().await.iter().all(|x| x.from != "iter_engine:e3" && x.to != "iter_engine:e3"));
+    assert_eq!(t.edges().await.iter().filter(|x| x.from == "iter_engine:_deactivated").count(), 2, "only e2's two serves edges are parked");
     // the legacy delete routes do the same
     t.ok("adm", "DELETE", "/api/projects/p2", None).await;
     assert!(t.edges().await.iter().filter(|x| x.to == "project:p2").count() == 0);

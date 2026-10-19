@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run one iter5 crate's `cargo test` and report in the iter5 test contract
-# (docs/iter5_spec.md §3.5): the LAST stdout line is the standard result JSON
+# Run one iter crate's `cargo test` and report in the iter test contract
+# (docs/iter_spec.md §3.5): the LAST stdout line is the standard result JSON
 #   {"name","id","overall_success","normal":{total,pass,err},"longtail":{…},"failure":{…},"details":[…]}
 # exit 0 green / 1 red / 2 could not run (no cargo, no ArangoDB, did not compile).
 #
@@ -10,7 +10,7 @@
 # Buckets: every cargo test is `normal` (passed → pass, failed → err; ignored
 # tests are not counted). details = one row per test (capped at 500).
 # iter_data's tests run on the dev ArangoDB at 127.0.0.1:8529 (databases
-# iter5_test_*; ITER5_TEST_ARANGO_URL / ITER5_TEST_ARANGO_PASSWORD override);
+# iter_test_*; ITER_TEST_ARANGO_URL / ITER_TEST_ARANGO_PASSWORD override);
 # without it they cannot run (exit 2, not red).
 set -u
 crate="${1:?crate name}"
@@ -35,13 +35,13 @@ if [ ! -x "$cargo" ]; then
   echo "no cargo at $cargo"; result 0 0 false; exit 2
 fi
 if [ "$crate" = iter_data ]; then
-  aurl="${ITER5_TEST_ARANGO_URL:-${ITER4_TEST_ARANGO_URL:-http://127.0.0.1:8529}}"
-  apw="${ITER5_TEST_ARANGO_PASSWORD:-${ITER4_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}}"
+  aurl="${ITER_TEST_ARANGO_URL:-${ITER5_TEST_ARANGO_URL:-${ITER4_TEST_ARANGO_URL:-http://127.0.0.1:8529}}}"
+  apw="${ITER_TEST_ARANGO_PASSWORD:-${ITER5_TEST_ARANGO_PASSWORD:-${ITER4_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}}}"
   if ! curl -sf -o /dev/null -u "root:$apw" "$aurl/_api/version"; then
     echo "no ArangoDB at $aurl — iter_data's tests need it (./deploy.sh local starts the dev container)"
     result 0 0 false; exit 2
   fi
-  export ITER5_TEST_ARANGO_URL="$aurl" ITER5_TEST_ARANGO_PASSWORD="$apw"
+  export ITER_TEST_ARANGO_URL="$aurl" ITER_TEST_ARANGO_PASSWORD="$apw"
 fi
 
 out="$(cd "$root" && "$cargo" test -p "$crate" 2>&1)"

@@ -1,4 +1,4 @@
-//! The project graph API (iter5 spec §6.2): nodes = files.
+//! The project graph API (iter spec §6.2): nodes = files.
 //!
 //! Reads answer from the stored nodes and derived edges (nodes.rs); every
 //! edit changes the node data directly — conformed with the same library the

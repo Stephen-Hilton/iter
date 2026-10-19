@@ -10,7 +10,7 @@
 //! deletes afterwards stays deleted across restarts. `iter_data defaults add`
 //! adds the missing ones again on request.
 //!
-//! The records came from the live iter5 database (2026-10-19); pdy-dev-only
+//! The records came from the live iter database (2026-10-19); pdy-dev-only
 //! ones (`deploy`, `_block_cluster_restart`) and retired aliases
 //! (`testwriter`, `_interface_contracts`, `_testgroup_authoring`) are left out.
 

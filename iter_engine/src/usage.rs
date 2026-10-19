@@ -39,7 +39,7 @@ pub fn usage_dir() -> PathBuf {
     }
     // unit tests never write into the real ~/.claude
     if cfg!(test) {
-        return std::env::temp_dir().join(format!("iter5-engine-test-usage-{}", std::process::id()));
+        return std::env::temp_dir().join(format!("iter-engine-test-usage-{}", std::process::id()));
     }
     iter_core::platform::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claude")
 }

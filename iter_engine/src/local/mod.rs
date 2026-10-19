@@ -1,4 +1,4 @@
-//! local — the checkout-side helpers the iter5 engine and the `iter`
+//! local — the checkout-side helpers the iter engine and the `iter`
 //! CLI use, with no server involved: node-file walking (`walk`, git-ignore
 //! aware), the deterministic test runner (`runtests`, standard result JSON),
 //! and `validate` (a wrapper over `iter_core::nodefile::conform`). iter4's

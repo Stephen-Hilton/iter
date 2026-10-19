@@ -1,4 +1,4 @@
-// Playwright config for the iter5 webui. globalSetup builds iter_data, starts it
+// Playwright config for the iter webui. globalSetup builds iter_data, starts it
 // on a random port against a throwaway ArangoDB database (iter5_pw_<ts>) and seeds
 // it through the API; globalTeardown stops it and drops the database.
 const { defineConfig } = require('@playwright/test');

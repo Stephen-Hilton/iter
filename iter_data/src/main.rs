@@ -1,7 +1,7 @@
-//! iter_data — the central API server + persistence for iter5.
+//! iter_data — the central API server + persistence for iter.
 //! Storage is ArangoDB only (graph + documents in one engine, usually in the
 //! same container; decided 2026-09-29 — no SQLite, no DynamoDB). The iter3
-//! DynamoDB migration was removed in iter5.
+//! DynamoDB migration was removed in iter.
 
 mod api;
 mod arango;
@@ -44,7 +44,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(name = "iter_data", about = "iter5 central data/API server")]
+#[command(name = "iter_data", about = "iter central data/API server")]
 struct Args {
     /// storage backend: arango (the only one; kept so scripts may say so)
     #[arg(long, default_value = "arango")]
@@ -203,7 +203,7 @@ async fn main() {
     let args = Args::parse();
     load_env_file(&args.env_file);
     if args.backend != "arango" {
-        eprintln!("unknown backend '{}': iter5 stores everything in ArangoDB (--backend arango)", args.backend);
+        eprintln!("unknown backend '{}': iter stores everything in ArangoDB (--backend arango)", args.backend);
         std::process::exit(2);
     }
     let store: Arc<dyn storage::Storage> = Arc::new(open_arango(&args).await);

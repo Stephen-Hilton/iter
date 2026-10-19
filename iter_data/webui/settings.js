@@ -1,5 +1,5 @@
 /*
- * iter5 Settings graph (spec §7, §9): every setting lives on a node or an
+ * iter Settings graph (spec §7, §9): every setting lives on a node or an
  * edge. Nodes: iter_data, iter_engine, project, workitem_type, agent,
  * agent_tools, user, account, provider — each type also has a non-deletable
  * placeholder "<type>:_deactivated". Edges carry the settings that join two
@@ -256,9 +256,9 @@
       + '<div class="item"><svg width="30" height="8" aria-hidden="true"><line x1="1" y1="4" x2="23" y2="4" stroke="#5b6270" stroke-width="2" stroke-dasharray="5 3"/><polygon points="23,0 30,4 23,8" fill="#5b6270"/></svg>inactive (switched off, or one end on a placeholder)</div>';
     $('legend').innerHTML = `<button type="button" class="legendtoggle" id="s-legendToggle">Legend</button><div class="legendbody"><div class="row"><span class="lbl">Nodes</span>${nodes}</div><div class="row"><span class="lbl">Edges</span>${edges}</div>
       <div class="row note"><span class="lbl">Note</span><span>A tagged edge always shows its tag; an untagged edge shows its type when you hover it or one of its nodes, select it, or zoom in. Drag an edge's end onto a <i>deactivated</i> placeholder to switch it off and keep its settings; drag it back to switch it on.</span></div></div>`;
-    let open = false; try { open = localStorage.getItem('iter5.settings.legendOpen') === '1'; } catch (e) { /* storage blocked */ }
+    let open = false; try { open = localStorage.getItem('iter.settings.legendOpen') === '1'; } catch (e) { /* storage blocked */ }
     const apply = () => { $('legend').classList.toggle('collapsed', !open); $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸'; if (S.cy) S.cy.resize(); };
-    $('legendToggle').onclick = () => { open = !open; try { localStorage.setItem('iter5.settings.legendOpen', open ? '1' : '0'); } catch (e) { /* storage blocked */ } apply(); };
+    $('legendToggle').onclick = () => { open = !open; try { localStorage.setItem('iter.settings.legendOpen', open ? '1' : '0'); } catch (e) { /* storage blocked */ } apply(); };
     apply();
   }
 
@@ -366,7 +366,7 @@
     cy.on('tap', (e) => { if (e.target === cy) { if (S.draw) cancelDraw(); else select(null); } });
     // Force layout: a dragged node pulls its neighbours along, and the graph settles around it on release
     // a pinned node (P) stays put through drags, settles and re-layouts (per layout, in this browser)
-    S.pins = K().pins(cy, { key: () => 'iter5.settings.pins.' + S.layout });
+    S.pins = K().pins(cy, { key: () => 'iter.settings.pins.' + S.layout });
     K().springDrag(cy, { enabled: () => S.layout === 'force', layout: () => FORCE });
     cy.on('dbltap', 'node', (e) => { if (!isHelper(e.target)) configureNode(S.byId.get(e.target.id())); });
     cy.on('dbltap', 'edge', (e) => { const r = edgeOf(e.target); if (r) configureEdge(r); });
@@ -414,6 +414,41 @@
   }
   /** settings every node of a type shows, even before they are set */
   const NODE_KEYS = { account: { token_envar: '' } };
+  /** (?) hover text per setting: what it does, the default, the recommendation, when to deviate */
+  const T = (what, def, rec, deviate) => ({ what, def, rec, deviate });
+  const STATUS = 'Status the engine writes about itself every heartbeat — not a setting.';
+  const NODE_TIPS = {
+    iter_engine: {
+      host: T('The hostname of the machine this engine runs on. It ties the node to one real engine and must be unique: one engine per machine.', 'Filled in by the engine when it registers itself.', 'Leave it as the engine set it.', 'Only when you add the node by hand before the engine has ever started; then it must be that machine\'s hostname.'),
+      state: T(STATUS + ' Running, Draining (finishes current work, takes no more) or Stopped.', 'Stopped until the engine starts.', 'Leave to the engine.', 'To stop work cleanly use the on/off switch or Draining, not this field.'),
+      last_seen: T(STATUS + ' When the engine last checked in; offline when it is old.', 'Empty until the first heartbeat.', 'Do not edit.', 'Never.'),
+      ticksec: T('How often (seconds) the engine looks for work and checks in.', '5', '5.', 'Raise it (15–30) on a slow or metered link to cut chatter; lower it only while debugging.'),
+      full_refresh_minutes: T('Every this many minutes the engine reloads everything from iter_data, as a fallback in case a change notice was missed.', 'See the engine\'s default (about 10).', 'Keep the default.', 'Lower if the engine seems to miss edits; raise to reduce load on a big install.'),
+      account: T(STATUS + ' The account the engine is spending right now ("" = none).', 'Empty.', 'Do not edit — attach accounts with holds edges instead.', 'Never.'),
+      hold: T(STATUS + ' Why the engine is dispatching nothing: all accounts at their stop %, no account token, or accounts switched off. Empty = working.', 'Empty.', 'Do not edit.', 'Never; fix the cause (usage, token, switch) and it clears itself.'),
+      queuelock: T(STATUS + ' Internal queue-lock bookkeeping.', 'Empty.', 'Do not edit.', 'Never.'),
+      projects: T('Deprecated: the projects an engine serves now live on serves edges (with their topdir).', 'Empty.', 'Leave empty; draw serves edges.', 'Never.'),
+      user: T('The user who owns this engine; only they and admins can change it. Set from the signing-in token.', 'Whoever registered the engine.', 'Leave as is.', 'An admin hands the engine to another person.'),
+      running: T(STATUS + ' How many run threads the engine has.', '0.', 'Do not edit.', 'Never.'),
+      running_by_project: T(STATUS + ' Run threads per project.', 'Empty.', 'Do not edit.', 'Never.'),
+      test_requested: T('Set by the "test connection" button to ask the engine for a quick connectivity check; the engine clears it when done.', 'Empty.', 'Do not edit.', 'Never.'),
+      test_result: T(STATUS + ' Outcome of the last connectivity test.', 'Empty.', 'Do not edit.', 'Never.'),
+      probe_requested: T('Set by the Accounts ↻ button to ask the engine to re-read every account\'s 5h / 7d usage right now; the engine clears it when done.', 'Empty.', 'Do not edit; press ↻ instead.', 'Never.'),
+      probe_stale_min: T('When the active account\'s usage reading is older than this many minutes and nothing is running, the engine sends one tiny haiku request to refresh it.', '20', '20.', 'Set 0 to turn it off (the reading then goes stale while idle); raise it to spend fewer tokens on idle probes.'),
+      operating_system: T('The OS name told to every agent this engine starts ("Windows 11", "Debian Linux").', 'Empty — agents are not told.', 'Fill it in so agents use the right commands.', 'Leave empty only if all your engines are alike.'),
+      os_agent_instructions: T('Extra guidance to agents on this OS: shells, path style, costly commands.', 'Empty.', 'A few lines for Windows or unusual setups.', 'Leave empty on a plain Linux/macOS box.'),
+      active: T('The on/off switch for this engine. Off = it takes no new work.', 'on', 'on.', 'Off to take a machine out of rotation without deleting it.'),
+    },
+    account: {
+      token_envar: T('The NAME of the environment variable holding this account\'s login token on the engines (a line in the engine\'s secrets/.env). The token itself is never stored here.', 'None — the account cannot run without it.', 'A short unique name like DEV1_TOKEN.', 'A holds edge may give a different variable for one engine.'),
+      provider: T('Which AI provider bills this account.', 'claude', 'claude.', 'Only for a different provider.'),
+      active: T('The on/off switch for this account. Off = engines will not spend it.', 'on', 'on.', 'Off while the account is out of credit or being changed.'),
+    },
+    project: {
+      state: T('Running = work is dispatched; Draining = finish what is running, take no more; Stopped = nothing runs.', 'Running', 'Running.', 'Draining before maintenance; Stopped to freeze the project.'),
+      desc: T('A short description shown in lists.', 'Empty.', 'One sentence.', 'Any time.'),
+    },
+  };
   const NODE_HELP = { token_envar: 'the NAME of the environment variable that holds this account\'s token on the engine (e.g. DEV1_TOKEN, a line in the engine\'s secrets/.env), never the token itself; a holds edge may name another for its engine' };
   async function configureNode(n) {
     if (!n) return;
@@ -427,7 +462,7 @@
     return K().configure({ title: `${(TYPES[n.type] || {}).label || n.type} — ${nodeName(n.id)}`, sub: rec.summary || '', readOnly: ro, allowAdd: !ro,
       meta: [['id', `<span class="g-mono">${esc(n.id)}</span>`], ['type', esc(n.type)], ['edges', String(S.data.edges.filter((e) => e.from === n.id || e.to === n.id).length)]],
       note: ro ? (n.placeholder ? 'A placeholder has no settings: edges that end here are switched off.' : 'Read only — an admin edits.') : 'Each key is one setting. × removes a key; + Add setting adds one.',
-      fields: nameField.concat(settingsFields(rec.settings || {}, NODE_KEYS[n.type] || {}).map((f) => Object.assign(f, nameField.length ? { group: 'Settings' } : {}, NODE_HELP[f.key] ? { help: NODE_HELP[f.key] } : {}))),
+      fields: nameField.concat(settingsFields(rec.settings || {}, NODE_KEYS[n.type] || {}).map((f) => Object.assign(f, nameField.length ? { group: 'Settings' } : {}, NODE_HELP[f.key] ? { help: NODE_HELP[f.key] } : {}, (NODE_TIPS[n.type] || {})[f.key] ? { tip: NODE_TIPS[n.type][f.key] } : {}))),
       onSave: async ({ changed, removed }) => {
         const body = {}; const patch = {};
         Object.keys(changed).forEach((k) => { if (k === '__name') body.name = String(changed[k]).trim(); else patch[k] = changed[k]; });
@@ -495,9 +530,15 @@
   async function deleteNode(n) {
     if (!n || n.placeholder || n.type === 'iter_data') return;
     const ne = S.data.edges.filter((e) => e.from === n.id || e.to === n.id).length;
-    const ok = await K().confirm({ title: `Delete ${nodeName(n.id)}?`, text: `The ${esc((TYPES[n.type] || {}).label || n.type)} and its settings go.${ne ? ` Its ${ne} edge(s) move to the deactivated placeholder (kept, switched off).` : ''}`, okLabel: 'Delete', danger: true });
-    if (!ok) return;
-    try { await api('/api/settings/nodes/' + enc(n.id), { method: 'DELETE' }); } catch (er) { toast('Refused: ' + errMsg(er), { kind: 'err', ms: 6000 }); return; }
+    const label = (TYPES[n.type] || {}).label || n.type;
+    let purge = false;
+    if (ne) {
+      const pick = await K().choose({ title: `Delete ${nodeName(n.id)}?`, text: `The ${esc(label)} and its settings go. It has ${ne} edge(s).`, okLabel: 'Delete', selected: 1,
+        options: [{ value: 'purge', label: 'Delete the node and its edges', desc: 'for a node made by mistake: nothing is left behind' }, { value: 'keep', label: `Delete the node, keep its edges switched off`, desc: `the edges move to the deactivated ${label.toLowerCase()} placeholder with their settings, to re-attach later` }] });
+      if (!pick) return;
+      purge = pick === 'purge';
+    } else if (!(await K().confirm({ title: `Delete ${nodeName(n.id)}?`, text: `The ${esc(label)} and its settings go.`, okLabel: 'Delete', danger: true }))) return;
+    try { await api('/api/settings/nodes/' + enc(n.id) + (purge ? '?edges=delete' : ''), { method: 'DELETE' }); } catch (er) { toast('Refused: ' + errMsg(er), { kind: 'err', ms: 6000 }); return; }
     toast('Deleted', { kind: 'ok' }); select(null); reload(); if (S.ctx.onChange) S.ctx.onChange();
   }
   async function newNode(type) {
@@ -505,20 +546,27 @@
     const types = TYPE_ORDER.filter((t) => t !== 'iter_data');
     let created = null;
     await K().modal({ title: 'New settings node', wide: false,
-      body: `<label class="kit-field"><span>Type</span><select id="sn-type">${types.map((t) => `<option value="${t}" ${t === (type || 'iter_engine') ? 'selected' : ''}>${esc(TYPES[t].long)}</option>`).join('')}</select></label>
+      body: `<label class="kit-field"><span>Type</span><select id="sn-type"><option value="" ${type ? '' : 'selected'} disabled>— pick a type —</option>${types.map((t) => `<option value="${t}" ${t === type ? 'selected' : ''}>${esc(TYPES[t].long)}</option>`).join('')}</select></label>
         <label class="kit-field"><span>Name</span><input id="sn-name" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Shop API" autofocus><small id="sn-help"></small></label>
         <label class="kit-field" id="sn-envrow" hidden><span>Token env var</span><input id="sn-envar" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. DEV1_TOKEN"><small>The NAME of the environment variable holding this account's token on each engine (a line in the engine's <code>secrets/.env</code>, or its secrets command), never the token itself.</small></label>
+        <label class="kit-field" id="sn-hostrow" hidden><span>Host</span><input id="sn-host" type="text" autocomplete="off" spellcheck="false" placeholder="the machine's hostname (run <hostname>)"><small>An engine node stands for the engine running on one machine, so its host must be that machine's and unique: no two engines may share a host. Engines register themselves on first start — add one here only for a machine you are about to set up.</small></label>
         <p class="kit-text kit-dim">The node's id is made from this name once and never changes; the name itself can be renamed later. Settings are added afterwards with Configure. Engines also register themselves the first time they start (<code>iter_engine --data-url URL --env-file PATH</code>; its <code>--name</code> is then the engine's id).</p>`,
       buttons: [{ label: 'Cancel', value: null }, { label: 'Create', value: 'ok', primary: true }],
-      onOpen: (d) => { const t = d.querySelector('#sn-type'); const h = d.querySelector('#sn-help'); const sync = () => { h.textContent = { project: 'A designed project: build it later from its Project graph. (The wizard on the Intro tab does the same.)', account: 'Connect it to a provider (of), to projects (bills) and to the engines holding its token (holds).', user: 'Set a password from the user gear in the work queue.' }[t.value] || ''; d.querySelector('#sn-envrow').hidden = t.value !== 'account'; }; t.onchange = sync; sync(); },
+      onOpen: (d) => { const t = d.querySelector('#sn-type'); const h = d.querySelector('#sn-help'); const sync = () => { h.textContent = { project: 'A designed project: build it later from its Project graph. (The wizard on the Intro tab does the same.)', account: 'Connect it to a provider (of), to projects (bills) and to the engines holding its token (holds).', user: 'Set a password from the user gear in the work queue.' }[t.value] || ''; d.querySelector('#sn-envrow').hidden = t.value !== 'account'; d.querySelector('#sn-hostrow').hidden = t.value !== 'iter_engine'; }; t.onchange = sync; sync(); },
       onButton: async (v, d) => {
         const t = d.querySelector('#sn-type').value; const name = d.querySelector('#sn-name').value.trim();
+        if (!t) throw new Error('Pick a node type first.');
         if (!name || name.length > 100 || name.includes('/')) throw new Error('A name of 1–100 characters, without "/".');
         const settings = {};
         if (t === 'account') {
           const v = d.querySelector('#sn-envar').value.trim();
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) throw new Error('The token env var is a variable name: letters, digits and _ (e.g. DEV1_TOKEN).');
           settings.token_envar = v;
+        }
+        if (t === 'iter_engine') {
+          const h = d.querySelector('#sn-host').value.trim();
+          if (!h) throw new Error('An engine needs its host (the machine\'s hostname).');
+          settings.host = h;
         }
         const r = await api('/api/settings/nodes', { method: 'POST', body: JSON.stringify({ type: t, name, settings }) }).catch((e) => { throw new Error(errMsg(e)); });
         created = (r && r.id) || `${t}:${name}`; S.hide.delete(t);
@@ -619,16 +667,16 @@
 
   function mount(el, ctx) {
     S.el = el; S.ctx = ctx || {};
-    try { const h = JSON.parse(localStorage.getItem('iter5.settings.hide') || 'null'); if (Array.isArray(h)) S.hide = new Set(h); else S.hide = new Set(['workitem_type', 'agent_tools']); } catch (e) { S.hide = new Set(['workitem_type', 'agent_tools']); }
-    try { const l = localStorage.getItem('iter5.settings.layout'); if (['columns', 'flow', 'force'].includes(l)) S.layout = l; } catch (e) { /* storage blocked */ }
+    try { const h = JSON.parse(localStorage.getItem('iter.settings.hide') || 'null'); if (Array.isArray(h)) S.hide = new Set(h); else S.hide = new Set(['workitem_type', 'agent_tools']); } catch (e) { S.hide = new Set(['workitem_type', 'agent_tools']); }
+    try { const l = localStorage.getItem('iter.settings.layout'); if (['columns', 'flow', 'force'].includes(l)) S.layout = l; } catch (e) { /* storage blocked */ }
     el.innerHTML = TEMPLATE;
     el.classList.add('gview');
     renderLegend();
-    const saveHide = () => { try { localStorage.setItem('iter5.settings.hide', JSON.stringify([...S.hide])); } catch (e) { /* storage blocked */ } };
+    const saveHide = () => { try { localStorage.setItem('iter.settings.hide', JSON.stringify([...S.hide])); } catch (e) { /* storage blocked */ } };
     $('chips').addEventListener('click', (ev) => { const b = ev.target.closest('[data-type]'); if (!b || !S.data) return; const k = b.dataset.type;
       if (ev.altKey) S.hide = new Set(TYPE_ORDER.filter((x) => x !== k)); else if (S.hide.has(k)) S.hide.delete(k); else S.hide.add(k);
       saveHide(); draw(S.layout === 'columns' ? false : true); });
-    el.querySelector('#s-layouts').addEventListener('click', (ev) => { const b = ev.target.closest('[data-layout]'); if (!b) return; S.layout = b.dataset.layout; try { localStorage.setItem('iter5.settings.layout', S.layout); } catch (e) { /* storage blocked */ } renderChips(); layout(); });
+    el.querySelector('#s-layouts').addEventListener('click', (ev) => { const b = ev.target.closest('[data-layout]'); if (!b) return; S.layout = b.dataset.layout; try { localStorage.setItem('iter.settings.layout', S.layout); } catch (e) { /* storage blocked */ } renderChips(); layout(); });
     $('ph').onchange = () => draw(false); $('inactive').onchange = () => draw(true);
     $('fit').onclick = () => S.cy && S.cy.animate({ fit: { eles: S.cy.elements().not('.kit-ep'), padding: 30 } }, { duration: 250 });
     $('relayout').onclick = () => S.cy && layout();

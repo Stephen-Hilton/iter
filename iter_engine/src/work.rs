@@ -27,7 +27,7 @@ pub static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The mutex every engine step that writes `topdir`'s git index holds
 /// (end-of-run commits, file-sync writes, builds), so two of them never race
-/// for that checkout's `.git/index.lock`.  One per checkout (iter5: one
+/// for that checkout's `.git/index.lock`.  One per checkout (iter: one
 /// engine serves many projects; their commits run in parallel).
 pub fn git_lock(topdir: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>> = std::sync::OnceLock::new();

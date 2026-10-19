@@ -67,7 +67,7 @@ if [ "$LOCAL" = 1 ]; then
   # the image); with no ARANGO_DB given, keep using it while iter_db does not exist.
   if [ -z "${ARANGO_DB:-}" ]; then
     dbs="$(curl -fsS -u "root:${ARANGO_ROOT_PASSWORD:-}" http://127.0.0.1:8529/_api/database 2>/dev/null || true)"
-    if grep -q '"iter5"' <<<"$dbs" && ! grep -q '"iter_db"' <<<"$dbs"; then
+    if grep -q '"iter"' <<<"$dbs" && ! grep -q '"iter_db"' <<<"$dbs"; then
       export ARANGO_DB=iter5
       echo "[iter_data] using the existing database iter5 (from before iter_db; set ARANGO_DB to choose)"
     fi

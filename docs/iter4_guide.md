@@ -36,7 +36,7 @@ From the `iter4/` directory of the repository:
 ./deploy.sh local    # native iter_data (release build) against a dev ArangoDB container on :8529
 ```
 
-`docker` is the normal way. It builds the Linux iter_data binary, downloads the embedding model (`installers/fetch_model.sh`) and runs `installers/iter_data/docker/install.sh`, which writes `~/.iter/iter5.docker.env` with the admin password and token secret from your `.env`, builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter4-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
+`docker` is the normal way. It builds the Linux iter_data binary, downloads the embedding model (`installers/fetch_model.sh`) and runs `installers/iter_data/docker/install.sh`, which writes `~/.iter/iter.docker.env` with the admin password and token secret from your `.env`, builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
 
 ### Which ports does iter4 use?
 
@@ -62,7 +62,7 @@ The `.env` loader reads plain `KEY=VALUE` lines, never runs them through a shell
 
 ### Where is my data stored?
 
-In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter5/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter4-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
+In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter5/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
 
 ### Does the container run the agents?
 

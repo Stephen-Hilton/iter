@@ -39,17 +39,17 @@ test.describe('designer', () => {
     await expect(dialog(page).locator('#b-top')).toHaveValue(`~/dev/${PROJ}`);
     await expect(dialog(page).locator('#b-eng option[value=mbp]')).toHaveCount(1);
     await dialog(page).locator('#b-eng').selectOption('mbp');
-    await dialog(page).locator('#b-top').fill(`/tmp/iter5_pw/${PROJ}`);
+    await dialog(page).locator('#b-top').fill(`/tmp/iter_pw/${PROJ}`);
     await dialog(page).locator('#b-note').fill('Start with the beds and plants model.');
     await shot(page, 'designer-build-dialog');
     const reqP = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/api/projects/${PROJ}/build`));
     const respP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().endsWith(`/api/projects/${PROJ}/build`));
     await dialog(page).locator('.kit-primary').click();
-    expect(JSON.parse((await reqP).postData())).toEqual({ engine: 'mbp', topdir: `/tmp/iter5_pw/${PROJ}`, queue_plan: true, plan_note: 'Start with the beds and plants model.' });
+    expect(JSON.parse((await reqP).postData())).toEqual({ engine: 'mbp', topdir: `/tmp/iter_pw/${PROJ}`, queue_plan: true, plan_note: 'Start with the beds and plants model.' });
     const resp = await respP;
     expect(resp.status()).toBe(200);
     const body = await resp.json();
-    expect(body.build).toMatchObject({ state: 'requested', engine: 'mbp', topdir: `/tmp/iter5_pw/${PROJ}`, queue_plan: true });
+    expect(body.build).toMatchObject({ state: 'requested', engine: 'mbp', topdir: `/tmp/iter_pw/${PROJ}`, queue_plan: true });
     expect(body.flipped).toBe(4);
     expect(body.serves_edge).toBeTruthy();
     await expect(dialog(page)).toHaveCount(0);
@@ -64,7 +64,7 @@ test.describe('designer', () => {
     const g1 = await admin.graph(PROJ);
     expect(g1.nodes.every((n) => n.file_state === 'pending_write')).toBe(true);
     const sg = await admin.get('/api/settings/graph');
-    expect(sg.edges.some((e) => e.type === 'serves' && e.from === 'iter_engine:mbp' && e.to === `project:${PROJ}` && e.active && e.settings.topdir === `/tmp/iter5_pw/${PROJ}`)).toBe(true);
+    expect(sg.edges.some((e) => e.type === 'serves' && e.from === 'iter_engine:mbp' && e.to === `project:${PROJ}` && e.active && e.settings.topdir === `/tmp/iter_pw/${PROJ}`)).toBe(true);
 
     // the engine takes the build: writes + acks every file, reports done → the page notices on its own
     const pend = (await engine.get(`/api/projects/${PROJ}/files/pending`)).pending;

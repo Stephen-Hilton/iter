@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy iter5 locally.
+# Deploy iter locally.
 #
 #   ./deploy.sh docker [installer options]
 #                        the all-in-one container (ArangoDB CE + iter_data), https://127.0.0.1:8400:
@@ -30,7 +30,7 @@ BIN="$ROOT/bin/$OS-$ARCH"
 RUN="$ROOT/run"
 PORT="${ITER_PORT:-8400}"
 ENV_FILE="${ITER_ENV_FILE:-$ROOT/.env}"
-ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iter4dev}"
+ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iterdev}"
 ITER_DIR="${ITER_DIR:-$HOME/iter}"
 # an older data folder to move into the iter dir, when there is one
 OLD_DATA="${ITER_DATA_DIR:-}"
@@ -84,11 +84,11 @@ case "$MODE" in
     echo "[deploy] building iter_data-linux-$DARCH (installers/build.sh, placed in installers/iter_data/docker/)"
     "$ROOT/installers/build.sh" --only "iter_data-linux-$DARCH"
     "$ROOT/installers/fetch_model.sh"
-    echo "[deploy] building + starting the iter5 container (data: $ITER_DIR/iter_data)"
+    echo "[deploy] building + starting the iter container (data: $ITER_DIR/iter_data)"
     # secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) from $ENV_FILE -> <iter dir>/iter_data/config/data.env;
-    # the Arango root password from ARANGO_ROOT_PASSWORD [iter4dev] unless that file or $ENV_FILE has one
+    # the Arango root password from ARANGO_ROOT_PASSWORD [iterdev] unless that file or $ENV_FILE has one
     ARANGO_ROOT_PASSWORD="$ARANGO_PW" "$ROOT/installers/iter_data/docker/install.sh" \
-      --env-file "$ENV_FILE" --port "$PORT" --iter-dir "$ITER_DIR" ${OLD_DATA:+--data-dir "$OLD_DATA"} --name iter5 \
+      --env-file "$ENV_FILE" --port "$PORT" --iter-dir "$ITER_DIR" ${OLD_DATA:+--data-dir "$OLD_DATA"} --name iter \
       --arango-port "${ARANGO_HOST_PORT:-8630}" --model-dir "$ROOT/models/all-MiniLM-L6-v2" ${@+"$@"}
     SCHEME=https
     ;;
@@ -96,9 +96,9 @@ case "$MODE" in
     build_native
     "$ROOT/installers/fetch_model.sh"
     stop_native
-    if ! docker ps --format '{{.Names}}' | grep -qx iter4-arango-dev; then
-      docker start iter4-arango-dev 2>/dev/null || docker run -d --name iter4-arango-dev -p 127.0.0.1:8529:8529 \
-        -e ARANGO_ROOT_PASSWORD="$ARANGO_PW" -v iter4-arango-dev:/var/lib/arangodb3 arangodb:3.12 arangod --vector-index >/dev/null
+    if ! docker ps --format '{{.Names}}' | grep -qx iter-arango-dev; then
+      docker start iter-arango-dev 2>/dev/null || docker run -d --name iter-arango-dev -p 127.0.0.1:8529:8529 \
+        -e ARANGO_ROOT_PASSWORD="$ARANGO_PW" -v iter-arango-dev:/var/lib/arangodb3 arangodb:3.12 arangod --vector-index >/dev/null
     fi
     # iter_data signs in as iter_user (rw on iter_db only); root sets that up on
     # the first start. The user's password is made once and kept in run/.

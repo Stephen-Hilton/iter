@@ -52,7 +52,7 @@ committed) and one self-contained install script per program and platform. Insta
 - Services the installers create: engine = systemd `iter-engine` (Linux, WSL), launchd `com.iter.engine`
   (macOS), logon task `iter engine` (Windows), container `iter-engine` (docker); iter_data = systemd
   `arangodb3` + `iter-data` (Linux, AL2023, binary `<iter dir>/iter_data/bin/iter_data`, config
-  `<iter dir>/iter_data/config/data.env`) or container `iter5` (docker). `installers/iter_data/aws/iter_data.cfn.yaml` is a
+  `<iter dir>/iter_data/config/data.env`) or container `iter` (docker). `installers/iter_data/aws/iter_data.cfn.yaml` is a
   CloudFormation stack whose first boot runs the release's `linux_aws/install.sh`; keep its parameters in
   step with that script's options and lint it with `cfn-lint`.
 - `installers/README.md` and `installers/installers.code.iter.md` describe the layout; update them when a

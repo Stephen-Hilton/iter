@@ -1,6 +1,6 @@
 //! OS differences in one place (Windows-native engine, 2026-10-05): the home
 //! directory, the bash that runs shell steps, PATH prepends and killing a
-//! process tree.  Everything else in iter5 is written for a POSIX shell, so on
+//! process tree.  Everything else in iter is written for a POSIX shell, so on
 //! Windows the shell is Git for Windows' bash — never `C:\Windows\System32\
 //! bash.exe`, which would run the step inside WSL against Linux paths.
 

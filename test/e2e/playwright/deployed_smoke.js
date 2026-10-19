@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deployed_smoke.js — a browser check of a DEPLOYED iter5 (default http://127.0.0.1:8400):
+// deployed_smoke.js — a browser check of a DEPLOYED iter (default http://127.0.0.1:8400):
 // signs in as admin, creates a throwaway project with a context node and a multi-section
 // requirements file (through the API), then in Chromium opens every tab (no console errors),
 // the project graph, the requirements table on the file, and the req nodes; screenshots go to
@@ -56,7 +56,7 @@ async function check(name, fn) { try { const r = await fn(); if (r === false) ba
     const consoleErrors = [];
     page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') consoleErrors.push(m.text()); });
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
-    await page.addInitScript(([t]) => { localStorage.setItem('iter5.token', t); localStorage.setItem('iter5.user', 'admin'); localStorage.setItem('iter5.role', 'admin'); }, [token]);
+    await page.addInitScript(([t]) => { localStorage.setItem('iter.token', t); localStorage.setItem('iter.user', 'admin'); localStorage.setItem('iter.role', 'admin'); }, [token]);
     for (const tab of ['queue', 'graph', 'rag', 'settings', 'intro']) {
       await check(`tab ${tab} loads`, async () => {
         await page.goto(`${BASE}/#tab=${tab}&p=${PROJ}`);

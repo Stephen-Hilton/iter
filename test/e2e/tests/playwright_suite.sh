@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# The iter5 webui Playwright suite (e2e/playwright/run.sh: builds iter_data,
+# The iter webui Playwright suite (e2e/playwright/run.sh: builds iter_data,
 # starts it on a random port against a throwaway ArangoDB database, seeds it,
-# runs every spec) as a test-node script (docs/iter5_spec.md §3.5): streams
+# runs every spec) as a test-node script (docs/iter_spec.md §3.5): streams
 # the list reporter's output, then prints the standard result JSON as the LAST
 # line — `normal` = specs passed / failed (flaky counts as passed), details =
 # one row per spec. Exit 0 green / 1 red / 2 could not run (no ArangoDB on
 # :8529, no node / cargo, or the run ended without a summary).
 # Env: ITER_TEST_NODE_NAME / ITER_TEST_NODE_ID (set by `iter runtests`),
-# ITER5_TEST_ARANGO_URL / ITER5_TEST_ARANGO_PASSWORD, PW_ARGS (extra playwright args).
+# ITER_TEST_ARANGO_URL / ITER_TEST_ARANGO_PASSWORD, PW_ARGS (extra playwright args).
 set -u
 here="$(cd "$(dirname "$0")/.." && pwd)"   # e2e/
 name="${ITER_TEST_NODE_NAME:-webui Playwright suite}"; id="${ITER_TEST_NODE_ID:-}"
@@ -17,8 +17,8 @@ result() {  # result <ok> <pass> <fail> [details-json]
   printf '{"name":"%s","id":"%s","overall_success":%s,"normal":{"total":%d,"pass":%d,"err":%d},"longtail":{"total":0,"pass":0,"err":0},"failure":{"total":0,"pass":0,"err":0}%s}\n' \
     "$name" "$id" "$1" "$(( $2 + $3 ))" "$2" "$3" "${d:+,\"details\":$d}"
 }
-aurl="${ITER5_TEST_ARANGO_URL:-http://127.0.0.1:8529}"
-apw="${ITER5_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}"
+aurl="${ITER_TEST_ARANGO_URL:-http://127.0.0.1:8529}"
+apw="${ITER_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}"
 for t in node cargo curl; do command -v "$t" >/dev/null || { echo "$t is required"; result false 0 0; exit 2; }; done
 if ! curl -sf -o /dev/null -u "root:$apw" "$aurl/_api/version"; then
   echo "no ArangoDB at $aurl — the Playwright suite needs the dev container (./deploy.sh local)"; result false 0 0; exit 2

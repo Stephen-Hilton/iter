@@ -243,9 +243,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{name}/locks/release_all", post(lock_release_all))
         .route("/api/projects/{name}/locks/sweep", post(lock_sweep))
         .route("/api/projects/{name}/deadlocks", get(deadlocks_get))
-        // iter5 server-side get_next (spec §4.3)
+        // iter server-side get_next (spec §4.3)
         .route("/api/projects/{name}/next", post(crate::next::get_next))
-        // iter5 authz (spec §4.4): one layer over every route above, keyed on
+        // iter authz (spec §4.4): one layer over every route above, keyed on
         // the path's project segment (graph/rag/datasync included; MCP
         // replays through this router so it inherits it)
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::authz::project_authz))
@@ -651,7 +651,7 @@ async fn agent_put(
 
 // ---------- projects ----------
 
-/// Every project the caller may see (iter5 authz): all for admin, served
+/// Every project the caller may see (iter authz): all for admin, served
 /// ones for an engine token, member ones for a user.
 async fn projects_list(u: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiError> {
     let mut rows = st.store.scan("project").await?;
@@ -671,7 +671,7 @@ async fn project_put(
     Path(name): Path<String>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    // iter5: an admin edits any project; a user (role user) may CREATE a new
+    // iter: an admin edits any project; a user (role user) may CREATE a new
     // one and becomes its member (spec §4.4); edits of an existing project
     // stay admin-only
     let existing = st.store.get("project", &name, NOSK).await?;
@@ -941,6 +941,7 @@ async fn engine_put(
     body["user"] = json!(if user.role == "admin" && !asked.is_empty() { asked } else { owner });
     let _: iter_core::Engine =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("engine does not parse: {e}")))?;
+    crate::settings::check_engine_host(st.store.as_ref(), &name, &body_str(&body, "host")).await?;
     st.store.put("engine", &name, NOSK, &body).await?;
     st.store.bump_seq(GLOBAL, "engine").await?;
     if existing.is_none() || existing.as_ref().map(|e| body_str(e, "user")) != Some(body_str(&body, "user")) {
@@ -1139,7 +1140,7 @@ async fn engine_heartbeat(
     if claimed {
         crate::settings::on_engine_registered(st.store.as_ref(), &name, &owner).await?;
     }
-    // the projects this engine serves: active serves edges (iter5), plus the
+    // the projects this engine serves: active serves edges (iter), plus the
     // deprecated iter4 `projects` map while engines switch over
     let edges = crate::settings::load_edges(st.store.as_ref()).await?;
     let mut projects: Vec<String> = crate::settings::served_projects(&edges, &name);
@@ -1154,7 +1155,7 @@ async fn engine_heartbeat(
     let waiting = crate::datasync::waiting(st.store.as_ref(), &projects).await?;
     let mut reply = row.clone();
     reply["datasync_waiting"] = json!(waiting);
-    // iter5 (spec §3.3/§3.4): node edits waiting to be written to files, and
+    // iter (spec §3.3/§3.4): node edits waiting to be written to files, and
     // designer builds waiting for this engine (sync_hooks, DATA-GRAPH)
     reply["files_waiting"] = json!(crate::sync_hooks::files_waiting(st.store.as_ref(), &projects).await);
     reply["build_waiting"] = json!(crate::sync_hooks::build_waiting(st.store.as_ref(), &projects).await);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy_smoke.sh — prove a DEPLOYED iter5 works end to end, then clean up.
+# deploy_smoke.sh — prove a DEPLOYED iter works end to end, then clean up.
 #
 #   ./test/e2e/deploy_smoke.sh [--url https://127.0.0.1:8400]
 #
@@ -19,7 +19,7 @@ envval() { [ -f "$ENV_FILE" ] && grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= 
 PASS_ADMIN="${ITER_ADMIN_PASSWORD:-$(envval ITER_ADMIN_PASSWORD)}"
 ENGINE_BIN="${ITER_ENGINE_BIN:-$REPO/target/debug/iter_engine}"
 TS=$(date +%s); P="smoke5_$TS"; ENG="smoke5_eng_$TS"; AG="smoke5_agent_$TS"; ACCT="smoke5_acct_$TS"
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/iter5-smoke.XXXXXX")"; TOP="$SCRATCH/repo"; ENVF="$SCRATCH/engine.env"; KEYF="$SCRATCH/engine.key"
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/iter-smoke.XXXXXX")"; TOP="$SCRATCH/repo"; ENVF="$SCRATCH/engine.env"; KEYF="$SCRATCH/engine.key"
 # the engine's trusted-certificate file stays in the scratch dir; curl skips
 # verification (-k): the engine pins the certificate itself, and the check
 # below compares what it pinned with what iter_data says it serves
@@ -54,7 +54,7 @@ trap cleanup EXIT
 echo "== deploy smoke against $BASE (project $P)"
 check "health ok" bash -c "curl -sf $BASE/health | jq -e '.ok==true'"
 check "webui page served" bash -c "curl -sf $BASE/ | grep -qi '<html'"
-check "engine setup script served (iter5)" bash -c "curl -sf $BASE/iter_engine_setup.sh | grep -q 'ONE engine per machine'"
+check "engine setup script served (iter)" bash -c "curl -sf $BASE/iter_engine_setup.sh | grep -q 'ONE engine per machine'"
 TOKEN=$(curl -sf -X POST "$BASE/auth/login" -H content-type:application/json -d "{\"user\":\"admin\",\"password\":\"$PASS_ADMIN\"}" | jq -r .token)
 [ -n "$TOKEN" ] && [ "$TOKEN" != null ] && ok "admin login" || { bad "admin login"; exit 1; }
 [ -x "$ENGINE_BIN" ] || { bad "engine binary $ENGINE_BIN (cargo build -p iter_engine)"; exit 1; }

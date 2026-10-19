@@ -1,4 +1,4 @@
-//! The iter5 project graph store (spec §3.1): nodes = files.
+//! The iter project graph store (spec §3.1): nodes = files.
 //!
 //! Every `*.iter.md` node file of a project is one document of the Arango
 //! collection `node` (key `doc_key(project, id)`), holding the parsed file

@@ -41,7 +41,7 @@ pub const TABLES: &[&str] = &[
     "spend",
     // iter4: graph edits waiting for an engine to apply them (datasync)
     "datasync",
-    // iter5 settings graph (spec §7): new node tables + the edge rows
+    // iter settings graph (spec §7): new node tables + the edge rows
     "account",
     "provider",
     "workitem_type",
@@ -395,19 +395,19 @@ pub struct Project {
     pub agents: BTreeMap<String, serde_json::Value>,
     #[serde(default, deserialize_with = "null_is_default")]
     pub failure: FailurePolicy,
-    /// DEPRECATED (iter5): replaced by active `serves` edges in the settings
+    /// DEPRECATED (iter): replaced by active `serves` edges in the settings
     /// graph (iter_core::settings). Still read so iter4-shaped rows parse and
     /// the one-time migration can turn them into edges.
     #[serde(default, deserialize_with = "null_is_default")]
     pub engines: Vec<String>,
-    /// DEPRECATED (iter5): replaced by `account` nodes + `bills` edges (the
+    /// DEPRECATED (iter): replaced by `account` nodes + `bills` edges (the
     /// switch/stop percents moved onto the edge); read by the migration and
     /// by engines that have not switched to `/assignments` yet.
     #[serde(default, deserialize_with = "null_is_default")]
     pub accounts: Vec<Account>,
     /// the project head file: its frontmatter names the global requirements
     /// and scan dirs the engine surfaces to every agent. Default
-    /// "{topdir}/main.iter.md" (iter5: `global/<slug>.project.iter.md`).
+    /// "{topdir}/main.iter.md" (iter: `global/<slug>.project.iter.md`).
     #[serde(default = "default_mainfile")]
     pub mainfile: String,
     /// context patterns every NEW item inherits when it names none
@@ -524,12 +524,12 @@ pub struct Engine {
     pub account: String,
     #[serde(default)]
     pub queuelock: BTreeMap<String, u64>,
-    /// DEPRECATED (iter5): replaced by active `serves` edges (settings
+    /// DEPRECATED (iter): replaced by active `serves` edges (settings
     /// topdir, read_only) — `GET /api/engines/{name}/assignments`. Kept
     /// readable for iter4-shaped records and the one-time migration.
     #[serde(default)]
     pub projects: BTreeMap<String, EngineProjectDirs>,
-    /// iter5 authz (spec §4.4): the token `sub` that owns this engine record,
+    /// iter authz (spec §4.4): the token `sub` that owns this engine record,
     /// set by iter_data from the caller's token on register; "" = unowned
     /// (an iter4 record — the first engine-token heartbeat claims it)
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -720,7 +720,7 @@ pub struct WorkItem {
     /// outside the agent cap and the usage/budget holds.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system: String,
-    /// iter5 (spec §8): the project-graph node this item works on (node id);
+    /// iter (spec §8): the project-graph node this item works on (node id);
     /// None = the nearest node owning the first lockdir
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,

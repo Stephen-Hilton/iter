@@ -1,4 +1,4 @@
-//! iter5 node files (`*.iter.md`) — format v5 (spec §2).
+//! iter node files (`*.iter.md`) — format v5 (spec §2).
 //!
 //! One library, used identically by the server (iter_data, node side) and the
 //! engine (iter_engine, file side) so both agree byte-for-byte on what a node

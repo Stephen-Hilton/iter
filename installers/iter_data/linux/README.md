@@ -116,7 +116,7 @@ Everything chosen here is kept in `D/config/data.env`: `ARANGO_URL`, `ARANGO_USE
 To load a backup back into iter's database:
 
 ```bash
-sudo ./install.sh restore /opt/iter/iter_data/backups/iter5-<ts>.tar
+sudo ./install.sh restore /opt/iter/iter_data/backups/iter-<ts>.tar
 ```
 
 This stops `iter-data`, replaces the collections the backup holds (`arangorestore --overwrite true` as iter's user), and starts `iter-data` again. The env and secret files in the tar are not touched; they are there for a move to a new machine.

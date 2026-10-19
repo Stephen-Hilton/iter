@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GraphRAG search quality (iter5 test contract, docs/iter5_spec.md §3.5:
+# GraphRAG search quality (iter test contract, docs/iter_spec.md §3.5:
 # exit 0 green / 1 red / 2 could not run; the LAST stdout line is the standard
 # result JSON). Asks every question in rag_eval.json against a running
 # iter_data, in all three search modes, and reports each question's rank of
@@ -30,7 +30,7 @@ def result(ok, passed, n, details):
                       "details": details}))
 def search(q, mode):
     # the project's own documents only: the built-in user guide answers "how
-    # does iter work" questions too, and in iter5 (whose graph documents iter
+    # does iter work" questions too, and in iter (whose graph documents iter
     # itself) it competes with the node files this set expects
     body = json.dumps({"query": q, "k": k, "mode": mode, "graph": False, "include_guide": False}).encode()
     r = urllib.request.Request(f"{url}/api/projects/{project}/rag/search", data=body, method="POST",

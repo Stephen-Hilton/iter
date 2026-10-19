@@ -129,7 +129,7 @@ test.describe('project graph: view', () => {
     expect(b.build.state).toBe('done');
     await expect(page.locator('#g-buildstate')).toContainText('mbp');
     await page.evaluate((id) => { IterGraph.api.select({ kind: 'node', id }); }, ids.project);
-    await expect(box.locator('.g-buildinfo')).toContainText('/tmp/iter5_pw/shop');
+    await expect(box.locator('.g-buildinfo')).toContainText('/tmp/iter_pw/shop');
     await expect(box.locator('.g-buildinfo')).toContainText('c0ffee0');
     await shot(page, 'graph-detail-project');
   });

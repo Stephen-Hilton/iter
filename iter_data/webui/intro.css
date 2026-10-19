@@ -1,4 +1,4 @@
-/* iter5 webui — Intro tab (intro.js). Every class is prefixed intro- and every
+/* iter webui — Intro tab (intro.js). Every class is prefixed intro- and every
    colour comes from index.html's :root tokens (--bg --panel --line --text --dim
    --accent --ok --warn --bad --q), so the tab looks native and nothing collides. */
 
@@ -443,7 +443,7 @@ a.intro-btn{display:inline-block;text-decoration:none}
 .intro-sopt-c{display:grid;grid-template-columns:auto 1fr;column-gap:8px;align-items:center}
 .intro-sopt-c small{grid-column:2}
 
-/* iter5 designer route */
+/* iter designer route */
 .intro-route { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 12px 0 18px; }
 .intro-routestep { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: rgba(255,255,255,.015); }
 .intro-routestep p { margin: 4px 0 8px; }

@@ -1,4 +1,4 @@
-/* iter5 graph views — the Project graph (graph.js + graphedit.js) and the
+/* iter graph views — the Project graph (graph.js + graphedit.js) and the
    Settings graph (settings.js) share one look. Both roots carry .gview;
    colours come from index.html's :root tokens. */
 .gview { flex-direction: column; flex: 1; min-height: 0; font-size: 13px;

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Greeter tests: prints the standard iter5 result JSON as the last stdout line.
+# Greeter tests: prints the standard iter result JSON as the last stdout line.
 here=$(cd "$(dirname "$0")" && pwd)
 pass=0; err=0; total=2; d=""
 out=$(sh "$here/../cli/hello.sh")

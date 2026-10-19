@@ -1,4 +1,4 @@
-/* iter5 webui — the GraphRAG tab. Colours from index.html's :root tokens. */
+/* iter webui — the GraphRAG tab. Colours from index.html's :root tokens. */
 #tab-rag{display:none}
 body.tab-rag #tab-rag{display:block}
 /* the side panel stays (index.html hides main on this tab) */

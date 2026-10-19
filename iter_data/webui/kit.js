@@ -1,5 +1,5 @@
 /*
- * iter5 webui kit — the small shared pieces both graph views (the Project
+ * iter webui kit — the small shared pieces both graph views (the Project
  * graph and the Settings graph) and the page use:
  *
  *   IterKit.esc / md            HTML escaping; a small, safe markdown renderer
@@ -209,12 +209,18 @@
    * values = every editable field's parsed value; changed = only those that differ from the start;
    * removed = keys removed with ×; added = new keys. onSave may throw (shown inline) or return false to stay open.
    */
+  /** a (?) beside a setting's name; hovering (or focusing) it shows tip = {what, def, rec, deviate} */
+  function tipHtml(t) {
+    if (!t) return '';
+    const row = (k, v) => (v ? `<div><b>${k}</b> ${esc(v)}</div>` : '');
+    return `<span class="kit-tip" tabindex="0" role="note" aria-label="about this setting">?<span class="kit-tipbox">${row('What it does:', t.what)}${row('Default:', t.def)}${row('Recommended:', t.rec)}${row('Change it when:', t.deviate)}</span></span>`;
+  }
   function configure(o) {
     const fields = o.fields.map((f) => Object.assign({}, f));
     const ro = !!o.readOnly;
     let groups = []; fields.forEach((f) => { const g = f.group || ''; if (!groups.includes(g)) groups.push(g); });
     const rowHtml = (f, i) => `<div class="kit-kv" data-row="${i}">
-        <div class="kit-k"><span title="${esc(f.key)}">${esc(f.label || f.key)}</span>${f.badge ? `<em class="kit-badge">${esc(f.badge)}</em>` : ''}</div>
+        <div class="kit-k"><span title="${esc(f.key)}">${esc(f.label || f.key)}</span>${f.badge ? `<em class="kit-badge">${esc(f.badge)}</em>` : ''}${tipHtml(f.tip)}</div>
         <div class="kit-v">${editorHtml(f, i, ro)}${f.help ? `<small>${f.help}</small>` : ''}</div>
         <div class="kit-del">${!ro && f.removable ? `<button type="button" class="kit-icon" data-rm="${i}" title="Remove this setting">×</button>` : ''}</div></div>`;
     const body = `${(o.meta || []).length ? `<div class="kit-meta">${o.meta.map(([k, v]) => `<div><span>${esc(k)}</span><b>${v}</b></div>`).join('')}</div>` : ''}

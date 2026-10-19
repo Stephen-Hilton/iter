@@ -325,7 +325,7 @@ mod tests {
 
     /// a bare remote and two clones of it, `a` and `b`, sharing base.txt
     fn setup(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("iter5-merge-{tag}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("iter-merge-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         sh(&root, "git init -q --bare -b main remote.git && git clone -q remote.git a 2>/dev/null && cd a && git config user.email t@t && git config user.name t && git checkout -q -b main && printf 'one\\ntwo\\nthree\\n' > base.txt && git add . && git commit -qm base && git push -q origin main && cd .. && git clone -q remote.git b && cd b && git config user.email t@t && git config user.name t");

@@ -37,7 +37,7 @@ test.describe('user form', () => {
       await admin.put('/api/users/' + who, { role: 'user', password: first, email: 'p@example.com', settings: {}, authz: {} });
       const l = await Api.login(state.base, who, first);
       const { token } = await l.api.post(`/api/users/${who}/password`, { current_password: first, new_password: mine });
-      await page.addInitScript(([t, u]) => { localStorage.setItem('iter5.token', t); localStorage.setItem('iter5.user', u); localStorage.setItem('iter5.role', 'user'); }, [token, who]);
+      await page.addInitScript(([t, u]) => { localStorage.setItem('iter.token', t); localStorage.setItem('iter.user', u); localStorage.setItem('iter.role', 'user'); }, [token, who]);
 
       await page.goto('/');
       await page.locator('#user-gear').click();

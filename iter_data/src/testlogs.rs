@@ -1,4 +1,4 @@
-//! Test results (iter5 spec §3.5): a test script prints the standard result
+//! Test results (iter spec §3.5): a test script prints the standard result
 //! JSON as its last stdout line; the engine posts it here. It is stored on the
 //! test node (`test`, `front.last_result`, `timestamps.last_tested` → the
 //! file is rewritten like any node edit) and appended to the `test_log`

@@ -362,7 +362,7 @@ fn legacy_test_loop_and_desc_precedence() {
 
 #[test]
 fn legacy_interface_file_keys_dropped_by_conform() {
-    // the file itself is not a node in iter5 (the converter removes it), but
+    // the file itself is not a node in iter (the converter removes it), but
     // renamed to a node type its keys conform cleanly
     let text = include_str!("fixtures/datasync-claim.interface.iter.md.fixture");
     assert_eq!(type_of("datasync-claim.interface.iter.md"), None);

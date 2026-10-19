@@ -1,6 +1,6 @@
 # Adds the Arango web console, bound to localhost only (never public).
 # Used with compose.yml: docker compose -f compose.yml -f compose.console.yml up -d
 services:
-  iter5:
+  iter:
     ports:
       - "127.0.0.1:${ARANGO_HOST_PORT:-8630}:8529"

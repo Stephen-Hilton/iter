@@ -1,4 +1,4 @@
-//! Datasync, the engine half — iter5 keeps it for GraphRAG documents only
+//! Datasync, the engine half — iter keeps it for GraphRAG documents only
 //! (node files travel through crate::filesync). When the heartbeat reply's
 //! `datasync_waiting` names a served project, the engine applies its rows:
 //!
@@ -81,7 +81,7 @@ pub fn apply_op(top: &Path, op: &Value) -> Result<Vec<String>, String> {
             }
             Ok(vec![])
         }
-        other => Err(format!("unknown datasync op {other:?} (iter5 datasync carries GraphRAG documents only)")),
+        other => Err(format!("unknown datasync op {other:?} (iter datasync carries GraphRAG documents only)")),
     }
 }
 
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn stores_removes_ignores_commits_and_reports() {
-        let top = std::env::temp_dir().join(format!("iter5_dsync_{}", uuid::Uuid::new_v4()));
+        let top = std::env::temp_dir().join(format!("iter_dsync_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&top).unwrap();
         let top = iter_core::platform::canonicalize(&top).unwrap();
         let git = |a: &[&str]| crate::filesync::git(&top, a).unwrap();

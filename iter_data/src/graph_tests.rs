@@ -168,7 +168,7 @@ async fn a_new_project_is_designed_with_its_project_node_and_global_reqs() {
     let a = crate::nodes::arango(t.store()).unwrap();
     let n = a.aql("FOR n IN node FILTER n.project == 'q' RETURN n.nodetype", json!({})).await.unwrap();
     assert_eq!(n.len(), 4);
-    // a project created before iter5 (no node) gets it on first read
+    // a project created before iter (no node) gets it on first read
     t.store().put("project", "old", NOSK, &json!({"name": "old", "state": "Running"})).await.unwrap();
     crate::settings::on_project_created(t.store(), "old", None).await.unwrap();
     assert_eq!(t.graph("old").await["nodes"].as_array().unwrap().len(), 4);

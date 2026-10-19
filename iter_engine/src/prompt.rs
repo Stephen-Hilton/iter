@@ -1,7 +1,7 @@
 //! Prompt assembly: spin-up = agent body + shared rules + capability index +
 //! the project's global requirements (+ the philosophy sentence) + source
 //! instructions + the work item block + previous attempt + the item's node
-//! context (iter5 spec §8, `load_context`); then the turn sequence
+//! context (iter spec §8, `load_context`); then the turn sequence
 //! prework(prose) → mainwork → postwork(prose) → self-check, all in ONE
 //! provider session.  Nothing here is inlined file content: the agent is told
 //! which files to read.
@@ -90,7 +90,7 @@ fn resolve_files(pattern: &str, topdir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `*.agentmem.iter.md` (iter5) or the legacy `*.agentmemory.iter.md`: the
+/// `*.agentmem.iter.md` (iter) or the legacy `*.agentmemory.iter.md`: the
 /// briefing the last agent on a codepath left for the next one.  Never a
 /// graph node.
 pub fn is_agentmemory(p: &Path) -> bool {
@@ -143,7 +143,7 @@ pub fn agentmemory_prompt(codepath: &Path) -> String {
     )
 }
 
-// ---- agent context (iter5 spec §8) ---------------------------------------
+// ---- agent context (iter spec §8) ---------------------------------------
 
 /// The philosophy guidance sentence every agent gets with its requirements.
 pub const PHILOSOPHY_SENTENCE: &str = "Use the philosophy file(s) to infer missing requirements and settle conflicts.";
@@ -911,7 +911,7 @@ mod tests {
 
     /// A small v5 project on disk, rendered with the node-file library.
     fn fixture(tag: &str) -> (PathBuf, HashMap<&'static str, NodeDoc>) {
-        let top = std::env::temp_dir().join(format!("iter5-ctx-{}-{tag}", std::process::id()));
+        let top = std::env::temp_dir().join(format!("iter-ctx-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&top);
         let now = "2026-10-02 12:00:00Z";
         let mut docs: HashMap<&'static str, NodeDoc> = HashMap::new();
@@ -988,7 +988,7 @@ mod tests {
         ];
         let pg_id = nodes[2].id.clone();
         let item = WorkItem { node: Some(pg_id), ..Default::default() };
-        let top = std::env::temp_dir().join("iter5-reqfolders");
+        let top = std::env::temp_dir().join("iter-reqfolders");
         let ctx = build_context(&nodes, &item, &top, &top);
         assert_eq!(names(&ctx.global_reqs), vec!["global:g-phil".to_string(), "global:g-biz".into()]);
         assert_eq!(names(&ctx.local_reqs), vec!["local:pg-1".to_string(), "local:pg-2".into(), "local:data-1".into(), "local:data-2".into()],
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn retired_placeholders_resolve_to_nothing() {
-        let top = std::env::temp_dir().join(format!("iter5-ctx-ph-{}", std::process::id()));
+        let top = std::env::temp_dir().join(format!("iter-ctx-ph-{}", std::process::id()));
         std::fs::create_dir_all(&top).unwrap();
         std::fs::write(top.join("extra.md"), "x").unwrap();
         let item = WorkItem { context: vec!["{marker}".into(), "{ancestor_markers}".into(), "{topdir}/extra.md".into(), "{topdir}/none.md".into()], ..Default::default() };

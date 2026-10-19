@@ -1,7 +1,7 @@
 {
-  "name": "iter5-webui-playwright",
+  "name": "iter-webui-playwright",
   "private": true,
-  "description": "Playwright suite for the iter5 webui against a real iter_data on a throwaway ArangoDB database (run ./run.sh).",
+  "description": "Playwright suite for the iter webui against a real iter_data on a throwaway ArangoDB database (run ./run.sh).",
   "scripts": {
     "test": "playwright test"
   },

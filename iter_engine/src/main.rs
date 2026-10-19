@@ -1,4 +1,4 @@
-//! iter_engine — the local engine binary for iter5: ONE engine per machine
+//! iter_engine — the local engine binary for iter: ONE engine per machine
 //! serving every project the settings graph assigns to it (spec §4).
 //!
 //! Startup: `iter_engine --data-url <url> --env-file <path> [--name <name>]`.
@@ -46,7 +46,7 @@ enum Cmd {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "iter_engine", about = "iter5 engine: one per machine, serves every project assigned to it")]
+#[command(name = "iter_engine", about = "iter engine: one per machine, serves every project assigned to it")]
 struct Args {
     #[command(subcommand)]
     cmd: Option<Cmd>,

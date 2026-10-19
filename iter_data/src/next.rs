@@ -1,4 +1,4 @@
-//! Server-side get_next (iter5 spec §4.3): `POST /api/projects/{p}/next`.
+//! Server-side get_next (iter spec §4.3): `POST /api/projects/{p}/next`.
 //!
 //! The selection rules are the iter4 engine's `dispatch` pick, moved here so
 //! every engine of a multi-project machine asks the server for one specific

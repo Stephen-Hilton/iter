@@ -1,4 +1,4 @@
-//! Requirements inside requirement files (iter5 spec §2.8).
+//! Requirements inside requirement files (iter spec §2.8).
 //!
 //! A bizreq / techreq node file holds many requirements, one per `## `
 //! section, each carrying a permanent id in its `<!-- req: id=… status=… -->`

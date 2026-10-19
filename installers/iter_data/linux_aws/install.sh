@@ -155,7 +155,7 @@ case "$TLS_OPT" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate o
   || die "--tls-cert and --tls-key go together"
 [ -z "$TLS_CERT_SRC" ] || [ "$TLS_OPT" != off ] || die "--tls off and --tls-cert contradict each other"
 [ "$A_USER_OPT" != root ] || die "--arango-user root: iter_data signs in as a user of its own (rw on its database only)"
-[ "$CMD" != restore ] || [ -n "$RESTORE_FILE" ] || die "restore needs the backup file: $0 restore <iter dir>/iter_data/backups/iter5-<ts>.tar"
+[ "$CMD" != restore ] || [ -n "$RESTORE_FILE" ] || die "restore needs the backup file: $0 restore <iter dir>/iter_data/backups/iter-<ts>.tar"
 for n in ${TLS_NAMES_OPT[@]+"${TLS_NAMES_OPT[@]}"}; do
   case "$n" in ""|*[!A-Za-z0-9.:-]*) die "--tls-name $n: a DNS name or an IP address" ;; esac
 done
@@ -462,7 +462,7 @@ secrets() {
     else JWT="$(gen 48)"; say "generated a new ITER_JWT_SECRET"; fi
   fi
   if [ -z "$ARANGO_PW" ] && [ "$EXTERNAL" = 0 ]; then
-    if [ "$fresh" = 0 ]; then ARANGO_PW=iter4dev; say "existing database, no Arango password given: assuming the old default"
+    if [ "$fresh" = 0 ]; then ARANGO_PW=iterdev; say "existing database, no Arango password given: assuming the old default"
     else ARANGO_PW="$(gen 24)"; say "generated an Arango root password (kept in $DATA_ENV)"; fi
   fi
   arango_settings
@@ -866,7 +866,7 @@ do_status() {
   else fp="$(fingerprint)"; printf '%-18s %s\n' tls "$TLS_MODE, certificate fingerprint ${fp:-unknown (not started yet?)}"; fi
   systemctl list-timers iter-backup.timer --no-pager 2>/dev/null | sed -n 2p || true
   local dir; dir="$(rootenvval ITER_BACKUP_DIR "$BACKUP_ENV")"
-  $SUDO sh -c "ls -1t '${dir:-$D/backups}'/iter5-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
+  $SUDO sh -c "ls -1t '${dir:-$D/backups}'/iter-*.tar '${dir:-$D/backups}'/iter5-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
 }
 
 # load a backup's database back into iter's database (only that one), with

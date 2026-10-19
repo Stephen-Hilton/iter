@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# The iter5 end-to-end suite (e2e.sh: iter_data + one engine serving two
-# projects, mock provider) as a test-node script (docs/iter5_spec.md §3.5):
+# The iter end-to-end suite (e2e.sh: iter_data + one engine serving two
+# projects, mock provider) as a test-node script (docs/iter_spec.md §3.5):
 # streams e2e.sh's output, then prints the standard result JSON as the LAST
 # line — `normal` = e2e.sh's tally (every PASS / FAIL check), details = one row
 # per section plus one per failed check. Exit 0 green / 1 red / 2 could not run
 # (no ArangoDB on :8529, no jq / cargo, or e2e.sh ended without its tally).
 # Env: ITER_TEST_NODE_NAME / ITER_TEST_NODE_ID (set by `iter runtests`),
-# ITER5_TEST_ARANGO_URL / ITER5_TEST_ARANGO_PASSWORD, E2E_ARGS (e.g. "--live").
+# ITER_TEST_ARANGO_URL / ITER_TEST_ARANGO_PASSWORD, E2E_ARGS (e.g. "--live").
 set -u
 root="$(cd "$(dirname "$0")/../../.." && pwd)"   # the repo root
-name="${ITER_TEST_NODE_NAME:-iter5 end-to-end}"; id="${ITER_TEST_NODE_ID:-}"
+name="${ITER_TEST_NODE_NAME:-iter end-to-end}"; id="${ITER_TEST_NODE_ID:-}"
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 result() {  # result <ok> <pass> <fail> [details-json]
   local d="${4:-}"
   printf '{"name":"%s","id":"%s","overall_success":%s,"normal":{"total":%d,"pass":%d,"err":%d},"longtail":{"total":0,"pass":0,"err":0},"failure":{"total":0,"pass":0,"err":0}%s}\n' \
     "$name" "$id" "$1" "$(( $2 + $3 ))" "$2" "$3" "${d:+,\"details\":$d}"
 }
-aurl="${ITER5_TEST_ARANGO_URL:-http://127.0.0.1:8529}"
-apw="${ITER5_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}"
+aurl="${ITER_TEST_ARANGO_URL:-http://127.0.0.1:8529}"
+apw="${ITER_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}"
 for t in jq cargo curl; do command -v "$t" >/dev/null || { echo "$t is required"; result false 0 0; exit 2; }; done
 if ! curl -sf -o /dev/null -u "root:$apw" "$aurl/_api/version"; then
   echo "no ArangoDB at $aurl — e2e.sh needs the dev container (./deploy.sh local)"; result false 0 0; exit 2

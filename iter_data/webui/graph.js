@@ -1,5 +1,5 @@
 /*
- * iter5 Project graph — the map of one project, drawn from
+ * iter Project graph — the map of one project, drawn from
  * GET /api/projects/{p}/graph ({nodes:[Node], edges:[{from, kind, to}]}).
  * Every node is one *.iter.md file (nodes = files, spec §3): project, code
  * (level context | container | component | connection), test, bizreq,
@@ -12,7 +12,7 @@
  * over compound nodes — a code node sits inside the code node that lists it
  * in children.codenodes; "flow" is dagre, left to right), the search, the
  * wheel/trackpad handling and the use-case step views (a use case's
- * front.flowmap). New in iter5: node-type filter chips (in the URL hash, with
+ * front.flowmap). New in iter: node-type filter chips (in the URL hash, with
  * presets such as "Network map"), connection nodes, file-sync state on every
  * node, and update() — a redraw after an edit keeps every node where it was.
  *
@@ -424,9 +424,9 @@
     // "auto-fit nodes" (2026-10-11): off = Cluster never moves a node by itself; positions are kept in this browser
     let AUTOFIT = true;
     let LINE_MODE = 'straight';
-    try { LINE_MODE = LINE_MODES[localStorage.getItem('iter5.graph.lines')] || 'straight'; } catch (e) { /* storage blocked */ }
-    try { AUTOFIT = localStorage.getItem('iter5.graph.autofit') !== '0'; } catch (e) { /* storage blocked */ }
-    const POS_KEY = () => 'iter5.graph.pos.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '');
+    try { LINE_MODE = LINE_MODES[localStorage.getItem('iter.graph.lines')] || 'straight'; } catch (e) { /* storage blocked */ }
+    try { AUTOFIT = localStorage.getItem('iter.graph.autofit') !== '0'; } catch (e) { /* storage blocked */ }
+    const POS_KEY = () => 'iter.graph.pos.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '');
     function savePositions() {
       if (AUTOFIT || state.layout !== 'cluster' || !cy || cy.nodes().empty()) return;
       const s = snapshot(); const pos = {}; s.pos.forEach((p, id) => { pos[id] = { x: Math.round(p.x), y: Math.round(p.y) }; });
@@ -438,7 +438,7 @@
       return { pos: new Map(Object.entries(j.pos)), zoom: j.zoom || 1, pan: j.pan || { x: 0, y: 0 }, layout: 'cluster', uc: state.uc };
     }
     const BOOLS = ['dim', 'own'];
-    const HIDE_KEY = () => 'iter5.graph.hide2.' + (CTX.project || ''); // hide2: since req nodes (2026-10-02), so an older saved choice cannot unhide them
+    const HIDE_KEY = () => 'iter.graph.hide2.' + (CTX.project || ''); // hide2: since req nodes (2026-10-02), so an older saved choice cannot unhide them
     /** The default node types to hide: requirement sections always; tests and requirement files too on a big project. */
     function defaultHide() { return G.nodes.filter((n) => n.nodetype !== 'req').length > 160 ? ['test', 'bizreq', 'techreq', 'req'] : ['req']; }
     let HIDE_TYPES = new Set();
@@ -473,8 +473,8 @@
 
     // ------------------------------------------------------------------ what is on screen
     const HIDDEN = new Set();
-    try { JSON.parse(sessionStorage.getItem('iter5.graph.hidden') || '[]').forEach((id) => HIDDEN.add(id)); } catch (e) { /* storage blocked */ }
-    function saveHidden() { try { sessionStorage.setItem('iter5.graph.hidden', JSON.stringify([...HIDDEN])); } catch (e) { /* storage blocked */ } }
+    try { JSON.parse(sessionStorage.getItem('iter.graph.hidden') || '[]').forEach((id) => HIDDEN.add(id)); } catch (e) { /* storage blocked */ }
+    function saveHidden() { try { sessionStorage.setItem('iter.graph.hidden', JSON.stringify([...HIDDEN])); } catch (e) { /* storage blocked */ } }
     function hideNode(id) { HIDDEN.add(id); saveHidden(); select(null); render({ keep: snapshot() }); }
     function showAllHidden() { HIDDEN.clear(); saveHidden(); render({ keep: snapshot() }); }
     // a requirement section is drawn beside its file: hidden with the file's type too
@@ -1211,7 +1211,7 @@
     // column of sections), and on release the graph settles around where it was dropped
     const reqsOfFiles = (files) => { const ids = new Set(files.map((f) => f.id())); return new Set(cy.nodes('.req').filter((el) => { const n = nodesById.get(el.id()); return n && ids.has(n.file); }).map((el) => el.id())); };
     // P pins a node where it is (per project, layout and use case, in this browser); the Sequence view is all position maths
-    PINS = IterKit.pins(cy, { key: () => (state.layout === 'sequence' ? null : 'iter5.graph.pins.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '')) });
+    PINS = IterKit.pins(cy, { key: () => (state.layout === 'sequence' ? null : 'iter.graph.pins.' + (CTX.project || '') + '.' + state.layout + (state.uc ? '.' + state.uc : '')) });
     function togglePin(id) {
       const el = cy.getElementById(id); if (el.empty()) return;
       const r = PINS.toggle(el);
@@ -1765,13 +1765,13 @@
     $('own').addEventListener('change', (ev) => { state.own = ev.target.checked; render({ keep: snapshot() }); });
     $('lines').addEventListener('change', (ev) => {
       LINE_MODE = LINE_MODES[ev.target.value] || 'straight';
-      try { localStorage.setItem('iter5.graph.lines', LINE_MODE); } catch (e) { /* storage blocked */ }
+      try { localStorage.setItem('iter.graph.lines', LINE_MODE); } catch (e) { /* storage blocked */ }
       cy.edges().forEach((e) => { if (e.classes().some((c) => c.startsWith('lm-') && c !== 'lm-off')) { Object.keys(LINE_MODES).forEach((k) => e.removeClass('lm-' + k)); e.addClass('lm-' + LINE_MODE); } });
       fixOverlaps();
     });
     $('autofit').addEventListener('change', (ev) => {
       AUTOFIT = ev.target.checked;
-      try { localStorage.setItem('iter5.graph.autofit', AUTOFIT ? '1' : '0'); } catch (e) { /* storage blocked */ }
+      try { localStorage.setItem('iter.graph.autofit', AUTOFIT ? '1' : '0'); } catch (e) { /* storage blocked */ }
       if (AUTOFIT) render({ relayout: true }); else savePositions();
     });
     ROOT.querySelector('#g-layouts').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-layout]'); if (b && !b.disabled) { state.layout = b.dataset.layout; render(); } });
@@ -1845,14 +1845,14 @@
         + `<div class="legendbody"><div class="row"><span class="lbl">Nodes</span>${nodes}</div><div class="row"><span class="lbl">Edges</span>${edges}</div><div class="row"><span class="lbl">State</span>${fs}</div>`
         + '<div class="row note"><span class="lbl">Note</span><span>A connection is a <b>type</b> of link (an API call over HTTP, an event, a stream): the parts that <b>supply</b> it point into its diamond, and it <b>connects</b> to the parts it reaches. Everything here is a file: an edit shows at once and an engine writes the file within seconds.</span></div></div>';
       let open = false;
-      try { open = localStorage.getItem('iter5.graph.legendOpen') === '1'; } catch (e) { /* storage blocked */ }
+      try { open = localStorage.getItem('iter.graph.legendOpen') === '1'; } catch (e) { /* storage blocked */ }
       const apply = () => {
         $('legend').classList.toggle('collapsed', !open);
         $('legendToggle').setAttribute('aria-expanded', String(open));
         $('legendToggle').textContent = open ? 'Legend ▾' : 'Legend ▸';
         cy.resize();
       };
-      $('legendToggle').addEventListener('click', () => { open = !open; try { localStorage.setItem('iter5.graph.legendOpen', open ? '1' : '0'); } catch (e) { /* storage blocked */ } apply(); });
+      $('legendToggle').addEventListener('click', () => { open = !open; try { localStorage.setItem('iter.graph.legendOpen', open ? '1' : '0'); } catch (e) { /* storage blocked */ } apply(); });
       apply();
     }
     function renderSummary() {

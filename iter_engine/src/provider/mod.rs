@@ -1,4 +1,4 @@
-//! Multi-provider dispatch (iter5 spec §5).
+//! Multi-provider dispatch (iter spec §5).
 //!
 //! Every model call the engine makes — work turns, the close-gate verifier,
 //! ELI5 explain, the dedup judge, GraphRAG summaries and OCR, the
@@ -306,7 +306,7 @@ mod tests {
     /// snapshot from the mock's ITER_MOCK_USAGE_<ACCOUNT>.
     #[test]
     fn call_dispatches_and_records_usage() {
-        let dir = std::env::temp_dir().join(format!("iter5-prov-call-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("iter-prov-call-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         register_accounts("prov-p2", &[("provcall".into(), "mock".into(), "".into())]);
         crate::envstore::set_for_test("PROVCALL_TOKEN", "t");

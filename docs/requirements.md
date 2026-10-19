@@ -202,7 +202,7 @@ If the project graph sync engine sees the above glob format, it should honor the
 
 The big thing I want to remove / rework is interfaces.  Initially the target was to generate a small number of interfaces to promote re-use.  What this evolved into is simply listing the descrete shape of every call made, which is of no resuse value... aka they became specific calls, not reusable interfaces.
 
-This means iter5 can remove all interfaces from the projects; from code.iter.md files, from graph nodes, from the repos themselves.  
+This means iter can remove all interfaces from the projects; from code.iter.md files, from graph nodes, from the repos themselves.  
 
 ## New paradigm
 

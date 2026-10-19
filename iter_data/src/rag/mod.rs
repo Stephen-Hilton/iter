@@ -632,7 +632,7 @@ struct LinkReq {
 }
 
 /// Link an uploaded document to a map node (or unlink it): an edit of the
-/// node's `children.documents` in the project graph (iter5: visible at once,
+/// node's `children.documents` in the project graph (iter: visible at once,
 /// written to the node file by the next engine through files/pending).
 /// `node` is the node's path (`{topdir}/…/x.code.iter.md`) or its id.
 async fn doc_link(u: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>, Json(req): Json<LinkReq>) -> Result<Json<Value>, ApiError> {

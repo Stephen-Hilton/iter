@@ -61,7 +61,7 @@ fn server(world: Arc<Mutex<World>>) -> FakeServer {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("iter5_filesync_{name}_{}", uuid::Uuid::new_v4()));
+    let d = std::env::temp_dir().join(format!("iter_filesync_{name}_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
     iter_core::platform::canonicalize(&d).unwrap()
 }
@@ -377,12 +377,12 @@ fn build_creates_the_repo_from_the_design() {
     assert!(syncs(&srv).is_empty(), "built files are not echoed back");
 }
 
-/// Timing on a real tree (opt-in): `ITER5_PERF_TOPDIR=<copy> cargo test --release perf_on_a_real_tree -- --ignored --nocapture`.
+/// Timing on a real tree (opt-in): `ITER_PERF_TOPDIR=<copy> cargo test --release perf_on_a_real_tree -- --ignored --nocapture`.
 /// Read-only, so the tree is never written.
 #[test]
 #[ignore]
 fn perf_on_a_real_tree() {
-    let Ok(top) = std::env::var("ITER5_PERF_TOPDIR") else { return };
+    let Ok(top) = std::env::var("ITER_PERF_TOPDIR") else { return };
     let top = PathBuf::from(top);
     let world = Arc::new(Mutex::new(World::default()));
     let srv = server(world.clone());
@@ -396,7 +396,7 @@ fn perf_on_a_real_tree() {
 
 #[test]
 fn a_hand_edit_is_stamped_with_the_file_mtime_not_the_scan_time() {
-    let dir = std::env::temp_dir().join(format!("iter5-mtime-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("iter-mtime-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("x.code.iter.md");
     std::fs::write(&f, "x").unwrap();

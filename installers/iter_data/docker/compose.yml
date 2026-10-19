@@ -2,7 +2,7 @@
 # and on a small VM / EC2 instance. install.sh copies this into <iter dir>/iter_data/docker
 # and sets every variable below; by hand, from that folder:
 #   ITER_DATA_DIR=/opt/iter/iter_data ITER_ENV_PATH=/opt/iter/iter_data/config/data.env \
-#     docker compose -p iter5 -f compose.yml -f compose.console.yml up -d --build
+#     docker compose -p iter -f compose.yml -f compose.console.yml up -d --build
 # ITER_ENV_PATH holds ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, the ArangoDB settings
 # (ARANGO_USER + ARANGO_PASSWORD: iter_data's own user, rw on its database only;
 # ARANGO_ROOT_PASSWORD; ARANGO_DB; for an existing ArangoDB elsewhere ARANGO_URL plus
@@ -13,13 +13,13 @@
 # :8400 serves HTTPS by default: https://127.0.0.1:8400/ (self-signed; browsers warn).
 # compose.console.yml adds the Arango web console on 127.0.0.1 (leave it out to
 # publish only :8400).
-# (the service is called iter5 so an existing iter5 compose project is replaced in place)
+# (install.sh replaces the container of an older install, whose service was called iter5)
 services:
-  iter5:
+  iter:
     build:
       context: .
-    image: ${ITER_NAME:-iter5}:latest
-    container_name: ${ITER_NAME:-iter5}
+    image: ${ITER_NAME:-iter}:latest
+    container_name: ${ITER_NAME:-iter}
     restart: unless-stopped
     # hard cap (memswap_limit = mem_limit: no swap on top)
     mem_limit: ${ITER_MEM_LIMIT:-6g}

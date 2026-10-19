@@ -1,4 +1,4 @@
-//! The engine's assignments (iter5 spec §4.2): which projects this engine
+//! The engine's assignments (iter spec §4.2): which projects this engine
 //! serves, where each checkout lives, and which accounts each may bill —
 //! all from `GET /api/engines/{name}/assignments`, derived on the server
 //! from the settings graph (`serves`, `bills`, `holds`, `of` edges).

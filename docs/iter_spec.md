@@ -1,4 +1,4 @@
-# iter5 — spec and build contract
+# iter — spec and build contract
 
 Source brief: `docs/requirements.md` + `docs/requirements.png` (the architecture diagram).
 iter5 is a fork of iter4 (the repo root is its cargo workspace). Everything iter4 does keeps working
@@ -14,14 +14,14 @@ unless this document says it changes. Decisions taken with Stephen on 2026-10-02
 
 Names / ports (so iter4 keeps running beside it): container `iter5`, API + webui **:8400**,
 Arango console **127.0.0.1:8630**, database `iter5`, dev/test Arango = the existing dev container on
-**:8529** with databases `iter5_test_*` / `iter5_e2e_*`, env overrides `ITER5_TEST_ARANGO_URL`,
-`ITER5_TEST_ARANGO_PASSWORD`. Browser storage keys `iter5.*`.
+**:8529** with databases `iter_test_*` / `iter_e2e_*`, env overrides `ITER_TEST_ARANGO_URL`,
+`ITER_TEST_ARANGO_PASSWORD`. Browser storage keys `iter.*`.
 
 ---
 
 ## 1. Components (who owns what)
 
-| crate | role in iter5 |
+| crate | role in iter |
 |---|---|
 | `iter_core` | shared types + **the node-file library** (`nodefile`): parse / render / conform / name / resolve-children. Used identically by iter_data (node side) and iter_engine (file side) so both sides agree byte-for-byte. Also settings-graph types, test-result type. |
 | `iter_data` | the server: work items, locks, **server-side get_next**, the **project graph store (nodes = files)**, the **settings graph**, auth/authz, MCP, GraphRAG, webui. Never touches a repo. |
@@ -503,7 +503,7 @@ also reachable from the graph view's picker as "Settings graph").
 ---
 
 ## 10. Converter `iter migrate5`
-_Removed 2026-10-16 once every checkout was on iter5; the code is at tag `pre-cleanup-2026-10-16`._
+_Removed 2026-10-16 once every checkout was on iter; the code is at tag `pre-cleanup-2026-10-16`._
 
 `iter migrate5 --from <iter4 checkout> --to <dir> [--dry-run]` (never in place):
 copies the tree, then: `main.iter.md` → `global/<slug>.project.iter.md`; `*.tests.iter.md`/`*.testgroup.iter.md` →
@@ -521,7 +521,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 ---
 
 ## 11. Tests (definition of done)
-- `cargo test` green in every crate (iter_data tests on Arango :8529, db `iter5_test_*`).
+- `cargo test` green in every crate (iter_data tests on Arango :8529, db `iter_test_*`).
 - `iter_core::nodefile` property-ish tests: parse/render round trip, conform idempotent, legacy migration, glob resolution, path planning collisions, edge derivation.
 - iter_data API tests: node CRUD + edges + pending/ack, files/sync conflict cases, settings graph CRUD/validation/placeholders, get_next ordering/locks/deps/authz, engine token authz, MCP tools.
 - `test/e2e.sh` (rewritten, mock provider, one engine, **two projects**): engine serves both; work item round trips in each;
@@ -575,7 +575,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 17. **Mock provider failure messages never start with `mock:`** ("mock run failed …"): a retry's prompt quotes the previous
     response, and a `mock:` line there would be parsed as a directive and run again.
 
-### 12.2 Missing from the diagram (added in iter5)
+### 12.2 Missing from the diagram (added in iter)
 - **Auth/authz**: login/JWT, engine tokens bound to an owning user, project membership — every request is authorized for its project.
 - **Heartbeat** (engine → iter_data) and its reply (`files_waiting`, `build_waiting`, `rag_waiting`, stop requests).
 - **Close gate** (verifier between `::workitem_report` and complete) and **session chaining**.

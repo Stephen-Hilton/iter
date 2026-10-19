@@ -1,4 +1,4 @@
-//! The settings graph (iter5 spec §7): every setting lives on a node or an
+//! The settings graph (iter spec §7): every setting lives on a node or an
 //! edge. Nodes are the existing records (project, engine, agent, tooling,
 //! user) plus `account`, `provider`, `workitem_type`; edges are `SysEdge`
 //! rows. Node id = `<type>:<id>`, where `<id>` is the record's stable id

@@ -1,7 +1,7 @@
 ---
 id: 5a000000-0000-4000-8000-000000000001
 name: "sample5"
-desc: "A tiny greeter used by the iter5 end-to-end test."
+desc: "A tiny greeter used by the iter end-to-end test."
 creator: "e2e"
 teststate: inherit
 file_naming: sequence

@@ -112,7 +112,7 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
             ok(&id, json!({
                 "protocolVersion": v,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "iter_data", "title": "iter5 data API", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "iter_data", "title": "iter data API", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": INSTRUCTIONS,
             }))
         }
@@ -151,7 +151,7 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
     })
 }
 
-const INSTRUCTIONS: &str = "iter5's data API as tools. Work items: status, list, get, details, create (iter add), ask, reject, wait, doc, block. \
+const INSTRUCTIONS: &str = "iter's data API as tools. Work items: status, list, get, details, create (iter add), ask, reject, wait, doc, block. \
 The project graph (nodes = the *.iter.md node files): graph_* tools look a node up by path or name, walk its neighbours, find the code node that owns a path, \
 and edit the graph — graph_node_create / graph_node_update / graph_edge_add / graph_edge_remove change the nodes at once and an engine writes the files. \
 Requirements are the `## ` sections of bizreq/techreq files (graph nodes of type req): req_create / req_update / req_move / req_delete edit one section. \

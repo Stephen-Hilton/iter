@@ -186,7 +186,7 @@ pub(crate) fn parse_loose(path: &str, text: &str) -> Result<Loose, NodeErr> {
                         legacy_tests.extend(list_of(&v));
                     }
                     k if is_interface_key(k) => {
-                        findings.push(Finding::new("dropped-interface", format!("children.{} dropped (interfaces are retired in iter5)", k)));
+                        findings.push(Finding::new("dropped-interface", format!("children.{} dropped (interfaces are retired in iter)", k)));
                     }
                     _ => {
                         let l = list_of(&v);
@@ -269,7 +269,7 @@ pub(crate) fn parse_loose(path: &str, text: &str) -> Result<Loose, NodeErr> {
     let drop: Vec<String> = m.keys().filter(|k| is_interface_key(k)).cloned().collect();
     for k in drop {
         m.remove(&k);
-        findings.push(Finding::new("dropped-interface", format!("{} dropped (interfaces are retired in iter5)", k)));
+        findings.push(Finding::new("dropped-interface", format!("{} dropped (interfaces are retired in iter)", k)));
     }
     // a key named like a common key but empty ("" key) is noise
     m.remove("");

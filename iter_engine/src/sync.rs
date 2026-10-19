@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn checkout_root_finds_the_project_node() {
-        let top = std::env::temp_dir().join(format!("iter5_root_{}", uuid::Uuid::new_v4()));
+        let top = std::env::temp_dir().join(format!("iter_root_{}", uuid::Uuid::new_v4()));
         let sub = top.join("proj");
         std::fs::create_dir_all(sub.join("global")).unwrap();
         std::fs::create_dir_all(sub.join("src/deep")).unwrap();

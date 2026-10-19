@@ -1,4 +1,4 @@
-//! Node-file walking (iter5 spec §3.2): every `*.iter.md` whose filename names
+//! Node-file walking (iter spec §3.2): every `*.iter.md` whose filename names
 //! a node type (`iter_core::nodefile::type_of`), under the project's
 //! `scandirs`, git-ignore aware, never entering `.git`, `target`,
 //! `node_modules`, `.iter` or `.claude` ([`super::SKIP_DIRS`]). Symlinks are

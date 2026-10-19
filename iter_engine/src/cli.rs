@@ -1,6 +1,6 @@
 //! `iter <verb>` for agents and people: the queue verbs backed by iter_data
 //! (add, ask, reject, block, wait, doc, critreview, capability, status) and
-//! the checkout verbs (iter5): `runtests` (test nodes, standard result JSON),
+//! the checkout verbs (iter): `runtests` (test nodes, standard result JSON),
 //! `validate [--fix]` (nodefile conform), `sync` (one file-sync round),
 //! `sweep`, `rag sync`, `init` (v5 scaffold), `markers`, `teststate`,
 //! `usecase`. Agents ask for the logical
@@ -155,7 +155,7 @@ enum Verb {
     },
     /// Open work for this project, run-order first.
     Status,
-    /// Run a test node's scripts (iter5: `*.test.iter.md`, scripts from its
+    /// Run a test node's scripts (iter: `*.test.iter.md`, scripts from its
     /// `children.tests`; each prints the standard result JSON as its last
     /// line). No node: the calling item's node ($ITER_NODEFILE) — a test node,
     /// or every test node it links. Neutral by default; --broken / --fixed
@@ -524,8 +524,8 @@ fn topdir_of(args: &CliArgs) -> std::path::PathBuf {
 fn retired(rest: &[String]) -> ! {
     let verb = rest.first().cloned().unwrap_or_default();
     die(format!(
-        "`iter {verb}` is not an iter5 verb. Checkout verbs: runtests, validate, sync, sweep, rag, init, markers, teststate, usecase. \
-         Retired: ids and graph-apply (iter5 node files carry their own ids; graph edits reach the checkout through the engine's file sync), \
+        "`iter {verb}` is not an iter verb. Checkout verbs: runtests, validate, sync, sweep, rag, init, markers, teststate, usecase. \
+         Retired: ids and graph-apply (iter node files carry their own ids; graph edits reach the checkout through the engine's file sync), \
          the iter4 → iter5 converter migrate5, and the V2-only verbs (testsweep, orphans, resolve)."
     ))
 }

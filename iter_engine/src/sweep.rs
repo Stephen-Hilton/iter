@@ -1,4 +1,4 @@
-//! `iter sweep` (iter5): run the project's test nodes off the project graph
+//! `iter sweep` (iter): run the project's test nodes off the project graph
 //! and turn what it finds into work items.
 //!
 //! The graph (`GET /api/projects/{p}/graph` → `{nodes, edges}`) says which
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn untested_coverage_and_usecases() {
-        let top = std::env::temp_dir().join(format!("iter5_sweep_{}", uuid::Uuid::new_v4()));
+        let top = std::env::temp_dir().join(format!("iter_sweep_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(top.join("L1/tests")).unwrap();
         std::fs::write(top.join("L1/tests/t1x.sh"), "exit 0").unwrap();
         let tnode = |id: &str, dir: &str, front: Value| json!({"id": id, "nodetype": "test", "teststate": "", "path": format!("{{topdir}}/{dir}/{id}.test.iter.md"),
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn sweep_runs_records_and_files_a_fix_item() {
-        let top = std::env::temp_dir().join(format!("iter5_sweep_run_{}", uuid::Uuid::new_v4()));
+        let top = std::env::temp_dir().join(format!("iter_sweep_run_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(top.join("a/tests")).unwrap();
         let mut tdoc = NodeDoc::new(iter_core::nodefile::NodeType::Test, "a tests", "t", "2026-10-02 00:00:00Z");
         tdoc.path = "{topdir}/a/a.test.iter.md".into();

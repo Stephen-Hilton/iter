@@ -22,7 +22,7 @@
   const NODETYPES = ["project", "code", "test", "bizreq", "techreq", "philosophy", "usecase", "actor"];
 
   let el = null, ctx = null, timer = null;
-  let S = { status: null, docs: [], filter: "", kind: store.get("iter5.rag_kind") || "file", open: null, openDoc: null, results: null, uploads: [] };
+  let S = { status: null, docs: [], filter: "", kind: store.get("iter.rag_kind") || "file", open: null, openDoc: null, results: null, uploads: [] };
 
   const P = () => "/api/projects/" + enc(ctx.project);
   const ago = iso => {
@@ -103,7 +103,7 @@
     q("#rag-sform").onsubmit = ev => { ev.preventDefault(); search(); };
     q("#rag-all").onclick = () => showAll();
     q("#rag-filter").oninput = ev => { S.filter = ev.target.value.toLowerCase(); renderDocs(); };
-    el.querySelectorAll("#rag-kinds button").forEach(b => b.onclick = () => { S.kind = b.dataset.k; store.set("iter5.rag_kind", S.kind); renderDocs(); });
+    el.querySelectorAll("#rag-kinds button").forEach(b => b.onclick = () => { S.kind = b.dataset.k; store.set("iter.rag_kind", S.kind); renderDocs(); });
     q("#rag-file").onchange = ev => { upload([...ev.target.files]); ev.target.value = ""; };
     const drop = q("#rag-drop");
     drop.ondragover = ev => { ev.preventDefault(); drop.classList.add("over"); };

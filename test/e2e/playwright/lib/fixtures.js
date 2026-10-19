@@ -26,7 +26,7 @@ const test = base.test.extend({
       await page.addInitScript(([t]) => {
         try {
           if (!sessionStorage.getItem('pw.loggedout')) {
-            localStorage.setItem('iter5.token', t); localStorage.setItem('iter5.user', 'admin'); localStorage.setItem('iter5.role', 'admin');
+            localStorage.setItem('iter.token', t); localStorage.setItem('iter.user', 'admin'); localStorage.setItem('iter.role', 'admin');
           }
         } catch (e) { /* storage blocked */ }
       }, [state.adminToken]);

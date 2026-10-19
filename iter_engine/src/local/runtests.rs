@@ -1,4 +1,4 @@
-//! The deterministic test runner (iter5 spec §3.5).
+//! The deterministic test runner (iter spec §3.5).
 //!
 //! A test node (`*.test.iter.md`) is metadata; its `children.tests` entries
 //! are globs / paths of the scripts. Each script runs under `bash` in the test

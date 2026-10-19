@@ -1,4 +1,4 @@
-//! Project graph ⇄ repo sync (iter5 spec §3.2–§3.4). iter_data never
+//! Project graph ⇄ repo sync (iter spec §3.2–§3.4). iter_data never
 //! touches a repo: the engine serving a project pushes its node files here
 //! (`files/sync`) and pulls the node edits waiting to be written
 //! (`files/pending` → write + commit → `files/ack`). Designed projects are

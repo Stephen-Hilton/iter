@@ -1,4 +1,4 @@
-//! Project authorization (iter5 spec §4.4), applied in ONE place: a
+//! Project authorization (iter spec §4.4), applied in ONE place: a
 //! router-level middleware keyed on the project segment of the path, so every
 //! `/api/projects/{p}/…` route — work items, locks, graph, rag, datasync,
 //! anything added later — and MCP (which replays through the same router)

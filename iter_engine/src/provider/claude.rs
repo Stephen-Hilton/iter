@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn dispatch_runs_the_cli_with_token_env_and_cwd() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("iter5-fake-claude-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("iter-fake-claude-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let bin = dir.join("claude");
         std::fs::write(&bin, "#!/bin/sh\necho \"{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"session_id\\\":\\\"S\\\",\\\"result\\\":\\\"$CLAUDE_CODE_OAUTH_TOKEN $ITER_WORKID $(basename $(pwd))\\\"}\"\n").unwrap();

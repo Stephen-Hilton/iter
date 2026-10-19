@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1d2026">
-<title>iter5</title>
+<title>iter</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d2026'/%3E%3Cpath d='M9 22 L16 8 L23 22' fill='none' stroke='%234da3ff' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22' r='2.5' fill='%2339c47f'/%3E%3C/svg%3E">
 <style>
 :root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#d8dce3;--dim:#8b93a1;
@@ -294,7 +294,7 @@ a{color:var(--accent)}
   button{padding:8px 12px}
   #login,#pwchange{margin:8vh 14px}
 }
-/* iter5 tabs: one header for Intro | Work queue | Project graph | GraphRAG | Settings */
+/* iter tabs: one header for Intro | Work queue | Project graph | GraphRAG | Settings */
 #tabs{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;max-width:100%}
 #tabs button{font:inherit;font-size:13px;border:0;border-right:1px solid var(--line);background:transparent;color:var(--dim);padding:5px 12px;cursor:pointer;font-weight:500;border-radius:0;white-space:nowrap}
 #tabs button:last-child{border-right:0}
@@ -533,7 +533,7 @@ const TZ_CHOICES=[["","browser default"],["UTC","UTC"],
   ["Australia/Perth","Perth (AWST)"],["Australia/Adelaide","Adelaide"],["Australia/Brisbane","Brisbane"],["Australia/Sydney","Sydney (AEST)"],["Australia/Melbourne","Melbourne"],["Pacific/Auckland","Auckland (NZST)"]];
 let userTz="";
 function tzValid(tz){try{new Intl.DateTimeFormat("en-US",{timeZone:tz});return true;}catch(e){return false;}}
-function setTz(tz){userTz=tzValid(tz)?tz:"";try{if(userTz)localStorage.setItem("iter5.tz",userTz);else localStorage.removeItem("iter5.tz");}catch(e){}
+function setTz(tz){userTz=tzValid(tz)?tz:"";try{if(userTz)localStorage.setItem("iter.tz",userTz);else localStorage.removeItem("iter.tz");}catch(e){}
   const sel=$("#tz");if(sel){sel.innerHTML=TZ_CHOICES.map(([v,l])=>`<option value="${esc(v)}" ${v===userTz?"selected":""}>${esc(l)}</option>`).join("");}}
 const tzParts=(()=>{const cache={};return d=>{const key=userTz||"_";
   if(!cache[key])cache[key]=new Intl.DateTimeFormat("en-US",{...(userTz?{timeZone:userTz}:{}),month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,timeZoneName:"short"});
@@ -605,8 +605,8 @@ function tagsHtml(i,removable){
 
 async function boot(){
   try{const h=await fetch("/health").then(r=>r.json());$("#backend").textContent="data: "+h.backend;}catch(e){}
-  try{setTz(localStorage.getItem("iter5.tz")||"");}catch(e){}
-  try{const w=parseInt(localStorage.getItem("iter5.aside_w"));if(w>=160)document.documentElement.style.setProperty("--aside-w",w+"px");}catch(e){}
+  try{setTz(localStorage.getItem("iter.tz")||"");}catch(e){}
+  try{const w=parseInt(localStorage.getItem("iter.aside_w"));if(w>=160)document.documentElement.style.setProperty("--aside-w",w+"px");}catch(e){}
   (()=>{const nav=v=>document.body.classList.toggle("nav-open",v);
     $("#nav-toggle").onclick=()=>nav(!document.body.classList.contains("nav-open"));
     $("#aside-backdrop").onclick=()=>nav(false);
@@ -617,17 +617,17 @@ async function boot(){
       const x0=e.clientX,w0=aside.getBoundingClientRect().width;
       grip.onpointermove=ev=>{const w=Math.max(160,Math.min(window.innerWidth*0.6,w0+ev.clientX-x0));document.documentElement.style.setProperty("--aside-w",w+"px");placeDepthTicks(lastMaxDepth);};
       grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;grip.classList.remove("dragging");document.body.classList.remove("resizing");
-        try{localStorage.setItem("iter5.aside_w",String(Math.round(aside.getBoundingClientRect().width)));}catch(e){}resizeViews();};};
-    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter5.aside_w");}catch(e){}resizeViews();};})();
-  try{token=localStorage.getItem("iter5.token");me=localStorage.getItem("iter5.user");myRole=localStorage.getItem("iter5.role")||"";
-      const s=localStorage.getItem("iter5.sort");if(s)$("#sort").value=s;}catch(e){}
+        try{localStorage.setItem("iter.aside_w",String(Math.round(aside.getBoundingClientRect().width)));}catch(e){}resizeViews();};};
+    grip.ondblclick=()=>{document.documentElement.style.removeProperty("--aside-w");try{localStorage.removeItem("iter.aside_w");}catch(e){}resizeViews();};})();
+  try{token=localStorage.getItem("iter.token");me=localStorage.getItem("iter.user");myRole=localStorage.getItem("iter.role")||"";
+      const s=localStorage.getItem("iter.sort");if(s)$("#sort").value=s;}catch(e){}
   if(token){try{await load();return;}catch(e){token=null;}}
   $("#login").style.display="";$("#layout").style.display="none";$("#top").style.display="none";
 }
 // a signed-in session: keep it, then the app (or, first, the forced password change)
 async function signedIn(r){
   token=r.token;me=r.user;myRole=r.role||"";
-  try{localStorage.setItem("iter5.token",token);localStorage.setItem("iter5.user",me);localStorage.setItem("iter5.role",myRole);}catch(e){}
+  try{localStorage.setItem("iter.token",token);localStorage.setItem("iter.user",me);localStorage.setItem("iter.role",myRole);}catch(e){}
   if(typeof r.timezone==="string"&&r.timezone)setTz(r.timezone);
   if(r.must_change_password){
     $("#login").style.display="none";$("#pwchange").style.display="";$("#pc-cur").value=$("#li-pass").value;$("#pc-new").focus();return;
@@ -653,14 +653,14 @@ $("#pc-go").onclick=async()=>{
 };
 $("#pc-new2").addEventListener("keydown",e=>{if(e.key==="Enter")$("#pc-go").click();});
 $("#li-pass").addEventListener("keydown",e=>{if(e.key==="Enter")$("#li-go").click();});
-$("#logout").onclick=()=>{token=null;try{localStorage.removeItem("iter5.token");}catch(e){};location.reload();};
+$("#logout").onclick=()=>{token=null;try{localStorage.removeItem("iter.token");}catch(e){};location.reload();};
 $("#refresh").onclick=()=>project&&loadItems(project);
-$("#sort").onchange=()=>{try{localStorage.setItem("iter5.sort",$("#sort").value);}catch(e){};renderItems();};
+$("#sort").onchange=()=>{try{localStorage.setItem("iter.sort",$("#sort").value);}catch(e){};renderItems();};
 $("#newitem").onclick=()=>openForm("create",null);
 $("#user-gear").onclick=()=>openSettings("user",me);
 $("#keys-btn").onclick=()=>openSettings("keys");
 $("#engine-add").onclick=async()=>{
-  /* iter5: an engine registers itself on first start (iter_engine --data-url URL --env-file PATH);
+  /* iter: an engine registers itself on first start (iter_engine --data-url URL --env-file PATH);
      adding one by hand, and connecting it to projects and accounts, happens in the settings graph */
   await setTab("settings");
   if(window.IterSettings)IterSettings.newNode("iter_engine");
@@ -796,9 +796,9 @@ async function load(){
   const[projects,engines,agents,meRow,srv]=await Promise.all([api("/api/projects"),api("/api/engines"),api("/api/agents").catch(()=>[]),
     me?api("/api/users/"+encodeURIComponent(me)).catch(()=>null):null,api("/api/server").catch(()=>null)]);
   agentsCache=agents;projectsCache=projects;enginesCache=engines;serverRow=srv||{active:true};
-  // the settings graph says which engine serves which project (iter5); read once per refresh, best effort
+  // the settings graph says which engine serves which project (iter); read once per refresh, best effort
   try{sgCache=await api("/api/settings/graph");}catch(e){sgCache=null;}
-  if(meRow&&meRow.role){myRole=meRow.role;try{localStorage.setItem("iter5.role",myRole);}catch(e){}}
+  if(meRow&&meRow.role){myRole=meRow.role;try{localStorage.setItem("iter.role",myRole);}catch(e){}}
   if(meRow&&typeof meRow.timezone==="string"&&meRow.timezone!==userTz)setTz(meRow.timezone);
   else if(!$("#tz").options.length)setTz(userTz);
   $("#tz").onchange=async()=>{
@@ -811,7 +811,7 @@ async function load(){
   document.body.classList.toggle("viewer",myRole==="viewer");
   $("#keys-btn").hidden=myRole!=="admin";
   projects.sort((a,b)=>rname(a).localeCompare(rname(b),undefined,{sensitivity:"base"}));
-  try{const lp=localStorage.getItem("iter5.project");if(lp&&!project&&projects.some(p=>rid(p)===lp))project=lp;}catch(e){}
+  try{const lp=localStorage.getItem("iter.project");if(lp&&!project&&projects.some(p=>rid(p)===lp))project=lp;}catch(e){}
   // each project: its switch, and what else keeps it from running (server, no engine, engines off)
   $("#projects").innerHTML=projects.map(p=>{
     const why=projBlock(p);
@@ -876,7 +876,7 @@ async function load(){
   document.querySelectorAll("[data-gear]").forEach(g=>g.onclick=ev=>{ev.stopPropagation();openSettings(g.dataset.gear,g.dataset.name);});
   {const hp=hashParams().get("p");if(hp&&projects.some(p=>rid(p)===hp))project=hp;}
   // the tab the URL (or the last visit) asked for, read before loadItems rewrites the hash
-  let t=hashParams().get("tab");if(!t){try{t=localStorage.getItem("iter5.tab");}catch(e){}}
+  let t=hashParams().get("tab");if(!t){try{t=localStorage.getItem("iter.tab");}catch(e){}}
   if(["intro","queue","graph","rag","settings"].includes(t))tab=t;
   if(projects.length&&!project)project=rid(projects[0]);
   fillProjPick();
@@ -894,7 +894,7 @@ async function loadItems(p){
   if(changed||true)writeTabHash();
   if(tab==="graph"&&graphDrawnFor!==p)loadGraph(p);
   if(tab==="rag")showRag();
-  try{localStorage.setItem("iter5.project",p);}catch(e){}
+  try{localStorage.setItem("iter.project",p);}catch(e){}
   document.querySelectorAll("#projects .proj").forEach(b=>b.classList.toggle("sel",b.dataset.p===p));
   const [items,dl]=await Promise.all([api(P()),api("/api/projects/"+encodeURIComponent(p)+"/deadlocks").catch(()=>null),renderProjectCtl().catch(()=>{})]);
   itemsCache=items;buildKids(itemsCache);parentCache={};
@@ -902,7 +902,7 @@ async function loadItems(p){
   renderMapStats(p).catch(()=>{$("#mapstats").innerHTML="<div class='eng kv'>no map yet</div>";});
 }
 
-/* Project graph summary (iter5): node counts by type and the file-sync state,
+/* Project graph summary (iter): node counts by type and the file-sync state,
    from GET graph/stats (tolerant of its shape); the tab itself draws the graph. */
 const MAP_ICON={project:"◆",code:"▣",context:"▣",container:"▢",component:"▪",connection:"◇",test:"✓",bizreq:"B",techreq:"T",philosophy:"✦",usecase:"☺",actor:"☻"};
 async function renderMapStats(p){
@@ -1653,13 +1653,13 @@ const PROJECT_FIELDS=[
   {key:"fix_on_test_failure",label:"fix on test failure",type:"bool",help:"a non-green FULL testgroup run (Test Loop, exec item, or a human's run) files a code item to investigate and fix; a group's own auto_fix flag turns it on per group; agent sessions iterating on their own code never file one"},
   {key:"session_chain_max",label:"session chain max",type:"number",help:"after an item closes complete, its claude session may take on this many queued neighbours in total (same lockdirs + same usecase, dependencies satisfied, best on that scope) — 0 or 1 = never chain; default 3"},
   {key:"priority_scale",label:"priority scale",type:"readonly",help:"100 once the 0–99 priority migration ran (POST /api/projects/<name>/migrate_priority)"},
-  {key:"agents",label:"agent overrides",type:"readonly",help:'iter5: an agent runs on a project through a <b>runs</b> edge in the settings graph, and that edge holds its per-project overrides'},
+  {key:"agents",label:"agent overrides",type:"readonly",help:'iter: an agent runs on a project through a <b>runs</b> edge in the settings graph, and that edge holds its per-project overrides'},
   {key:"failure",emptyValue:{},label:"failure policy",type:"json",rows:4,help:"maxattempts · first_retry_second · retry_backoff_exponent"},
   {key:"cluster_restart",emptyValue:{},label:"cluster restart",type:"json",rows:3,help:'Optional — leave empty if this project has no nightly cluster restart. The nightly cluster restart an item tagged blocked-by-cluster-restart waits out: {"schedule":"<id of the scheduled restart template>","tz":"America/Los_Angeles","from":"02:00","until":"06:00"} — the newest clone of that template decides (complete + clusterhealth row exits 0 = healthy; red row / still running / failed = unavailable); with no clone in 24h, or no schedule, the wall clock in tz decides. The engine shows "blocked by: cluster restart" while it holds, requeues a parked tagged item when healthy, and strips the tag when the item starts'},
   {key:"dedup",label:"repeat detection",type:"json",rows:2,emptyValue:{},help:'Optional — leave the box empty to use the defaults. The engine merges repeated work items on its own (a new item whose check: and container: tags match an open item, or one that Sonnet judges the same fault, is folded into the existing item; each repeat halves that item\'s priority number so it moves up the queue). The one setting here: after how many repeats the existing item gets the "repeated" tag — {"repeated_threshold": 3} is the default.'},
   {key:"pinned_tags",label:"pinned tags",type:"json",rows:2,emptyValue:[],help:'tag texts the Add tag… picker offers first, before the tags already in use on this project — the tags this project\'s agents and scripts react to, e.g. ["blocked-by-cluster-restart","blocked-until-cluster-restart"]; engine-owned "blocked by: …" tags are refused'},
-  {key:"engines",type:"readonly",help:'iter5: an engine serves a project through a <b>serves</b> edge (with its topdir) in the settings graph'},
-  {key:"accounts",type:"readonly",help:'iter5: an account bills a project through a <b>bills</b> edge (order, switch %, stop %, model) in the settings graph'},
+  {key:"engines",type:"readonly",help:'iter: an engine serves a project through a <b>serves</b> edge (with its topdir) in the settings graph'},
+  {key:"accounts",type:"readonly",help:'iter: an account bills a project through a <b>bills</b> edge (order, switch %, stop %, model) in the settings graph'},
   {key:"commit_extra_paths",label:"commit extra paths",type:"json",rows:2,emptyValue:[],help:'the engine\'s end-of-run commit (and the close-gate evidence) is limited to an item\'s lock scope so it never sweeps another agent\'s unfinished files; list here the paths agents write OUTSIDE their scope by design — git pathspecs relative to the checkout, globs allowed: ["Agent_Recommendations.md","*.agentmemory.iter.md"]'},
 ];
 const ENGINE_FIELDS=[
@@ -1671,7 +1671,7 @@ const ENGINE_FIELDS=[
   {key:"ticksec",label:"tick (sec)",type:"number"},{key:"full_refresh_minutes",label:"full refresh (min)",type:"number",help:"unconditional reload cadence — the seq fallback"},
   {key:"probe_stale_min",label:"usage probe (min)",type:"number",default:20,help:"when idle, every account whose usage snapshot is older than this gets one direct 1-token probe (~9 tokens) so the ladder sees real 5h/7d numbers; 0 = off"},
   {key:"queuelock",type:"json",rows:3},
-  {key:"projects",label:"projects served",type:"readonly",help:'iter5: the projects an engine serves are <b>serves</b> edges in the settings graph (topdir and read_only live on the edge)'},
+  {key:"projects",label:"projects served",type:"readonly",help:'iter: the projects an engine serves are <b>serves</b> edges in the settings graph (topdir and read_only live on the edge)'},
 ];
 const AGENT_FIELDS=[
   {key:"id",type:"readonly",help:"the stable id — URLs, edges and work items use it; it never changes"},{key:"name",type:"text",help:"the display name — rename freely (unique among its kind)"},{key:"desc",label:"description",type:"text"},
@@ -1814,7 +1814,7 @@ async function userSettings(name){
     sdlg.querySelector("#sf-err").textContent="";
     try{
       const r=await changeMyPassword(sdlg.querySelector("#mp-cur").value,sdlg.querySelector("#mp-new").value,sdlg.querySelector("#mp-new2").value);
-      token=r.token;try{localStorage.setItem("iter5.token",token);}catch(e){}
+      token=r.token;try{localStorage.setItem("iter.token",token);}catch(e){}
       sdlg.querySelectorAll("#mp-cur,#mp-new,#mp-new2").forEach(i=>i.value="");
       sdlg.querySelector("#mp-note").textContent="password changed; other sessions signed out";
     }catch(e){sdlg.querySelector("#sf-err").textContent="password change failed: "+e.message;}
@@ -2133,10 +2133,10 @@ function fillProjPick(){
 }
 /* ---- the side panel: one for every tab (2026-10-08), hidden per tab with ‹ and brought back with ›, remembered in this browser ---- */
 function sizeTop(){document.documentElement.style.setProperty("--top-h",$("#top").offsetHeight+"px");}
-const asideOff=()=>{try{return new Set(JSON.parse(localStorage.getItem("iter5.aside.off")||"[]"));}catch(e){return new Set();}};
+const asideOff=()=>{try{return new Set(JSON.parse(localStorage.getItem("iter.aside.off")||"[]"));}catch(e){return new Set();}};
 function applyAside(){document.body.classList.toggle("aside-off",asideOff().has(tab));}
 function resizeViews(){placeDepthTicks(lastMaxDepth);const c=window.IterGraph&&IterGraph.current;if(tab==="graph"&&c&&c.cy)c.cy.resize();if(tab==="settings"&&window.IterSettings)IterSettings.resize();}
-function setAside(off){const s=asideOff();if(off)s.add(tab);else s.delete(tab);try{localStorage.setItem("iter5.aside.off",JSON.stringify([...s]));}catch(e){}applyAside();setTimeout(resizeViews,220);}
+function setAside(off){const s=asideOff();if(off)s.add(tab);else s.delete(tab);try{localStorage.setItem("iter.aside.off",JSON.stringify([...s]));}catch(e){}applyAside();setTimeout(resizeViews,220);}
 $("#aside-collapse").onclick=()=>setAside(true);
 $("#aside-expand").onclick=()=>setAside(false);
 window.addEventListener("resize",sizeTop);
@@ -2173,7 +2173,7 @@ window.addEventListener("resize",()=>{if(tab==="graph"||tab==="settings"){sizeGr
 let settingsMounted=false;
 async function setTab(t){
   if(!TABS.includes(t))t="queue";
-  tab=t;try{localStorage.setItem("iter5.tab",t);}catch(e){}
+  tab=t;try{localStorage.setItem("iter.tab",t);}catch(e){}
   TABS.forEach(x=>document.body.classList.toggle("tab-"+x,x===t&&x!=="queue"));
   applyAside();sizeTop();
   if(t!=="rag"&&window.IterRag)IterRag.hide();

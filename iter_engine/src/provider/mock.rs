@@ -1,4 +1,4 @@
-//! The `mock` provider (iter5 spec §5): deterministic, no model.  It drives
+//! The `mock` provider (iter spec §5): deterministic, no model.  It drives
 //! every automated test and e2e run.
 //!
 //! On a **work** turn the prompt is scanned for directive lines (the work
@@ -297,7 +297,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iter5-mock-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("iter-mock-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

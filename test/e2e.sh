@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# iter5 end-to-end (spec §11): iter_data (ArangoDB) + ONE iter_engine serving
+# iter end-to-end (spec §11): iter_data (ArangoDB) + ONE iter_engine serving
 # TWO projects, every agent turn on the deterministic `mock` provider.
 #
 # Usage: ./e2e.sh [--live] [--keep]
@@ -13,8 +13,8 @@
 # the end lists every failure; the exit code is non-zero on any.
 #
 # Fixture: e2e/sample5 (a small v5 project, copied twice into scratch git
-# repos). Its node files are stored as `*.iter.md.fixture` so iter5's own node
-# scan never reads them as nodes of iter5; the copies get the real names back.
+# repos). Its node files are stored as `*.iter.md.fixture` so iter's own node
+# scan never reads them as nodes of iter; the copies get the real names back.
 set -uo pipefail
 
 LIVE=0; KEEP=0
@@ -27,14 +27,14 @@ for a in "$@"; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"   # the repo root
-ARANGO_URL_E2E="${ITER5_TEST_ARANGO_URL:-${ARANGO_URL_E2E:-http://127.0.0.1:8529}}"
-ARANGO_PW_E2E="${ITER5_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iter4dev}}"
-ARANGO_DB_E2E="iter5_e2e_$RANDOM$RANDOM"
+ARANGO_URL_E2E="${ITER_TEST_ARANGO_URL:-${ARANGO_URL_E2E:-http://127.0.0.1:8529}}"
+ARANGO_PW_E2E="${ITER_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}"
+ARANGO_DB_E2E="iter_e2e_$RANDOM$RANDOM"
 # iter_data signs in as its own user, which root creates on first start (and
 # cleanup removes): the same path a fresh install takes
 ARANGO_USER_E2E="$ARANGO_DB_E2E"
 ARANGO_USER_PW_E2E="e2e-$RANDOM$RANDOM$RANDOM"
-SCRATCH="${E2E_SCRATCH:-$(mktemp -d /tmp/iter5-e2e.XXXXXX)}"
+SCRATCH="${E2E_SCRATCH:-$(mktemp -d /tmp/iter-e2e.XXXXXX)}"
 PORT=$((18400 + RANDOM % 1000))
 # TLS (2026-10-17): iter_data serves its self-signed certificate (E2E_TLS=off
 # for plain http); curl trusts it as a CA bundle, the engine pins it

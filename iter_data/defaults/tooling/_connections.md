@@ -1,7 +1,7 @@
 # Capability: connections between parts (`level: connection` code nodes)
 
 Read this before you add, link or describe how two parts of the system talk to each
-other. iter5 has no interface files: a **connection** is a code node with
+other. iter has no interface files: a **connection** is a code node with
 `level: connection` that stands for one KIND of connection the project uses — "API
 call", "Event", "Stream", "Shared dataset", "Auth token", … — not one per operation.
 Connections live under `{topdir}/global/connections/` (`<slug>.code.iter.md`, or

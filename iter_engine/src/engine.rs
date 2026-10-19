@@ -1,4 +1,4 @@
-//! The tick loop (iter5: one engine per machine, spec §4).  Every loop:
+//! The tick loop (iter: one engine per machine, spec §4).  Every loop:
 //! read the engine record and its assignments (which projects, which
 //! checkout, which accounts), heartbeat, run each served project's file
 //! sync hook, then per project: metadata (seq-gated, periodic full refresh),
@@ -1505,7 +1505,7 @@ impl EngineRuntime {
         }
         // an agent whose flags grant claude no permission mode cannot write,
         // run a command or read outside its folder in a headless run: it is
-        // never started (2026-10-08 — every iter5 agent had empty flags, and
+        // never started (2026-10-08 — every iter agent had empty flags, and
         // each attempt spent ~$1 to end as a "need write permission" question)
         let unarmed: Vec<String> = agents_seen
             .iter()
@@ -2209,11 +2209,11 @@ mod tests {
     }
 }
 
-/// iter5 engine tests against a stateful stand-in for iter_data (assignments,
+/// iter engine tests against a stateful stand-in for iter_data (assignments,
 /// server-side next, versioned work item writes, details) with the mock
 /// provider doing the agent work.
 #[cfg(test)]
-mod iter5_tests {
+mod iter_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -2326,7 +2326,7 @@ mod iter5_tests {
     }
 
     pub(crate) fn topdir(tag: &str) -> String {
-        let d = std::env::temp_dir().join(format!("iter5-engine-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("iter-engine-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
         d.to_string_lossy().into_owned()

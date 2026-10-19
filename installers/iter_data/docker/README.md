@@ -51,7 +51,7 @@ The script checks Docker and gets the binary: `--binary PATH`, else the one in t
 | `--arango-port N` | 8630 | console port on 127.0.0.1; `0` leaves it unpublished |
 | `--data-dir DIR` | the container's mount, else `~/.iter/iter_data` | an older install's data folder, moved in once (see [below](#moving-an-install-from-before-2026-10-18)) |
 | `--adopt-volumes` | | copy a hand-made setup's docker volumes into the iter dir (see below) |
-| `--name NAME` | `iter5` | container, compose project and image name; another name keeps its files in `<iter dir>/iter_data_<name>` |
+| `--name NAME` | `iter` | container, compose project and image name; another name keeps its files in `<iter dir>/iter_data_<name>` |
 | `--model-dir DIR` | | copy an existing all-MiniLM-L6-v2 folder instead of downloading it |
 | `--memory SIZE` | `6g` | container memory cap; ArangoDB is sized 1G below it |
 | `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of iter_data's own |
@@ -78,7 +78,7 @@ To compile the binary yourself, clone the repo and run `cargo build --release -p
 
 iter_data serves HTTPS on `:8400`. On its first start it makes a local certificate authority (`tls-ca.crt` + `tls-ca.key`) and a certificate signed by it (`tls.crt` + `tls.key`, keys mode 600) in `state/` beside its secrets, and keeps it across reinstalls and upgrades. The engine-session signing secret, `engine_session.secret`, lives there too. The script makes the data folder owner-only.
 
-After a successful install the script prints the certificate's **fingerprint** (`sha256:` + 64 hex: the SHA-256 of the certificate, the same as `openssl x509 -in tls.crt -noout -fingerprint -sha256` without the colons). Engines pin it. Give it to each engine installer (`--fingerprint sha256:…`, or `-Fingerprint` on Windows), or let the engine trust it at its first sign-in and compare it afterwards with `iter_engine key status`. It is also in the webui's 🔑 Engine keys screen, and in the container log: `docker logs iter5 2>&1 | grep fingerprint`.
+After a successful install the script prints the certificate's **fingerprint** (`sha256:` + 64 hex: the SHA-256 of the certificate, the same as `openssl x509 -in tls.crt -noout -fingerprint -sha256` without the colons). Engines pin it. Give it to each engine installer (`--fingerprint sha256:…`, or `-Fingerprint` on Windows), or let the engine trust it at its first sign-in and compare it afterwards with `iter_engine key status`. It is also in the webui's 🔑 Engine keys screen, and in the container log: `docker logs iter 2>&1 | grep fingerprint`.
 
 **Browsers.** The CA is name-constrained to this server's names (with every `--tls-name`), `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. iter_data serves it, without sign-in, at `https://<host>:<port>/tls/ca.crt`. The script copies it out of the container and trusts it on this host: on macOS in the login keychain as a root for SSL (macOS asks for your password; Firefox reads it while `security.enterprise_roots.enabled` is on, the default), on Linux in the system store and the desktop user's NSS databases (Chrome, Chromium, Firefox). The webui then opens as secure here after a browser restart. On another machine the engine installer does the same; without an engine there, open `https://<this host>:8400/tls/ca.crt` and trust it as a certificate authority. Other choices:
 
@@ -128,18 +128,18 @@ openssl x509 -in cert.pem -noout -fingerprint -sha256    # -> --arango-fingerpri
 
 ```bash
 # backup (online: iter_data keeps serving); the dump lands in <iter dir>/iter_data/backups on the host
-docker exec iter5 bash -c 'arangodump --server.endpoint tcp://127.0.0.1:8529 \
+docker exec iter bash -c 'arangodump --server.endpoint tcp://127.0.0.1:8529 \
   --server.username "$ARANGO_USER" --server.password "$ARANGO_PASSWORD" --server.database "${ARANGO_DB:-iter_db}" \
   --include-system-collections false --output-directory /var/lib/iter_data/backups/backup-$(date +%F)'
 
 # restore into the same database (overwrites iter's collections; best with no engines connected)
-docker exec iter5 bash -c 'arangorestore --server.endpoint tcp://127.0.0.1:8529 \
+docker exec iter bash -c 'arangorestore --server.endpoint tcp://127.0.0.1:8529 \
   --server.username "$ARANGO_USER" --server.password "$ARANGO_PASSWORD" --server.database "${ARANGO_DB:-iter_db}" \
   --include-system-collections false --overwrite true --input-directory /var/lib/iter_data/backups/backup-YYYY-MM-DD'
-docker restart iter5
+docker restart iter
 ```
 
-An install still on the older `iter5` database (see above) has no `ARANGO_DB` set: name `iter5` in place of `${ARANGO_DB:-iter_db}`. For an external ArangoDB, run the same commands with that server's endpoint (`ssl://host:8529` for HTTPS) from any machine with the Arango client tools. Leave the system collections out: `iter_user` may not restore Arango's own (`_queues` and the like), and iter does not need them, because iter_data recreates its named graph (`_graphs`) at every start. To restore into a database that does not exist yet, create it first (start iter_data once, or as root with `--create-database true`).
+An install still on the older `iter` database (see above) has no `ARANGO_DB` set: name `iter` in place of `${ARANGO_DB:-iter_db}`. For an external ArangoDB, run the same commands with that server's endpoint (`ssl://host:8529` for HTTPS) from any machine with the Arango client tools. Leave the system collections out: `iter_user` may not restore Arango's own (`_queues` and the like), and iter does not need them, because iter_data recreates its named graph (`_graphs`) at every start. To restore into a database that does not exist yet, create it first (start iter_data once, or as root with `--create-database true`).
 
 ## Status
 
@@ -153,7 +153,7 @@ Run `install.sh` again, with `--version` for a specific release (no `--iter-dir`
 
 ```bash
 cd /opt/iter/iter_data/docker
-ITER_DATA_DIR=/opt/iter/iter_data ITER_ENV_PATH=/opt/iter/iter_data/config/data.env docker compose -p iter5 -f compose.yml down --rmi local
+ITER_DATA_DIR=/opt/iter/iter_data ITER_ENV_PATH=/opt/iter/iter_data/config/data.env docker compose -p iter -f compose.yml down --rmi local
 ```
 
 `/opt/iter/iter_data` stays, with the database and the secrets. Remove it yourself if you no longer need the data.

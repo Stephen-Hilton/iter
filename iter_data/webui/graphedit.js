@@ -1,5 +1,5 @@
 /*
- * iter5 Project graph editor (spec §3.3, §6.2, §9). Nodes are files: every
+ * iter Project graph editor (spec §3.3, §6.2, §9). Nodes are files: every
  * edit here goes straight to iter_data, shows in the drawing at once, and an
  * engine serving the project writes the file within seconds (the node shows
  * "⟳ pending sync" until it has). A project with no repository yet is

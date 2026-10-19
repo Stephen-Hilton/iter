@@ -1,4 +1,4 @@
-//! Node-file sync, the engine half (iter5 spec §3). The engine is the only
+//! Node-file sync, the engine half (iter spec §3). The engine is the only
 //! writer to the checkout; iter_data never touches a repo.
 //!
 //! Every tick, per served project ([`tick`]):

@@ -70,7 +70,7 @@ too. At every start iter_data signs in as that user. When it cannot (the user or
 exist yet, or the user has less than rw), and root's password is known, root creates the user and the
 database and grants rw, and iter_data tries again. The user itself creates every collection and index,
 including GraphRAG's vector indexes once a project is large. An installation from before iter_user existed
-keeps its `iter5` database (iter_data then signs in as `iter_user` to it).
+keeps its `iter` database (iter_data then signs in as `iter_user` to it).
 
 By default the first boot installs ArangoDB on the instance (localhost only) and does all of this for you.
 To use an ArangoDB you already run, for example one shared with another app, give its URL:

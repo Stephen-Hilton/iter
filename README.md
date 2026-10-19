@@ -1,6 +1,6 @@
-# iter5
+# iter
 
-iter5 is a fork of iter4. A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter5_spec.md`](docs/iter5_spec.md), and §12 lists where iter5 departs from [`docs/requirements.png`](docs/requirements.png).
+A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter5_spec.md`](docs/iter5_spec.md), and §12 lists where iter5 departs from [`docs/requirements.png`](docs/requirements.png).
 
 | dir | what it is |
 |---|---|
@@ -12,7 +12,7 @@ iter5 is a fork of iter4. A project lives in two places that stay in step: the r
 | `test/` | every test suite run from outside the crates: the crate test nodes, `test/e2e.sh` and the Playwright suite |
 | `docs/` | the spec, the user guide, and `docs/iter_project_docs/` (iter's own project graph: project node, use cases, connections, `map/`) |
 
-iter5 is a cargo workspace at the repo root (`Cargo.toml`); build and test from the root. It runs beside iter4: container `iter5`, port **:8400**, database `iter5`.
+iter is a cargo workspace at the repo root (`Cargo.toml`); build and test from the root. Container `iter`, port **:8400**, database `iter_db`.
 
 ## Install it
 
@@ -87,7 +87,7 @@ The first admin (`admin`) is made on an empty database with `ITER_ADMIN_PASSWORD
 ./deploy.sh local    # native release iter_data on :8400 against the dev Arango container on :8529 (fast dev loop)
 ```
 
-Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iter4dev`, local only). `deploy.sh local` runs iter_data as `iter_user` on `iter_db`. That user's password is made once and kept in `run/arango_user.pw`, and root creates the user and database on the first start. `deploy.sh` puts its native release binaries in `bin/<os>-<arch>/`.
+Secrets (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`) are read from the repo root `.env`, and `ITER_ENV_FILE` overrides that path. `ITER_PORT` changes the port. The Arango root password is `ARANGO_ROOT_PASSWORD` (default `iterdev`, local only). `deploy.sh local` runs iter_data as `iter_user` on `iter_db`. That user's password is made once and kept in `run/arango_user.pw`, and root creates the user and database on the first start. `deploy.sh` puts its native release binaries in `bin/<os>-<arch>/`.
 
 ### Windows
 
@@ -255,14 +255,14 @@ iter_data serves a stateless MCP server at `POST /mcp` (Streamable HTTP, JSON). 
 
 ```bash
 ./deploy.sh local              # once: the dev ArangoDB on :8529 that the tests use
-cargo test --workspace         # every crate; iter_data's tests each get a throwaway iter5_test_* database
-test/e2e.sh                       # full stack, mock provider, one engine serving two projects (throwaway iter5_e2e_* database)
+cargo test --workspace         # every crate; iter_data's tests each get a throwaway iter_test_* database
+test/e2e.sh                       # full stack, mock provider, one engine serving two projects (throwaway iter_e2e_* database)
 E2E_ONLY=b,c test/e2e.sh          # setup + only those sections (a0, a, b, c, d, e, f, g, h)
 test/e2e.sh --live                # also one tiny item on a real claude account (needs ITER_LIVE_CLAUDE_TOKEN)
 test/e2e/playwright/run.sh          # webui suite; screenshots in test/e2e/playwright/screenshots (git-ignored)
 ```
 
-`ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` point the tests at another Arango (they need its root password: each test makes its own database, and `test/e2e.sh` also makes its own user).
+`ITER_TEST_ARANGO_URL` / `ITER_TEST_ARANGO_PASSWORD` point the tests at another Arango (they need its root password: each test makes its own database, and `test/e2e.sh` also makes its own user).
 
 ## Licence
 

@@ -21,7 +21,7 @@ two node descriptions, where a reader of the map never sees it.
     pushes:
       "{topdir}/src/.../ue_game_replication_tick_for_client.code.iter.md": "≥3 eligible peers"
   ```
-  Same shape and same path-matching rules as `protocols` (§2.3 of `iter5_spec.md`).
+  Same shape and same path-matching rules as `protocols` (§2.3 of `iter_spec.md`).
 - **CE-3** The map draws a conditional edge **dashed** with the condition in its label:
   `pushes (UDP) · if ≥3 eligible peers`. Hover, selection and zoom rules are the protocol's.
 - **CE-4** It is editable everywhere a protocol is: the edge's right-click menu (`Condition…`), the
@@ -48,7 +48,7 @@ Mirror the protocol feature line for line; it landed on 2026-10-11 and every tou
 | `iter_data/src/mcp.rs` | `edge_protocol` | `edge_condition` |
 | `iter_data/webui/graph.js` | `KNOWN_PROTOCOLS`; `edgeVisual` label `kind (protocol)`; detail pane "Protocol:" line | `KNOWN_CONDITIONS`; `edgeVisual`: if `m.link.condition` → `line = 'dashed'`, label `+ ' · if ' + condition`, class `conditional`; detail pane "Condition:" line; chip `hide conditional` (selector `edge.conditional`) |
 | `iter_data/webui/graphedit.js` | `editProtocol`, `pickProtocol`, configure field `protocol`, `addEdge(…, protocol)` | `editCondition`, `pickCondition`, configure field `condition`, `addEdge` passes `condition`; the paste/copy of an edge carries it |
-| `docs/iter5_spec.md` | §2.3 code keys, §3 routes table, §4 MCP | add `conditions` beside `protocols` in each place |
+| `docs/iter_spec.md` | §2.3 code keys, §3 routes table, §4 MCP | add `conditions` beside `protocols` in each place |
 | `docs/node_text_standard.md` | — | one line: a condition is 2–5 plain words saying *when*, not *why* |
 
 Edge identity stays `(from, kind, to)`: a condition never creates a second edge. Two different

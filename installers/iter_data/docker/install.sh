@@ -23,7 +23,7 @@
 #                        [the container's mount, else ~/.iter/iter_data]
 #   --adopt-volumes      the container NAME keeps its database in docker volumes (an older
 #                        hand-made setup): copy them into the iter dir (the volumes are kept)
-#   --name NAME          container, compose project and image name [iter5]; another name
+#   --name NAME          container, compose project and image name [iter]; another name
 #                        keeps its files in <iter dir>/iter_data_<name>
 #   --model-dir DIR      an all-MiniLM-L6-v2 folder to use instead of downloading it
 #   --memory SIZE        container memory cap, e.g. 6g [6g]; Arango is told 1G less
@@ -89,7 +89,7 @@ ENV_SRC=""
 PORT="${ITER_PORT:-8400}"
 ARANGO_PORT="${ARANGO_HOST_PORT:-8630}"
 OLD_DATA=""
-NAME="iter5"
+NAME="iter"
 MODEL_SRC=""
 MEM="${ITER_MEM_LIMIT:-6g}"
 DRY=0
@@ -146,6 +146,8 @@ case "$TLS_MODE" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate 
 [ -z "$A_CA_SRC" ] || [ -f "$A_CA_SRC" ] || die "--arango-ca-cert $A_CA_SRC does not exist"
 
 case "$NAME" in ""|*[!A-Za-z0-9_.-]*) die "--name $NAME: letters, digits, - _ . only" ;; esac
+# an install made when the default container was called iter5 keeps that name (and its folders)
+if [ "$NAME" = iter ] && command -v docker >/dev/null 2>&1 && ! docker inspect iter >/dev/null 2>&1 && docker inspect iter5 >/dev/null 2>&1; then NAME=iter5; fi
 
 # --iter-dir: the folder that holds everything, always ending in /iter
 # (/my/dir/iter/, /my/dir/iter and /my/dir all give /my/dir/iter)
@@ -158,7 +160,7 @@ iter_dir_of() {
   [ "${d##*/}" = iter ] || d="${d%/}/iter"
   printf '%s' "$d"
 }
-PROG=iter_data; [ "$NAME" = iter5 ] || PROG="iter_data_$NAME"
+PROG=iter_data; [ "$NAME" = iter ] || [ "$NAME" = iter5 ] || PROG="iter_data_$NAME"
 TLS_CUSTOM=""
 # set_paths: everything below <iter dir>/<PROG>
 set_paths() {
@@ -602,7 +604,7 @@ if [ -z "$A_URL" ]; then
   [ -n "$A_ROOT" ] || A_ROOT="$STASH_ROOT"
   if [ -z "$A_ROOT" ]; then
     if present "$D/arango/data/SERVER"; then
-      A_ROOT=iter4dev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
+      A_ROOT=iterdev; say "existing database, no ARANGO_ROOT_PASSWORD given: assuming the old default"
     else
       A_ROOT="$(gen 24)"; say "generated an Arango root password (kept in $ENV_PATH)"
     fi
@@ -721,6 +723,8 @@ compose=(docker compose -p "$NAME" -f "$BUILD/compose.yml")
 say "building image $NAME:latest and starting container $NAME (:$PORT$([ "$ARANGO_PORT" = 0 ] || echo ", console 127.0.0.1:$ARANGO_PORT"))"
 export ITER_NAME="$NAME" ITER_PORT="$PORT" ARANGO_HOST_PORT="$ARANGO_PORT" ITER_DATA_DIR="$D" \
   ITER_ENV_PATH="$ENV_PATH" ITER_MEM_LIMIT="$MEM" ITER_ARANGO_MEMORY="$AMEM"
+# the compose service was called iter5 before it was called iter: drop that container (its data is in the host folder) so the renamed service takes its place
+if [ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$NAME" 2>/dev/null)" = iter5 ]; then run docker rm -f "$NAME"; fi
 run "${compose[@]}" up -d --build
 
 # ---- 7. health

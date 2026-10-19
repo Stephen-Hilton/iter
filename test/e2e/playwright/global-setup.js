@@ -1,5 +1,5 @@
 // Global setup: build iter_data (debug), create a throwaway ArangoDB database
-// iter5_pw_<ts>, start iter_data on a random port serving iter_data/webui, seed it
+// iter_pw_<ts>, start iter_data on a random port serving iter_data/webui, seed it
 // through the API, and hand the base URL + seed ids to the specs (env + state file).
 'use strict';
 const { spawn, execFileSync } = require('child_process');
@@ -11,8 +11,8 @@ const { seedSystem, seedProject } = require('./lib/seed');
 
 const ROOT = path.resolve(__dirname, '../../..');
 const STATE = path.join(__dirname, '.state.json');
-const ARANGO = process.env.ITER5_TEST_ARANGO_URL || 'http://127.0.0.1:8529';
-const ARANGO_PW = process.env.ITER5_TEST_ARANGO_PASSWORD || 'iter4dev';
+const ARANGO = process.env.ITER_TEST_ARANGO_URL || 'http://127.0.0.1:8529';
+const ARANGO_PW = process.env.ITER_TEST_ARANGO_PASSWORD || 'iterdev';
 // the first-boot password, and the one the setup changes it to (the first
 // admin must choose their own before anything else works)
 const FIRST_PW = 'pw-first-' + Math.random().toString(36).slice(2, 10);
@@ -39,10 +39,10 @@ module.exports = async () => {
     const cargo = path.join(process.env.HOME, '.cargo/bin/cargo');
     execFileSync(fs.existsSync(cargo) ? cargo : 'cargo', ['build', '-p', 'iter_data'], { cwd: ROOT, stdio: 'inherit' });
   }
-  const db = `iter5_pw_${Math.floor(Date.now() / 1000)}_${process.pid}`;
+  const db = `iter_pw_${Math.floor(Date.now() / 1000)}_${process.pid}`;
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'iter5pw-'));
+  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'iterpw-'));
   const logFile = path.join(tmp, 'iter_data.log');
   const log = fs.openSync(logFile, 'w');
   const child = spawn(path.join(ROOT, 'target/debug/iter_data'), [

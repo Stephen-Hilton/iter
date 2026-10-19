@@ -1,4 +1,4 @@
-//! `iter validate [--fix]` (iter5): a thin wrapper over
+//! `iter validate [--fix]` (iter): a thin wrapper over
 //! `iter_core::nodefile::conform`. Every node file under the topdir (agent
 //! memory excluded) is conformed in memory; a file whose conformed text
 //! differs is "not conformed" (with `--fix` it is rewritten), and conform's

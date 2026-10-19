@@ -1,4 +1,4 @@
-//! The settings graph (iter5 spec §7): every setting lives on a node or an
+//! The settings graph (iter spec §7): every setting lives on a node or an
 //! edge. Node records stay in their tables (`project`, `engine`, `agent`,
 //! `agent_tooling`, `webui_user`) plus `account`, `provider` and
 //! `workitem_type`; edges are rows of `sys_edge` (pk "edge", sk = edge id).
@@ -14,7 +14,7 @@
 
 use crate::api::{ApiError, AppState, AuthUser, GLOBAL, NOSK, bad, forbidden, notfound};
 use crate::storage::{Storage, StorageError, body_str};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -852,6 +852,27 @@ fn seq_bucket(t: &str, name: &str) -> (String, &'static str) {
     if t == "project" { (name.to_string(), table) } else { (GLOBAL.to_string(), table) }
 }
 
+/// One engine node per machine: `host` is required for an engine created by
+/// hand and must differ (case-insensitively) from every other engine's. An
+/// engine that registers itself brings its own hostname. Empty hosts (records
+/// from before this rule) never clash.
+pub async fn check_engine_host(store: &dyn Storage, id: &str, host: &str) -> Result<(), ApiError> {
+    let h = host.trim().to_lowercase();
+    if h.is_empty() {
+        return Ok(());
+    }
+    for r in store.scan("engine").await? {
+        if cs::record_id(&r) != id && body_str(&r, "host").trim().to_lowercase() == h {
+            return Err(conflict(format!(
+                "engine '{}' already runs on host '{}': one engine per machine. Delete that engine first if it is a mistake",
+                cs::record_name(&r),
+                host.trim()
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn node_create(user: AuthUser, State(st): Ctx, Json(req): Json<NodeCreateReq>) -> Result<Json<Value>, ApiError> {
     user.require_admin()?;
     let t = req.node_type.as_str();
@@ -899,6 +920,12 @@ async fn node_create(user: AuthUser, State(st): Ctx, Json(req): Json<NodeCreateR
                 rec[k] = json!("");
             }
         }
+    }
+    if t == "iter_engine" {
+        if body_str(&rec, "host").trim().is_empty() {
+            return Err(bad("an engine needs its host (the machine's hostname): engines normally register themselves on first start, so add one by hand only for a machine you are about to set up"));
+        }
+        check_engine_host(store, &key, &body_str(&rec, "host")).await?;
     }
     rec["name"] = json!(name);
     check_record(t, &key, &mut rec)?;
@@ -959,6 +986,9 @@ async fn node_patch(user: AuthUser, State(st): Ctx, Path(id): Path<String>, Json
         rec["name"] = json!(n.trim());
     }
     settle_name(store, table, key, &mut rec).await?;
+    if t == "iter_engine" {
+        check_engine_host(store, key, &body_str(&rec, "host")).await?;
+    }
     check_record(t, key, &mut rec)?;
     store.put(table, key, NOSK, &rec).await?;
     let (bucket, tname) = seq_bucket(t, key);
@@ -988,9 +1018,25 @@ pub async fn delete_node(store: &dyn Storage, id: &str) -> Result<Value, ApiErro
     Ok(json!({"deleted": true, "edges_moved_to_placeholder": moved}))
 }
 
-async fn node_delete(user: AuthUser, State(st): Ctx, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+#[derive(serde::Deserialize, Default)]
+struct NodeDeleteQuery {
+    /// `edges=delete`: delete the node's edges too, instead of parking them
+    /// (inactive) on the type's placeholder — for a node made by mistake
+    #[serde(default)]
+    edges: String,
+}
+
+async fn node_delete(user: AuthUser, State(st): Ctx, Path(id): Path<String>, Query(q): Query<NodeDeleteQuery>) -> Result<Json<Value>, ApiError> {
     user.require_admin()?;
-    Ok(Json(delete_node(st.store.as_ref(), &id).await?))
+    let store = st.store.as_ref();
+    if q.edges == "delete" && !is_protected(&id) && node_exists(store, &id).await? {
+        for e in load_edges(store).await? {
+            if e.from == id || e.to == id {
+                delete_edge_row(store, &e.id).await?;
+            }
+        }
+    }
+    Ok(Json(delete_node(store, &id).await?))
 }
 
 #[derive(serde::Deserialize)]

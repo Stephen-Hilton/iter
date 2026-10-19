@@ -1,4 +1,4 @@
-//! `iter init` (iter5): scaffold a v5 project in a checkout — the project
+//! `iter init` (iter): scaffold a v5 project in a checkout — the project
 //! node `global/<slug>.project.iter.md` and the three global requirement
 //! nodes `global/requirements/{philosophy,bizreq,techreq}` (one requirement
 //! per file; empty bodies to fill in). Every file is built with
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn scaffolds_a_conformed_v5_project_and_never_overwrites() {
-        let top = std::env::temp_dir().join(format!("iter5_init_{}", uuid::Uuid::new_v4()));
+        let top = std::env::temp_dir().join(format!("iter_init_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&top).unwrap();
         let w = init_project(&top, "Demo Shop", "Sells\n things.", "stephen", false).unwrap();
         assert_eq!(w, vec![

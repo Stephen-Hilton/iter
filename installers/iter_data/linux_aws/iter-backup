@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2012  # the names are ours: iter5-<UTC timestamp>.tar
+# shellcheck disable=SC2012  # the names are ours: iter-<UTC timestamp>.tar
 # iter-backup: online backup of iter's own database only (ARANGO_DB, dumped as
 # ARANGO_USER: arangodump reads a consistent snapshot while arangod keeps
 # serving; nothing is stopped, and other databases on a shared ArangoDB are
@@ -64,7 +64,7 @@ tmp=$(mktemp -d)                      # dump on the local disk, then one copy ou
 trap 'rm -rf "$tmp"' EXIT
 
 if [ "${1:-}" = --restore ]; then
-  tar_file="${2:?usage: iter-backup --restore iter5-<ts>.tar}"
+  tar_file="${2:?usage: iter-backup --restore iter-<ts>.tar}"
   [ -f "$tar_file" ] || { echo "iter-backup: $tar_file not found" >&2; exit 2; }
   tar -xf "$tar_file" -C "$tmp" ./db 2>/dev/null || tar -xf "$tar_file" -C "$tmp" db
   check_cert
@@ -81,7 +81,7 @@ for f in iter_data.secret engine_session.secret tls.crt tls.key custom-tls.crt c
   if [ -f "$D/state/$f" ]; then cp -a "$D/state/$f" "$tmp/"; fi
 done
 mkdir -p "$DEST"
-tar -C "$tmp" -cf "$DEST/.iter5-$ts.tar.part" .
-mv "$DEST/.iter5-$ts.tar.part" "$DEST/iter5-$ts.tar"
-ls -1t "$DEST"/iter5-*.tar | tail -n +$((KEEP + 1)) | xargs -r rm -f
-echo "iter-backup: $DEST/iter5-$ts.tar ($(du -h "$DEST/iter5-$ts.tar" | cut -f1)) of database $DB, $(ls "$DEST"/iter5-*.tar | wc -l) kept"
+tar -C "$tmp" -cf "$DEST/.iter-$ts.tar.part" .
+mv "$DEST/.iter-$ts.tar.part" "$DEST/iter-$ts.tar"
+ls -1t "$DEST"/iter-*.tar "$DEST"/iter5-*.tar 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
+echo "iter-backup: $DEST/iter-$ts.tar ($(du -h "$DEST/iter-$ts.tar" | cut -f1)) of database $DB, $(ls "$DEST"/iter-*.tar "$DEST"/iter5-*.tar 2>/dev/null | wc -l) kept"

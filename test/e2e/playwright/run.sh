@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# iter5 webui Playwright suite: builds iter_data (debug), starts it on a random
+# iter webui Playwright suite: builds iter_data (debug), starts it on a random
 # port against a throwaway ArangoDB database on the dev container (:8529),
 # seeds it, runs every spec, then stops the server and drops the database.
 #   ./run.sh                    all specs
 #   ./run.sh specs/graph.spec.js -g "drag"   any playwright test arguments
-# Env: ITER5_TEST_ARANGO_URL / ITER5_TEST_ARANGO_PASSWORD (default :8529 / iter4dev),
+# Env: ITER_TEST_ARANGO_URL / ITER_TEST_ARANGO_PASSWORD (default :8529 / iterdev),
 #      PW_SKIP_BUILD=1 (reuse target/debug/iter_data), PW_KEEP_DB=1 (keep the db + log),
 #      PW_CHROMIUM=<path> (browser binary).
 set -euo pipefail

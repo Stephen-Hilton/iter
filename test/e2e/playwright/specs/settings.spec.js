@@ -73,7 +73,7 @@ test.describe('settings graph', () => {
     await dialog(page).locator('.kit-kv:has(.kit-k span[title="read_only"]) .kit-switch').click();
     await dialog(page).locator('.kit-primary').click();
     await expect(dialog(page)).toHaveCount(0);
-    await expect.poll(async () => { const e = (await sg(admin)).edges.find((x) => x.id === serves.id); return [e.tag, e.settings.read_only, e.settings.topdir]; }).toEqual(['shop_default', true, '/tmp/iter5_pw/shop']);
+    await expect.poll(async () => { const e = (await sg(admin)).edges.find((x) => x.id === serves.id); return [e.tag, e.settings.read_only, e.settings.topdir]; }).toEqual(['shop_default', true, '/tmp/iter_pw/shop']);
     await admin.patch(`/api/settings/edges/${serves.id}`, { settings: { read_only: false } });
   });
 
