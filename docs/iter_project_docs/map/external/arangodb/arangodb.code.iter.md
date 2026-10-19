@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:53:14Z", last_tested: ""}
 ---
 # ArangoDB Community Edition
 
@@ -28,7 +28,7 @@ Where it runs:
 - **Local mode and tests** — the dev container on `:8529` (`./deploy.sh local`
   starts or reuses it); `cargo test` and `test/e2e.sh` create throwaway
   `iter5_test_*` / `iter5_e2e_*` databases and drop them afterwards
-  (`ITER5_TEST_ARANGO_URL`, `ITER5_TEST_ARANGO_PASSWORD` point elsewhere).
+  (`ITER_TEST_ARANGO_URL`, `ITER_TEST_ARANGO_PASSWORD` point elsewhere).
 
 Only iter_data talks to it (see the "ArangoDB HTTP API" connection); engines,
 browsers and agents never do. iter_data signs in as `iter_user` (`rw` on its

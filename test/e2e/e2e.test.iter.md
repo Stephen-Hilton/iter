@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/tests/e2e_suite.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 21:53:14Z", last_tested: ""}
 ---
 
 # iter5 end-to-end
@@ -22,6 +22,6 @@ Builds the binaries, starts iter_data on a random port against `iter5_e2e_<rando
 
 ## Needs
 
-cargo, jq, curl and the dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local`; `ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` override). Missing any of them → exit 2. `E2E_ARGS="--live"` adds the opt-in live Claude smoke test.
+cargo, jq, curl and the dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local`; `ITER_TEST_ARANGO_URL` / `ITER_TEST_ARANGO_PASSWORD` override). Missing any of them → exit 2. `E2E_ARGS="--live"` adds the opt-in live Claude smoke test.
 
 `teststate: omit` keeps it out of the test sweep (it takes minutes and starts its own server); run it with `iter runtests --node "iter5 end-to-end"`.

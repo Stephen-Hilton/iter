@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/cargo_test.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:53:14Z", last_tested: ""}
 ---
 
 # iter_data — unit tests
@@ -18,7 +18,7 @@ One script, `cargo_test.sh`, runs the crate's whole `cargo test` through `test/c
 
 ## Needs
 
-The dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local` starts it); the tests create and drop `iter5_test_*` databases. `ITER5_TEST_ARANGO_URL` / `ITER5_TEST_ARANGO_PASSWORD` override the address and password (default `iter4dev`). Without a reachable ArangoDB the script exits 2 — could not run, never red.
+The dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local` starts it); the tests create and drop `iter5_test_*` databases. `ITER_TEST_ARANGO_URL` / `ITER_TEST_ARANGO_PASSWORD` override the address and password (default `iter4dev`). Without a reachable ArangoDB the script exits 2 — could not run, never red.
 
 ## What it covers
 
