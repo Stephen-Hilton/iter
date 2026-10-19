@@ -130,8 +130,25 @@ test.describe('settings graph', () => {
     const holds = edgeOf(await sg(admin), 'holds', 'iter_engine:mbp', 'account:main');
     await openTab(page, 'settings');
     await page.locator('#s-editbar [data-ed=new]').click();
-    await dialog(page).locator('#sn-type').selectOption('iter_engine');
+    // no type is chosen for you; the Token env var row is for accounts, the Host row for engines
+    await expect(dialog(page).locator('#sn-type')).toHaveValue('');
+    await expect(dialog(page).locator('#sn-envrow')).toBeHidden();
+    await expect(dialog(page).locator('#sn-hostrow')).toBeHidden();
     await dialog(page).locator('#sn-name').fill('mini');
+    await dialog(page).locator('.kit-primary').click();
+    await expect(dialog(page)).toContainText('Pick a node type first');
+    await dialog(page).locator('#sn-type').selectOption('iter_engine');
+    await expect(dialog(page).locator('#sn-hostrow')).toBeVisible();
+    await dialog(page).locator('.kit-primary').click();
+    await expect(dialog(page)).toContainText('needs its host');
+    // one engine per machine: another engine's host is refused
+    const taken = (await sg(admin)).nodes.map((n) => n.settings && n.settings.host).find(Boolean);
+    if (taken) {
+      await dialog(page).locator('#sn-host').fill(taken);
+      await dialog(page).locator('.kit-primary').click();
+      await expect(dialog(page)).toContainText('one engine per machine');
+    }
+    await dialog(page).locator('#sn-host').fill('mini.local');
     await shot(page, 'settings-new-node');
     await dialog(page).locator('.kit-primary').click();
     await expect.poll(async () => (await sg(admin)).nodes.some((n) => n.id === 'iter_engine:mini')).toBe(true);
