@@ -6,6 +6,7 @@ run/
 *.db-shm
 iter_data.secret
 .iter/temp/
+.iter/filesync.json
 .iter/users/
 models/
 
