@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: edit a use-case's code node links (`iter usecase`)",
+  "kind": "capability",
+  "name": "_usecase_links"
+}

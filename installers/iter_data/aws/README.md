@@ -45,15 +45,18 @@ Open the `Url` output (`https://<Elastic IP>:8400`), sign in as `admin` and choo
 
 ## HTTPS
 
-iter_data serves HTTPS with a self-signed certificate it makes on first boot (`/data/iter/iter_data/state/tls.crt`, kept
-across reinstalls). Its names are the Elastic IP and, once the instance metadata (IMDSv2) shows the Elastic IP
+iter_data serves HTTPS with a certificate signed by a local certificate authority it makes on first boot
+(`/data/iter/iter_data/state/tls-ca.crt` and `tls.crt`, kept across reinstalls). Its names are the Elastic IP and, once the instance metadata (IMDSv2) shows the Elastic IP
 attached, its public DNS name; engines ignore names, because they pin the certificate's **fingerprint**
 (`sha256:` + 64 hex). The first boot stores it in `/iter/<stack>/tls-fingerprint`. Give it to each engine
 installer (`--fingerprint`), or let the engine trust it at its first sign-in and compare with
 `iter_engine key status`; the webui's 🔑 Engine keys screen shows it too. Engines never accept plain `http://`
 to another machine.
 
-Browsers warn about the self-signed certificate until you accept it. For one they trust, put an Application
+The CA is name-constrained to those names, local DNS suffixes and private addresses, so it cannot vouch for any
+public site; the instance adds it to its own system store. A browser trusts the `Url` once an engine is installed
+on its machine (the engine installer adds the CA there), or after opening `<Url>/tls/ca.crt` and trusting it as a
+certificate authority. For a certificate every browser trusts without that, put an Application
 Load Balancer with an ACM certificate (or a proxy such as Caddy) in front, rerun `linux_aws/install.sh` on the
 instance with `--tls off` (the proxy then speaks to iter_data over plain HTTP) and narrow `AllowedCidr` to the
 proxy; engines then use the proxy's URL with `iter_engine key trust --ca`. Or rerun it with

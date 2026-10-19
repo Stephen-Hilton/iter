@@ -1,0 +1,8 @@
+{
+  "desc": "Critic persona for `iter critreview`: synchronous review subprocess whose stdout feeds straight back to the calling agent (underscore = never a queue agent type)",
+  "flags": "--dangerously-skip-permissions",
+  "kind": "critic",
+  "model": "opus",
+  "name": "_critic",
+  "timeoutsec": 1800
+}

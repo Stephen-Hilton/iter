@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 pub const EDGE_TABLE: &str = "sys_edge";
 const EDGE_PK: &str = "edge";
-const META_PK: &str = "meta";
+pub(crate) const META_PK: &str = "meta";
 const MIGRATED_SK: &str = "iter4_migrated";
 
 type Ctx = State<Arc<AppState>>;
@@ -740,6 +740,9 @@ async fn node_get(user: AuthUser, State(st): Ctx, Path(id): Path<String>) -> Res
         return Ok(Json(node_json(&id, cs::PLACEHOLDER, json!({}), "placeholder".into())));
     }
     let rec = node_record(st.store.as_ref(), &id).await?.ok_or_else(notfound)?;
+    if t == "user" && user.role != "admin" && cs::record_id(&rec) != user.sub {
+        return Ok(Json(record_node(t, &public_user(&rec))));
+    }
     Ok(Json(record_node(t, &rec)))
 }
 
@@ -772,6 +775,25 @@ fn merge(base: &mut Value, patch: &Value) {
     }
 }
 
+/// A user's password, sign-in state and token version change only through
+/// /api/users/{id} (the user form): there a password an admin sets must be
+/// changed at the next sign-in and ends the user's sessions, and a person's
+/// own needs their current one. The settings graph refuses them.
+fn refuse_user_signin_keys(id: &str, settings: &Value) -> Result<(), ApiError> {
+    for k in ["password", "pwhash", "must_change_password", "tokenver"] {
+        if settings.get(k).is_some() {
+            return Err(bad(format!("{k}: a user's password and sign-in are set in their user form (PUT /api/users/{id}), not in the settings graph")));
+        }
+    }
+    Ok(())
+}
+
+/// What anyone signed in may see of another person: who they are and their
+/// role; the rest of a user record is theirs and the admins'.
+pub fn public_user(rec: &Value) -> Value {
+    json!({"user": rec.get("user").cloned().unwrap_or(Value::Null), "id": rec.get("id").cloned().unwrap_or(Value::Null), "name": rec.get("name").cloned().unwrap_or(Value::Null), "role": rec.get("role").cloned().unwrap_or(Value::Null)})
+}
+
 /// Validate a node record for its type and fill what the type needs. `id`
 /// is the record's stable id; its display `name` is already settled.
 fn check_record(t: &str, id: &str, rec: &mut Value) -> Result<(), ApiError> {
@@ -781,13 +803,6 @@ fn check_record(t: &str, id: &str, rec: &mut Value) -> Result<(), ApiError> {
     rec["id"] = json!(id);
     if t == "user" {
         rec["user"] = json!(id);
-        if let Some(pw) = rec.get("password").and_then(|p| p.as_str()).map(String::from) {
-            let h = crate::auth::hash_password(&pw).map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            rec["pwhash"] = json!(h);
-        }
-        if let Some(o) = rec.as_object_mut() {
-            o.remove("password");
-        }
     } else if body_str(rec, "name").trim().is_empty() {
         rec["name"] = json!(id);
     }
@@ -805,8 +820,8 @@ fn check_record(t: &str, id: &str, rec: &mut Value) -> Result<(), ApiError> {
         "agent_tools" => parse(serde_json::from_value::<iter_core::AgentTooling>(rec.clone()).map(|_| ()), "tooling")?,
         "user" => {
             let u: iter_core::WebuiUser = serde_json::from_value(rec.clone()).map_err(|e| bad(format!("user does not parse: {e}")))?;
-            if !["admin", "user", "engine", "viewer"].contains(&u.role.as_str()) {
-                return Err(bad("user role must be admin|user|engine|viewer"));
+            if !["admin", "user", "viewer"].contains(&u.role.as_str()) {
+                return Err(bad("user role must be admin|user|viewer (engines sign in with engine keys, not as users)"));
             }
             if rec.get("tokenver").is_none() {
                 rec["tokenver"] = json!(1);
@@ -869,6 +884,9 @@ async fn node_create(user: AuthUser, State(st): Ctx, Json(req): Json<NodeCreateR
         cs::mint_id(&name, taken)
     };
     let id = node_id(t, &key);
+    if t == "user" {
+        refuse_user_signin_keys(&key, &req.settings)?;
+    }
     let mut rec = if req.settings.is_null() { json!({}) } else { req.settings.clone() };
     if t == "project" && rec.get("state").is_none() {
         rec["state"] = json!("Running");
@@ -921,6 +939,9 @@ async fn node_patch(user: AuthUser, State(st): Ctx, Path(id): Path<String>, Json
     let table = table_of(t).unwrap();
     let mut rec = node_record(store, &id).await?.ok_or_else(notfound)?;
     let mut patch = req.settings.clone();
+    if t == "user" {
+        refuse_user_signin_keys(key, &patch)?;
+    }
     // a rename: `name` beside the settings (or, from a generic editor, among them)
     let rename = req.name.clone().or_else(|| patch.get("name").and_then(|n| n.as_str()).map(String::from));
     if let Some(o) = patch.as_object_mut() {

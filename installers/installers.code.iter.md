@@ -53,15 +53,25 @@ In: a release tag (or a local binary) and the machine's package manager, systemd
 Scheduler or Docker. Out: an installed, running `iter_data` or `iter_engine`. The engine installers also
 make the machine's engine key and wait until iter_data accepts it.
 
-iter_data serves HTTPS with a self-signed certificate it makes on first start (`--tls auto`); the
+iter_data serves HTTPS with a certificate signed by a local CA it makes on first start (`--tls auto`); the
 iter_data installers wait on `https://127.0.0.1:<port>/health` (curl -k), print the certificate's
 fingerprint (and `status` prints it again), pass `--tls-cert/--tls-key`, `--tls-name` and `--tls off`
-through to iter_data, and keep `tls.crt`/`tls.key` and `engine_session.secret` beside `iter_data.secret`
-across reinstalls. The engine installers refuse a plain `http://` iter_data URL unless it is this machine,
+through to iter_data, and keep `tls-ca.crt`/`tls-ca.key`, `tls.crt`/`tls.key` and `engine_session.secret`
+beside `iter_data.secret` across reinstalls. The engine installers refuse a plain `http://` iter_data URL unless it is this machine,
 pin the certificate with `iter_engine key trust --fingerprint` (from `--fingerprint`, or pasted) right
 after installing the binary and before the key step, and check the pinned certificate the same way in
 their own API calls (curl `--pinnedpubkey` after an openssl fingerprint check; a pinned .NET request on
 Windows).
+
+Every installer then adds iter_data's local CA (name-constrained to its names, local suffixes and private
+addresses) to the trust stores of the machine it runs on, so a browser there shows the webui as secure: the
+iter_data installers from `state/tls-ca.crt` (docker: copied out of the container), the engine installers from
+`iter_engine key ca` over the pinned connection after the key step. Stores: Linux = the system store
+(`update-ca-certificates` / `update-ca-trust`) + the browser NSS databases when a browser is there; macOS =
+the login keychain (`security add-trusted-cert -r trustRoot -p ssl`); Windows = `Cert:\CurrentUser\Root`
+(`LocalMachine\Root` elevated); WSL = the distro's stores + Windows' through `powershell.exe`; docker = the
+host's; linux_aws = the system store only (headless). Skipped with `--tls off`, a custom certificate or
+`--trust-ca`; failures warn, never stop the install.
 
 ArangoDB: iter_data signs in as `iter_user` with `rw` on `iter_db` only. The installers generate and keep
 that user's password, and keep root's password for iter_data to create the user and database on first

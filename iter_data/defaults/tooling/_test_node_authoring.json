@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: author test nodes (`*.test.iter.md`) and their scripts (standard result JSON)",
+  "kind": "capability",
+  "name": "_test_node_authoring"
+}

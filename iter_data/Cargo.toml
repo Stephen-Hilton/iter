@@ -27,10 +27,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 tower = { version = "0.5.3", features = ["make", "util"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "x509-parser"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 hyper = "1"
 
 # musl's allocator makes the embedding model several times slower in the container
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = "0.1"
+
+[dev-dependencies]
+# tls.rs tests: a browser-style chain check of the local CA and its name constraints
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }

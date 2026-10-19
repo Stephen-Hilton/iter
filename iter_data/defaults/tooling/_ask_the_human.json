@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: ask the human a question (`iter ask`)",
+  "kind": "capability",
+  "name": "_ask_the_human"
+}

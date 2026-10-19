@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: create a work item (`iter add`)",
+  "kind": "capability",
+  "name": "_create_new_workitem"
+}

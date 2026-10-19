@@ -60,8 +60,10 @@
 # not on the root filesystem, which systemd reads before other disks are mounted).
 # An install from before 2026-10-18 (/opt/iter/bin, /etc/iter, /var/lib/iter,
 # /var/lib/arangodb3, /usr/sbin/arangod) is moved into the iter dir by the next run.
-# HTTPS by default: iter_data makes a self-signed certificate on first start
-# (D/state/tls.crt, kept across reinstalls); the script prints its fingerprint,
+# HTTPS by default: iter_data makes a local CA and a certificate signed by it on first
+# start (D/state/tls-ca.crt, tls.crt, kept across reinstalls); the CA is added to this
+# machine's system store and browser certificate databases, so the webui opens as secure
+# here (other machines: the engine installer does it there). The script prints the fingerprint,
 # to give to each engine installer (--fingerprint) or compare with `iter_engine key
 # status`. The TLS choices are kept in D/config/tls.env, so a plain rerun keeps them.
 # Logs: journalctl -u iter-data -u arangodb3. Run as root or as a user with sudo.
@@ -652,6 +654,68 @@ wait_health() {
   die "iter_data did not answer on :$PORT within 3 minutes"
 }
 
+# ---------------------------------------------------------------- browsers trust iter_data
+# --tls auto: iter_data signs its certificate with a local certificate authority
+# of its own (D/state/tls-ca.crt), limited by name constraints to this server's
+# names, local DNS suffixes (.local .lan .internal .home.arpa) and loopback /
+# private addresses: it cannot vouch for any public site. Adding it to this
+# machine's trust stores makes a browser here show the webui as secure: the
+# system store (curl and most programs) and, for the desktop user who ran sudo,
+# the NSS databases Chrome, Chromium and Firefox read. On another machine, the
+# engine installer does the same; without one there, open
+# https://<this host>:<port>/tls/ca.crt and trust it as a certificate authority.
+DESK_USER="${SUDO_USER:-}"; [ "$DESK_USER" != root ] || DESK_USER=""
+[ -n "$DESK_USER" ] || [ "$(id -u)" = 0 ] || DESK_USER="$(id -un)"
+desk_home() { getent passwd "$DESK_USER" 2>/dev/null | cut -d: -f6; }
+as_desk() { if [ "$(id -un)" = "$DESK_USER" ]; then "$@"; else sudo -u "$DESK_USER" "$@"; fi; }  # root: DESK_USER is who ran sudo
+nss_dbs() {  # the desktop user's browser certificate databases
+  local h d; h="$(desk_home)"; [ -n "$h" ] || return 0
+  for d in "$h/.pki/nssdb" "$h"/snap/chromium/current/.pki/nssdb "$h"/.var/app/*/.pki/nssdb \
+           "$h"/.mozilla/firefox/*/ "$h"/snap/firefox/common/.mozilla/firefox/*/ "$h"/.var/app/org.mozilla.firefox/.mozilla/firefox/*/; do
+    $SUDO test -f "${d%/}/cert9.db" && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+has_browser() {
+  local b
+  for b in google-chrome-stable google-chrome chromium chromium-browser brave brave-browser firefox; do command -v "$b" >/dev/null && return 0; done
+  [ -n "$(nss_dbs)" ]
+}
+browsers() {
+  [ "$TLS_MODE" = auto ] || return 0
+  local ca cn file dir db n=0 h
+  say "browsers on this machine: trusting iter_data's local certificate authority ($STATE/tls-ca.crt)"
+  [ "$DRY" = 0 ] || { echo "  + add $STATE/tls-ca.crt to the system store and the desktop user's browser certificate databases"; return 0; }
+  $SUDO test -f "$STATE/tls-ca.crt" || { say "  no $STATE/tls-ca.crt (an iter_data older than v2026.10.19): browsers warn about its certificate"; return 0; }
+  ca="$(tmpdir)/iter_data-ca.crt"; $SUDO cat "$STATE/tls-ca.crt" > "$ca"; chmod 644 "$ca"; chmod 755 "$(dirname "$ca")" "$TMPROOT"
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { say "  WARNING: $STATE/tls-ca.crt is not a certificate"; return 0; }
+  file="iter_data-$(printf '%s' "$cn" | tr -c 'A-Za-z0-9_-' '_' | sed 's/__*/_/g; s/_$//').crt"
+  if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+    run install -m 644 "$ca" "/usr/local/share/ca-certificates/$file"; run update-ca-certificates >/dev/null
+    say "  system store: /usr/local/share/ca-certificates/$file"
+  elif command -v update-ca-trust >/dev/null; then
+    dir=/etc/pki/ca-trust/source/anchors; [ -d "$dir" ] || dir=/etc/ca-certificates/trust-source/anchors
+    run install -D -m 644 "$ca" "$dir/$file"; run update-ca-trust extract
+    say "  system store: $dir/$file"
+  else
+    say "  no update-ca-certificates or update-ca-trust: the system store is left as it is"
+  fi
+  { [ -n "$DESK_USER" ] && has_browser; } || { say "  no desktop user with a browser here: nothing more to trust it"; return 0; }
+  if ! command -v certutil >/dev/null; then
+    if [ "$PKG" = apt ]; then run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnss3-tools; else run pacman -S --noconfirm --needed nss; fi
+  fi
+  command -v certutil >/dev/null || { say "  WARNING: certutil (NSS tools) missing: browsers here do not trust iter_data yet"; return 0; }
+  # Chrome and Chromium read ~/.pki/nssdb: made now if the user has none yet
+  h="$(desk_home)"
+  $SUDO test -f "$h/.pki/nssdb/cert9.db" || { as_desk mkdir -p "$h/.pki/nssdb" && as_desk certutil -d "sql:$h/.pki/nssdb" -N --empty-password; }
+  while IFS= read -r db; do
+    as_desk certutil -d "sql:$db" -D -n "$cn" >/dev/null 2>&1 || true
+    as_desk certutil -d "sql:$db" -A -t "C,," -n "$cn" -i "$ca" && n=$((n + 1))
+  done < <(nss_dbs)
+  say "  browsers: \"$cn\" trusted in $n certificate database(s) for $DESK_USER (restart the browser)"
+}
+
 # ---------------------------------------------------------------- moving an older install
 # Into the iter dir, once, with the services stopped: an install from before
 # 2026-10-18 (files under /etc/iter, /var/lib/iter, /opt/iter/bin, /usr/sbin, the
@@ -772,6 +836,7 @@ do_install() {
   install_units
   start_services
   wait_health
+  browsers
   [ "$DRY" = 1 ] && { say "dry run done"; return; }
   # || true: Arch has no hostname command without inetutils
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -804,7 +869,7 @@ tls_report() {
   say "TLS certificate fingerprint: ${fp:-(not found: journalctl -u iter-data | grep fingerprint)}"
   say "  give it to each engine installer (--fingerprint ${fp:-sha256:...}), or compare it with \`iter_engine key status\` on the engine"
   say "  (also in the webui's Engine keys screen, and: $0 status)"
-  [ "$TLS_MODE" = custom ] || say "  browsers warn about this self-signed certificate: accept it once, or rerun with --tls-cert/--tls-key (or put a TLS proxy in front)"
+  [ "$TLS_MODE" = custom ] || say "  browsers here trust it (its local CA was added above); on another machine the engine installer adds it, or open $SCHEME://<this host>:$PORT/tls/ca.crt and trust it as a certificate authority"
 }
 
 do_status() {

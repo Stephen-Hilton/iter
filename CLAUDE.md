@@ -65,6 +65,9 @@ committed) and one self-contained install script per program and platform. Insta
 - iter_data serves HTTPS (`--tls auto` by default); engines pin its certificate fingerprint (`iter_engine/config/server_trust.json`,
   `iter_engine key trust`) and refuse plain `http://` except to this machine. Tests and the local dev loop use `--tls off`
   on 127.0.0.1 only.
+- Browsers: `--tls auto` signs iter_data's certificate with a local CA of its own (`state/tls-ca.crt`), which the
+  installers add to each machine's trust stores. Keep that CA name-constrained to the server's names, local
+  suffixes and private addresses (iter_data/src/tls.rs): an unconstrained one in a trust store could vouch for any site.
 - Account tokens: process environment > `--secrets-command` > `iter_engine/secrets/.env`. Never log a value, never write the
   secrets command's output to disk, and keep `envstore::scrub` on every child process the engine starts.
 - People: the first admin and admin-set passwords must be changed at first sign-in (`must_change_password`);

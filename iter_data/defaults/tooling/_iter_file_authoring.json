@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: write or restructure an `*.iter.md` node file",
+  "kind": "capability",
+  "name": "_iter_file_authoring"
+}

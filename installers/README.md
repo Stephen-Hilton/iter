@@ -117,8 +117,8 @@ with win over it, and it wins over `iter_engine/secrets/.env`. With it, the inst
 
 ## HTTPS and the certificate fingerprint
 
-iter_data serves HTTPS by default. On its first start it makes a self-signed certificate (`tls.crt` +
-`tls.key`, mode 600) beside its secret file, next to `engine_session.secret`; the installers keep all of
+iter_data serves HTTPS by default. On its first start it makes a local certificate authority
+(`tls-ca.crt` + `tls-ca.key`) and a certificate signed by it (`tls.crt` + `tls.key`, keys mode 600) beside its secret file, next to `engine_session.secret`; the installers keep all of
 them across reinstalls. Every iter_data installer waits on `https://127.0.0.1:<port>/health` and then
 prints the certificate's **fingerprint**, `sha256:` + 64 hex (the SHA-256 of the certificate: `openssl x509
 -in tls.crt -noout -fingerprint -sha256`, colons removed, lowercased). The webui shows it in the 🔑 Engine
@@ -137,9 +137,19 @@ fingerprint in `iter_engine/config/server_trust.json`:
 3. Or press Enter at that question: the engine trusts the certificate at its first sign-in. Compare it
    afterwards with `iter_engine key status`, which prints the trusted certificate.
 
-Browsers warn about the self-signed certificate. The iter_data installers take `--tls-cert PATH --tls-key
-PATH` to serve a certificate of your own (copied into iter_data's folder, key mode 600), `--tls-name NAME`
-(repeatable) to add names to the self-signed one, and `--tls off` for iter_data behind a TLS proxy on the
+Browsers: the local CA is name-constrained to iter_data's names (with every `--tls-name`), `.local`/`.lan`/
+`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site; iter_data
+serves it without sign-in at `<data url>/tls/ca.crt`. Every installer adds it to the trust stores of the machine
+it runs on, so a browser there opens the webui as secure: the iter_data installers from iter_data's own folder
+(linux: system store + the desktop user's NSS databases; docker: the host's login keychain on macOS, system
+store + NSS on Linux; linux_aws: the system store only), the engine installers after the key step through
+`iter_engine key ca` over the pinned connection (linux, linux_wsl: system store + NSS, and on WSL Windows'
+`Cert:\CurrentUser\Root`; macos: the login keychain, a password dialog; windows: `Cert:\CurrentUser\Root`,
+a confirmation dialog, or `LocalMachine\Root` when elevated; docker: the host). It is skipped with `--tls off`,
+a certificate of your own or an engine's `--trust-ca`, and a failure is only a warning. A machine with no
+installer opens `<data url>/tls/ca.crt` and trusts it as a certificate authority. The iter_data installers take
+`--tls-cert PATH --tls-key PATH` to serve a certificate of your own (copied into iter_data's folder, key mode
+600), `--tls-name NAME` (repeatable) to add names to iter_data's own, and `--tls off` for iter_data behind a TLS proxy on the
 same host. An engine that reaches iter_data through a proxy with a real certificate uses `--trust-ca`
 (`iter_engine key trust --ca`) instead of a fingerprint.
 

@@ -35,7 +35,7 @@
   const EDGE_TYPES = [
     { edge: 'serves', from: 'iter_engine', to: 'project', desc: 'the engine runs the project', keys: { topdir: '', read_only: false } },
     { edge: 'bills', from: 'account', to: 'project', desc: 'the project may use the account (order: its priority, 0 = used first, no negatives; a tie goes to the account whose 7-day window resets soonest · model: the default model — used when the agent names none, or one this account\'s provider cannot run)', keys: { order: 1, switch: 80, stop: 95, model: '' } },
-    { edge: 'holds', from: 'iter_engine', to: 'account', desc: 'the engine has the credential locally', keys: { token_envar: '' } },
+    { edge: 'holds', from: 'iter_engine', to: 'account', desc: 'the engine has the credential locally (token_envar: blank = the account\'s own; a name here overrides it for this engine only)', keys: { token_envar: '' } },
     { edge: 'of', from: 'account', to: 'provider', desc: 'the provider the account dispatches to', keys: {} },
     { edge: 'member', from: 'user', to: 'project', desc: 'the user may see / act on the project', keys: { role: 'user' } },
     { edge: 'owns', from: 'user', to: 'iter_engine', desc: 'whose token the engine uses', keys: {} },
@@ -303,7 +303,8 @@
       h += `<h2>${esc(nodeName(n.id))}</h2><div class="g-badges"><span class="badge" style="background:${n.placeholder ? '#3a3f48' : t.color}">${esc(t.label || n.type)}</span>${n.placeholder ? '<span class="g-pill">placeholder</span>' : n.deactivated ? '<span class="g-pill">off</span>' : ''}</div>`;
       if (n.summary && !n.placeholder) h += `<div class="simple">${esc(n.summary)}</div>`;
       if (n.placeholder) h += `<div class="simple missing">Drop an edge's end here to switch that edge off; its settings are kept. It cannot be deleted.</div>`;
-      h += `<div class="actions">${btn('configure', admin() && !n.placeholder ? 'Configure…' : 'View settings…', 'g-primary')}${admin() && !n.placeholder ? btn('connect', 'Connect', '', 'draw an edge from here (C)') : ''}${admin() && K().clip.settings ? btn('paste', 'Paste edge', '', '⌘V') : ''}${canRename(n) ? btn('rename', 'Rename…', '', 'change the display name; the id stays') : ''}${n.type === 'project' && !n.placeholder && S.ctx.openProject ? btn('open', 'Open project', '', 'its work queue and project graph') : ''}${admin() && !n.placeholder && n.type !== 'iter_data' ? btn('delete', 'Delete…', 'g-danger') : ''}</div>`;
+      const mine = n.type === 'user' && S.ctx.me && n.key === S.ctx.me;
+      h += `<div class="actions">${btn('configure', (admin() || mine) && !n.placeholder ? 'Configure…' : 'View settings…', 'g-primary')}${admin() && !n.placeholder ? btn('connect', 'Connect', '', 'draw an edge from here (C)') : ''}${admin() && K().clip.settings ? btn('paste', 'Paste edge', '', '⌘V') : ''}${canRename(n) ? btn('rename', 'Rename…', '', 'change the display name; the id stays') : ''}${n.type === 'project' && !n.placeholder && S.ctx.openProject ? btn('open', 'Open project', '', 'its work queue and project graph') : ''}${admin() && !n.placeholder && n.type !== 'iter_data' ? btn('delete', 'Delete…', 'g-danger') : ''}</div>`;
       h += `<h4>Id</h4><span class="path g-id" title="click to copy">${esc(n.id)}</span>${!n.placeholder && n.type !== 'iter_data' ? '<p class="muted">Fixed at creation: edges, sign-in tokens and work items use the id. Renaming changes only the name.</p>' : ''}`;
       if (!n.placeholder) h += `<h4>Settings</h4>${settingsTable(n.settings)}`;
       const out = S.data.edges.filter((e) => e.from === n.id); const inn = S.data.edges.filter((e) => e.to === n.id);
@@ -411,8 +412,13 @@
     const keys = Object.keys(Object.assign({}, defaults || {}, obj || {}));
     return keys.map((k) => ({ key: k, value: obj && k in obj ? obj[k] : defaults[k], removable: true, type: k === 'promptbody' || k === 'body' ? 'markdown' : undefined, rows: k === 'promptbody' || k === 'body' ? 16 : undefined, isNew: !(obj && k in obj) }));
   }
+  /** settings every node of a type shows, even before they are set */
+  const NODE_KEYS = { account: { token_envar: '' } };
+  const NODE_HELP = { token_envar: 'the NAME of the environment variable that holds this account\'s token on the engine (e.g. DEV1_TOKEN, a line in the engine\'s secrets/.env), never the token itself; a holds edge may name another for its engine' };
   async function configureNode(n) {
     if (!n) return;
+    // a person: the same user form as the gear in the work queue (admin edits, you edit your profile, others read)
+    if (n.type === 'user' && !n.placeholder && S.ctx.openUser) return S.ctx.openUser(n.key || String(n.id).slice(5));
     let rec = n;
     try { if (!n.virtual) rec = Object.assign({}, n, await api('/api/settings/nodes/' + enc(n.id))); } catch (e) { /* the graph's copy will do */ }
     const ro = !admin() || n.placeholder;
@@ -421,7 +427,7 @@
     return K().configure({ title: `${(TYPES[n.type] || {}).label || n.type} — ${nodeName(n.id)}`, sub: rec.summary || '', readOnly: ro, allowAdd: !ro,
       meta: [['id', `<span class="g-mono">${esc(n.id)}</span>`], ['type', esc(n.type)], ['edges', String(S.data.edges.filter((e) => e.from === n.id || e.to === n.id).length)]],
       note: ro ? (n.placeholder ? 'A placeholder has no settings: edges that end here are switched off.' : 'Read only — an admin edits.') : 'Each key is one setting. × removes a key; + Add setting adds one.',
-      fields: nameField.concat(settingsFields(rec.settings || {}, {}).map((f) => (nameField.length ? Object.assign(f, { group: 'Settings' }) : f))),
+      fields: nameField.concat(settingsFields(rec.settings || {}, NODE_KEYS[n.type] || {}).map((f) => Object.assign(f, nameField.length ? { group: 'Settings' } : {}, NODE_HELP[f.key] ? { help: NODE_HELP[f.key] } : {}))),
       onSave: async ({ changed, removed }) => {
         const body = {}; const patch = {};
         Object.keys(changed).forEach((k) => { if (k === '__name') body.name = String(changed[k]).trim(); else patch[k] = changed[k]; });
@@ -501,13 +507,20 @@
     await K().modal({ title: 'New settings node', wide: false,
       body: `<label class="kit-field"><span>Type</span><select id="sn-type">${types.map((t) => `<option value="${t}" ${t === (type || 'iter_engine') ? 'selected' : ''}>${esc(TYPES[t].long)}</option>`).join('')}</select></label>
         <label class="kit-field"><span>Name</span><input id="sn-name" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Shop API" autofocus><small id="sn-help"></small></label>
+        <label class="kit-field" id="sn-envrow" hidden><span>Token env var</span><input id="sn-envar" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. DEV1_TOKEN"><small>The NAME of the environment variable holding this account's token on each engine (a line in the engine's <code>secrets/.env</code>, or its secrets command), never the token itself.</small></label>
         <p class="kit-text kit-dim">The node's id is made from this name once and never changes; the name itself can be renamed later. Settings are added afterwards with Configure. Engines also register themselves the first time they start (<code>iter_engine --data-url URL --env-file PATH</code>; its <code>--name</code> is then the engine's id).</p>`,
       buttons: [{ label: 'Cancel', value: null }, { label: 'Create', value: 'ok', primary: true }],
-      onOpen: (d) => { const t = d.querySelector('#sn-type'); const h = d.querySelector('#sn-help'); const sync = () => { h.textContent = { project: 'A designed project: build it later from its Project graph. (The wizard on the Intro tab does the same.)', account: 'Connect it to a provider (of), to projects (bills) and to the engines holding its token (holds).', user: 'Set a password from the user gear in the work queue.' }[t.value] || ''; }; t.onchange = sync; sync(); },
+      onOpen: (d) => { const t = d.querySelector('#sn-type'); const h = d.querySelector('#sn-help'); const sync = () => { h.textContent = { project: 'A designed project: build it later from its Project graph. (The wizard on the Intro tab does the same.)', account: 'Connect it to a provider (of), to projects (bills) and to the engines holding its token (holds).', user: 'Set a password from the user gear in the work queue.' }[t.value] || ''; d.querySelector('#sn-envrow').hidden = t.value !== 'account'; }; t.onchange = sync; sync(); },
       onButton: async (v, d) => {
         const t = d.querySelector('#sn-type').value; const name = d.querySelector('#sn-name').value.trim();
         if (!name || name.length > 100 || name.includes('/')) throw new Error('A name of 1–100 characters, without "/".');
-        const r = await api('/api/settings/nodes', { method: 'POST', body: JSON.stringify({ type: t, name, settings: {} }) }).catch((e) => { throw new Error(errMsg(e)); });
+        const settings = {};
+        if (t === 'account') {
+          const v = d.querySelector('#sn-envar').value.trim();
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) throw new Error('The token env var is a variable name: letters, digits and _ (e.g. DEV1_TOKEN).');
+          settings.token_envar = v;
+        }
+        const r = await api('/api/settings/nodes', { method: 'POST', body: JSON.stringify({ type: t, name, settings }) }).catch((e) => { throw new Error(errMsg(e)); });
         created = (r && r.id) || `${t}:${name}`; S.hide.delete(t);
         return true;
       } });

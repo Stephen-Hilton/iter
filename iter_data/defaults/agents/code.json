@@ -1,0 +1,12 @@
+{
+  "childstate": "queued",
+  "desc": "This is the coding agent",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "max_overlap": 3
+  },
+  "max": 5,
+  "model": "opus",
+  "name": "code",
+  "timeoutsec": 3600
+}

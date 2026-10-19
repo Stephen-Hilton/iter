@@ -167,6 +167,35 @@ impl Api {
         Ok(pin.seen())
     }
 
+    /// GET a public file (no token) from iter_data, only over a connection
+    /// whose certificate this engine already trusts (pinned, or mode ca), so
+    /// what comes back is from the iter_data this engine trusts.
+    pub fn get_trusted_text(&self, path: &str) -> Result<String, ApiError> {
+        if let Some(why) = &self.refused {
+            return Err(ApiError { status: 0, body: why.clone() });
+        }
+        let ok = match (self.check, &self.pin) {
+            (crate::trust::Check::Pin, Some(p)) => p.pinned(),
+            (crate::trust::Check::Ca, _) => true,
+            _ => false,
+        };
+        if !ok {
+            let why = if self.check == crate::trust::Check::Loopback {
+                "plain http to this machine: there is no certificate".to_string()
+            } else {
+                "iter_data's certificate is not trusted yet: run `iter_engine key trust` (or sign in once) first".to_string()
+            };
+            return Err(ApiError { status: 0, body: why });
+        }
+        let resp = self.http.get(format!("{}{path}", self.base)).send().map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+        let status = resp.status().as_u16();
+        let body = resp.text().map_err(|e| ApiError { status, body: e.to_string() })?;
+        if status >= 400 {
+            return Err(ApiError { status, body });
+        }
+        Ok(body)
+    }
+
     /// One signed login with `key`: (session token, its expiry). It signs the
     /// certificate fingerprint it sees, so iter_data refuses it when relayed
     /// through anything else, and it pins (or re-pins) what iter_data

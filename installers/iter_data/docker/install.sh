@@ -28,12 +28,12 @@
 #   --model-dir DIR      an all-MiniLM-L6-v2 folder to use instead of downloading it
 #   --memory SIZE        container memory cap, e.g. 6g [6g]; Arango is told 1G less
 #   --tls-cert PATH      serve this certificate (PEM, e.g. a real one for your domain) instead of
-#                        the self-signed one; needs --tls-key. Copied into config/.
+#                        the one iter_data makes; needs --tls-key. Copied into config/.
 #   --tls-key PATH       the private key (PEM) for --tls-cert
-#   --tls-name NAME      an extra DNS name or IP on the self-signed certificate (repeatable),
+#   --tls-name NAME      an extra DNS name or IP on iter_data's own certificate (repeatable),
 #                        e.g. the name engines and browsers use; only read when it is first made
 #   --tls off|auto       off = plain HTTP (only behind a TLS proxy on this host); auto = the
-#                        self-signed certificate again (drops an earlier --tls-cert or --tls off)
+#                        certificate iter_data makes again (drops an earlier --tls-cert or --tls off)
 #   --arango-url URL     use an existing ArangoDB at URL (https://host:8529) instead of the one
 #                        in the container: no arangod runs and no console port is published.
 #                        Also read from ARANGO_URL (environment or --env-file). `local` = back to
@@ -68,12 +68,14 @@
 # with its VM (Settings -> Resources -> File sharing; the home folder is, /opt is
 # not), so the default there is ~/iter.
 #
-# HTTPS: iter_data makes a self-signed certificate on first start (tls.crt beside
-# its secrets in state/, kept across reinstalls) and the script prints its
-# fingerprint. Give that fingerprint to each engine installer (--fingerprint) or
-# compare it with `iter_engine key status`. Browsers warn about a self-signed
-# certificate; use --tls-cert/--tls-key or a TLS proxy for one they trust. The TLS
-# choices are remembered in the secrets file, so a plain rerun keeps them.
+# HTTPS: iter_data makes a local CA and a certificate signed by it on first start
+# (tls-ca.crt, tls.crt beside its secrets in state/, kept across reinstalls); the CA
+# is copied out of the container and added to this host's trust stores (macOS: the
+# login keychain; Linux: the system store and browser certificate databases), so the
+# webui opens as secure here (other machines: the engine installer does it there).
+# The script prints the certificate's fingerprint: give it to each engine installer
+# (--fingerprint) or compare it with `iter_engine key status`. The TLS choices are
+# remembered in the secrets file, so a plain rerun keeps them.
 set -euo pipefail
 
 REPO="Stephen-Hilton/iter"
@@ -181,6 +183,97 @@ fingerprint() {
     [ -z "$fp" ] || fp="sha256:$fp"
   fi
   printf '%s' "$fp"
+}
+
+# ---- browsers trust iter_data
+# --tls auto: iter_data signs its certificate with a local certificate authority
+# of its own (state/tls-ca.crt), limited by name constraints to this server's
+# names, local DNS suffixes (.local .lan .internal .home.arpa) and loopback /
+# private addresses: it cannot vouch for any public site. iter_data runs in the
+# container but the browser runs on this host, so the CA is copied out of the
+# container and trusted on the host: macOS = the login keychain, as a root for SSL
+# (macOS asks for your password; Firefox reads it while
+# security.enterprise_roots.enabled is on, the default); Linux = the system store
+# (curl and most programs) and, for the desktop user (the one who ran sudo), the
+# NSS databases Chrome, Chromium and Firefox read. On another machine, the engine
+# installer does the same; without one there, open
+# https://<this host>:<port>/tls/ca.crt and trust it as a certificate authority.
+SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+DESK_USER="${SUDO_USER:-}"; [ "$DESK_USER" != root ] || DESK_USER=""
+[ -n "$DESK_USER" ] || [ "$(id -u)" = 0 ] || DESK_USER="$(id -un)"
+desk_home() { getent passwd "$DESK_USER" 2>/dev/null | cut -d: -f6; }
+as_desk() { if [ "$(id -un)" = "$DESK_USER" ]; then "$@"; else sudo -u "$DESK_USER" "$@"; fi; }  # root: DESK_USER is who ran sudo
+nss_dbs() {  # the desktop user's browser certificate databases
+  local h d; h="$(desk_home)"; [ -n "$h" ] || return 0
+  for d in "$h/.pki/nssdb" "$h"/snap/chromium/current/.pki/nssdb "$h"/.var/app/*/.pki/nssdb \
+           "$h"/.mozilla/firefox/*/ "$h"/snap/firefox/common/.mozilla/firefox/*/ "$h"/.var/app/org.mozilla.firefox/.mozilla/firefox/*/; do
+    $SUDO test -f "${d%/}/cert9.db" && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+has_browser() {
+  local b
+  for b in google-chrome-stable google-chrome chromium chromium-browser brave brave-browser firefox; do command -v "$b" >/dev/null && return 0; done
+  [ -n "$(nss_dbs)" ]
+}
+# ca_trust_linux FILE: the system store and the desktop user's browser databases
+ca_trust_linux() {
+  local ca="$1" cn="$2" file dir db n=0 h
+  file="iter_data-$(printf '%s' "$cn" | tr -c 'A-Za-z0-9_-' '_' | sed 's/__*/_/g; s/_$//').crt"
+  if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+    run $SUDO install -m 644 "$ca" "/usr/local/share/ca-certificates/$file"; run $SUDO update-ca-certificates >/dev/null
+    say "  system store: /usr/local/share/ca-certificates/$file"
+  elif command -v update-ca-trust >/dev/null; then
+    dir=/etc/pki/ca-trust/source/anchors; [ -d "$dir" ] || dir=/etc/ca-certificates/trust-source/anchors
+    run $SUDO install -D -m 644 "$ca" "$dir/$file"; run $SUDO update-ca-trust extract
+    say "  system store: $dir/$file"
+  else
+    say "  no update-ca-certificates or update-ca-trust: the system store is left as it is"
+  fi
+  { [ -n "$DESK_USER" ] && has_browser; } || { say "  no desktop user with a browser here: nothing more to trust it"; return 0; }
+  if ! command -v certutil >/dev/null; then
+    if command -v apt-get >/dev/null; then run $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnss3-tools
+    elif command -v dnf >/dev/null; then run $SUDO dnf install -y -q nss-tools
+    elif command -v pacman >/dev/null; then run $SUDO pacman -S --noconfirm --needed nss; fi
+  fi
+  command -v certutil >/dev/null || { say "  WARNING: certutil (NSS tools) missing: browsers here do not trust iter_data yet"; return 0; }
+  # Chrome and Chromium read ~/.pki/nssdb: made now if the user has none yet
+  h="$(desk_home)"
+  $SUDO test -f "$h/.pki/nssdb/cert9.db" || { as_desk mkdir -p "$h/.pki/nssdb" && as_desk certutil -d "sql:$h/.pki/nssdb" -N --empty-password; }
+  while IFS= read -r db; do
+    as_desk certutil -d "sql:$db" -D -n "$cn" >/dev/null 2>&1 || true
+    as_desk certutil -d "sql:$db" -A -t "C,," -n "$cn" -i "$ca" && n=$((n + 1))
+  done < <(nss_dbs)
+  say "  browsers: \"$cn\" trusted in $n certificate database(s) for $DESK_USER (restart the browser)"
+}
+# ca_trust_mac FILE CN: the login keychain, as a root for SSL
+ca_trust_mac() {
+  local ca="$1" cn="$2"
+  if security verify-cert -c "$ca" -p ssl -L -l >/dev/null 2>&1; then say "  \"$cn\" is trusted already (login keychain)"; return 0; fi
+  say "  macOS now asks for your password to trust \"$cn\" for websites (login keychain)"
+  security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$ca" \
+    || { say "  WARNING: the login keychain did not take it (password dialog cancelled, or no screen session: run this in Terminal on the Mac)"; return 0; }
+  say "  login keychain: \"$cn\" trusted for SSL (restart the browser; Firefox: security.enterprise_roots.enabled, on by default)"
+}
+browsers() {
+  local t ca cn
+  say "browsers on this host: trusting iter_data's local certificate authority ($STATE/tls-ca.crt)"
+  t="$(mktemp -d)"; ca="$t/iter_data-ca.crt"
+  if ! docker exec "$NAME" cat /var/lib/iter_data/state/tls-ca.crt > "$ca" 2>/dev/null || ! [ -s "$ca" ]; then
+    say "  no tls-ca.crt in the container (an iter_data older than v2026.10.19): browsers warn about its certificate"; rm -rf "$t"; return 0
+  fi
+  chmod 644 "$ca"
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p' || true)"
+  if [ -z "$cn" ]; then
+    say "  WARNING: $STATE/tls-ca.crt is not a certificate (or openssl is missing on this host): browsers warn about iter_data's certificate"
+  else
+    case "$(uname -s)" in
+      Darwin) ca_trust_mac "$ca" "$cn" ;;
+      Linux) ca_trust_linux "$ca" "$cn" ;;
+      *) say "  $(uname -s): no trust store this script knows; open $SCHEME://127.0.0.1:$PORT/tls/ca.crt in the browser and trust it as a certificate authority" ;;
+    esac
+  fi
+  rm -rf "$t"
 }
 
 # iter_data writes state/admin_password_changed once the first admin has chosen
@@ -594,7 +687,7 @@ fi
 if [ ${#TLS_NAMES[@]} -gt 0 ]; then NAMES="$(IFS=,; echo "${TLS_NAMES[*]}")"; fi
 if [ "$TLS_OFF" = off ]; then say "TLS: off (plain HTTP): only for iter_data behind a TLS proxy; engines refuse plain http across a network"
 elif [ -n "$TLS_CUSTOM" ]; then [ -n "$TLS_CERT_SRC" ] || say "TLS: your certificate $CTLS_HOST_CRT (kept from the last run)"
-else say "TLS: a self-signed certificate (made on first start, kept in $STATE)${NAMES:+, extra names $NAMES}"; fi
+else say "TLS: iter_data's own certificate, signed by its local CA (made on first start, kept in $STATE)${NAMES:+, extra names $NAMES}"; fi
 if [ "$DRY" = 1 ]; then
   echo "  + write $ENV_PATH (mode 600): ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_* settings, TLS settings"
 else
@@ -632,8 +725,9 @@ run "${compose[@]}" up -d --build
 
 # ---- 7. health
 if [ "$DRY" = 1 ]; then
-  echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is self-signed)')"
+  echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is not checked here)')"
   [ "$SCHEME" = http ] || echo "  + print the TLS certificate fingerprint (from the container log)"
+  [ "$SCHEME" = http ] || [ -n "$TLS_CUSTOM" ] || echo "  + copy $STATE/tls-ca.crt out of the container and add it to this host's trust stores ($(uname -s): $([ "$(uname -s)" = Darwin ] && echo 'the login keychain, macOS asks for your password' || echo 'the system store and the desktop user'"'"'s browser certificate databases'))"
   say "dry run done"; exit 0
 fi
 for _ in $(seq 1 180); do
@@ -651,11 +745,12 @@ for _ in $(seq 1 180); do
     if [ "$SCHEME" = http ]; then
       say "TLS is off: put a TLS proxy in front; engines refuse plain http to another machine"
     else
+      [ -n "$TLS_CUSTOM" ] || browsers
       fp="$(fingerprint)"
       say "TLS certificate fingerprint: ${fp:-(not found: docker logs $NAME | grep fingerprint)}"
       say "  give it to each engine installer (--fingerprint ${fp:-sha256:...}), or compare it with \`iter_engine key status\` on the engine"
       say "  (also in the webui's Engine keys screen; later: docker logs $NAME 2>&1 | grep fingerprint)"
-      [ -n "$TLS_CUSTOM" ] || say "  browsers warn about this self-signed certificate: accept it once, or rerun with --tls-cert/--tls-key (or put a TLS proxy in front)"
+      [ -n "$TLS_CUSTOM" ] || say "  browsers here trust it (its local CA was added above); on another machine the engine installer adds it, or open $SCHEME://<this host>:$PORT/tls/ca.crt and trust it as a certificate authority"
     fi
     exit 0
   fi

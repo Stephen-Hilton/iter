@@ -857,3 +857,35 @@ async fn sign_ins_are_limited_per_user_and_the_first_admin_must_change_theirs() 
     assert_eq!(row["must_change_password"].as_bool(), Some(true), "{row}");
     t.done().await;
 }
+
+// ---------- one user form (2026-10-19) ----------
+
+#[tokio::test]
+async fn user_nodes_follow_the_user_form_rules() {
+    let t = T::new().await;
+    t.ok("adm", "PUT", "/api/users/alice", Some(json!({"role": "user", "email": "alice@example.com", "authz": {}, "settings": {}}))).await;
+    // the settings graph never sets a password, the must-change flag or the token version
+    for k in ["password", "pwhash", "must_change_password", "tokenver"] {
+        let (c, v) = t.call("adm", "PATCH", "/api/settings/nodes/user:alice", Some(json!({"settings": {k: "x"}}))).await;
+        assert_eq!(c, 400, "{k}: {v}");
+        assert!(v.to_string().contains("/api/users/alice"), "{k}: {v}");
+    }
+    let (c, _) = t.call("adm", "POST", "/api/settings/nodes", Some(json!({"type": "user", "name": "carol", "settings": {"password": "a-long-password-1"}}))).await;
+    assert_eq!(c, 400);
+    // and no role the user form refuses
+    let (c, _) = t.call("adm", "PATCH", "/api/settings/nodes/user:alice", Some(json!({"settings": {"role": "engine"}}))).await;
+    assert_eq!(c, 400);
+    t.ok("adm", "PATCH", "/api/settings/nodes/user:alice", Some(json!({"settings": {"role": "viewer"}}))).await;
+    // another person sees who it is and the role, not the rest
+    let other = t.ok("bob", "GET", "/api/users/alice", None).await;
+    assert_eq!(other["role"], "viewer");
+    assert!(other.get("email").is_none() && other.get("authz").is_none(), "{other}");
+    let node = t.ok("bob", "GET", "/api/settings/nodes/user:alice", None).await;
+    assert!(node["settings"].get("email").is_none(), "{node}");
+    // the person themselves and the admins see everything but the hash
+    let mine = t.ok("alice", "GET", "/api/users/alice", None).await;
+    assert_eq!(mine["email"], "alice@example.com");
+    assert!(mine.get("pwhash").is_none());
+    assert_eq!(t.ok("adm", "GET", "/api/settings/nodes/user:alice", None).await["settings"]["email"], "alice@example.com");
+    t.done().await;
+}

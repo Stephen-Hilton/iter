@@ -1,0 +1,12 @@
+{
+  "childstate": "queued",
+  "desc": "Planning agent: turns requirements into reviewed docs plus parallel code/test work items",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "max_overlap": 3
+  },
+  "max": 2,
+  "model": "fable",
+  "name": "plan",
+  "timeoutsec": 3600
+}

@@ -1,0 +1,5 @@
+{
+  "desc": "appended to every agent prompt",
+  "kind": "shared",
+  "name": "_shared"
+}

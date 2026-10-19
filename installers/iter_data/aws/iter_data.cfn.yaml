@@ -3,7 +3,8 @@ Description: >-
   iter_data server on one EC2 instance (Amazon Linux 2023, Graviton or x86_64): ArangoDB + iter_data
   as systemd services, installed at first boot by installers/iter_data/linux_aws/install.sh from a
   GitHub Release of Stephen-Hilton/iter (the latest unless IterVersion names one). iter_data serves
-  HTTPS with a self-signed certificate whose fingerprint (what engines pin) is stored in SSM. The
+  HTTPS with a certificate signed by its own local CA; the fingerprint (what engines pin) is stored in
+  SSM, and browsers trust it once an engine is installed on their machine. The
   database lives on its own encrypted EBS volume (or, with ArangoUrl, in an ArangoDB elsewhere), the
   admin password is stored in SSM Parameter Store, and only the iter_data port is reachable from
   AllowedCidr.
@@ -378,7 +379,8 @@ Outputs:
   Url:
     Description: >-
       The iter web page and API (sign in as admin); engines use this as their iter_data URL. HTTPS
-      with a self-signed certificate: browsers warn until you accept it (or put a TLS proxy in front).
+      with a certificate signed by iter_data's local CA: a browser trusts it once an engine is
+      installed on its machine, or after opening <Url>/tls/ca.crt and trusting it as a CA.
     Value: !Sub "https://${ElasticIp}:${IterPort}"
   AdminPasswordParameter:
     Description: >-

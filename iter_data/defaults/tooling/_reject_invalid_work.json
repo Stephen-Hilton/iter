@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: reject invalid work (`iter reject`)",
+  "kind": "capability",
+  "name": "_reject_invalid_work"
+}

@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: run tests and make claims (`iter runtests`)",
+  "kind": "capability",
+  "name": "_runtests"
+}

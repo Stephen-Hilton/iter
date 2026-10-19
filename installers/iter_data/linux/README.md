@@ -3,7 +3,7 @@
 The script installs three things as systemd services:
 
 - **ArangoDB CE 3.12** (`arangodb3`), listening on localhost only.
-- **iter_data** (`iter-data`), serving the API and webui on `https://<host>:8400` (a self-signed certificate; see [HTTPS](#https-and-the-certificate-fingerprint)).
+- **iter_data** (`iter-data`), serving the API and webui on `https://<host>:8400` (a certificate signed by iter_data's own local CA; see [HTTPS](#https-and-the-certificate-fingerprint)).
 - **An online backup every 6 hours** (`iter-backup.timer`, using arangodump, with no downtime).
 
 ArangoDB and iter_data share a memory cap (`iter.slice`). The script works on Debian 11+, Ubuntu 20.04+ and Arch on x86_64 or aarch64. It also works inside a WSL2 distro that has `[boot] systemd=true` in `/etc/wsl.conf`.
@@ -66,9 +66,9 @@ The binary is taken from `--binary PATH`, else from beside the script, else from
 | `--arango-ca-cert PATH` | | or trust the CA (PEM) that signed it |
 | `--arango-db NAME` | `iter_db` | iter's database (an existing install keeps its own) |
 | `--arango-user NAME` | `iter_user` | iter's ArangoDB user, `rw` on that database only |
-| `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of the self-signed one |
-| `--tls-name NAME` | | another DNS name or IP on the self-signed certificate (repeatable) |
-| `--tls off\|auto` | `auto` | `off` = plain HTTP behind a TLS proxy; `auto` = self-signed again |
+| `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of iter_data's own |
+| `--tls-name NAME` | | another DNS name or IP on iter_data's own certificate (repeatable) |
+| `--tls off\|auto` | `auto` | `off` = plain HTTP behind a TLS proxy; `auto` = iter_data's own certificate again |
 | `--dry-run` | | print every action, change nothing |
 
 A fresh install without `--env-file` generates the secrets and prints the admin password once; you must change it at the first sign-in ([below](#the-first-boot-admin-password)). Keep `ITER_JWT_SECRET`, because every engine and user token is signed with it. A machine set up with the older `linux/install.sh server` keeps its secrets: the script reads the invoking user's `~/.iter/data.env` and copies `~/.iter/iter_data/{iter_data.secret,.env}`. It also keeps the database.
@@ -131,17 +131,17 @@ A fresh install generates the `admin` password, prints it once and keeps it as `
 
 
 
-iter_data serves HTTPS. On its first start it makes a self-signed certificate, `D/state/tls.crt` + `tls.key` (user `iter`, mode 600), beside `iter_data.secret` and `engine_session.secret` (the engine-session signing secret). `D/state` stays owner-only (700), and all of it is kept across reinstalls, upgrades and `uninstall`.
+iter_data serves HTTPS. On its first start it makes a local certificate authority, `D/state/tls-ca.crt` + `tls-ca.key`, and a certificate signed by it, `D/state/tls.crt` + `tls.key` (user `iter`, keys mode 600), beside `iter_data.secret` and `engine_session.secret` (the engine-session signing secret). `D/state` stays owner-only (700), and all of it is kept across reinstalls, upgrades and `uninstall`.
 
 After a successful install, and in `install.sh status`, the script prints the certificate's **fingerprint** (`sha256:` + 64 hex, the SHA-256 of the certificate: `openssl x509 -in D/state/tls.crt -noout -fingerprint -sha256` without the colons; the script installs openssl). Engines pin it. Give it to each engine installer (`--fingerprint sha256:…`, or `-Fingerprint` on Windows), or let the engine trust it at its first sign-in and compare it afterwards with `iter_engine key status`. It is also in the webui's 🔑 Engine keys screen and in `journalctl -u iter-data | grep fingerprint`.
 
-Browsers warn about a self-signed certificate. Accept it once, or:
+**Browsers.** The CA is name-constrained to this server's names (with every `--tls-name`), `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. iter_data serves it, without sign-in, at `https://<host>:<port>/tls/ca.crt`. The script adds it to this machine's system store and, for the desktop user who ran sudo, to the NSS databases Chrome, Chromium and Firefox read, so the webui opens as secure here (after a browser restart). On another machine the engine installer does the same; without an engine there, open `https://<this host>:8400/tls/ca.crt` and trust it as a certificate authority. Other choices:
 
 - `--tls-cert PATH --tls-key PATH`: serve a certificate of your own (a real one for your domain). The script copies both to `D/state/custom-tls.{crt,key}` (user `iter`, key mode 600). The fingerprint changes, so engines that pinned the old one need `iter_engine key trust --data-url URL --fingerprint …` again, or `--ca` for a certificate from a public authority.
 - `--tls off`: plain HTTP, only for iter_data behind a TLS proxy on this host (Caddy, nginx). Engines refuse `http://` to anything but 127.0.0.1 / localhost / ::1, so they must use the proxy's `https://` URL, with `iter_engine key trust --ca` when the proxy has a real certificate.
-- `--tls-name NAME` (repeatable): put another DNS name or IP on the self-signed certificate, such as the name browsers use. Names are read only when the certificate is first made; engines pin the fingerprint and do not check names.
+- `--tls-name NAME` (repeatable): put another DNS name or IP on iter_data's own certificate (and its CA's name constraints), such as the name browsers use. Names are read only when the certificate is first made; engines pin the fingerprint and do not check names.
 
-The flags go on the `iter-data` unit's `ExecStart`. The choice is kept in `D/config/tls.env`, so a plain rerun keeps it; `--tls auto` goes back to the self-signed certificate.
+The flags go on the `iter-data` unit's `ExecStart`. The choice is kept in `D/config/tls.env`, so a plain rerun keeps it; `--tls auto` goes back to iter_data's own certificate.
 
 ## Upgrade
 

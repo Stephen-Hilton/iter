@@ -3,8 +3,9 @@
 # script): one EC2 Amazon Linux 2023 instance that installs ArangoDB + iter_data at first
 # boot from a GitHub Release (installers/iter_data/linux_aws/install.sh), an encrypted EBS
 # data volume, an Elastic IP, and the admin password and iter_data's TLS certificate
-# fingerprint in SSM Parameter Store. iter_data serves HTTPS with a self-signed
-# certificate: engines pin its fingerprint, browsers warn until you accept it.
+# fingerprint in SSM Parameter Store. iter_data serves HTTPS with a certificate signed
+# by its own local CA: engines pin its fingerprint; a browser trusts it once an engine
+# is installed on its machine, or after opening <Url>/tls/ca.crt and trusting it as a CA.
 #
 #   ./install.sh --vpc vpc-… --subnet subnet-… --allowed-cidr 203.0.113.0/24 [options]
 #   ./install.sh status [--stack-name NAME]     the stack's state and outputs
@@ -205,6 +206,7 @@ say "  you must change it at the first sign-in (the webui asks; a new password n
 say "  the instance then deletes it from SSM and from iter_data/config/data.env"
 say "TLS certificate fingerprint: $0 fingerprint --stack-name $STACK   (the TlsFingerprintParameter output)"
 say "  give it to each engine installer (--fingerprint sha256:...) or compare it with \`iter_engine key status\`;"
-say "  the Url is https:// with a self-signed certificate, so browsers warn until you accept it (or put a TLS proxy in front)"
+say "  the Url is https:// with a certificate signed by iter_data's local CA: browsers on a machine with an engine trust it"
+say "  (its installer adds the CA); elsewhere open <Url>/tls/ca.crt and trust it as a certificate authority"
 say "note: the stack's parameters only apply at first boot; to move to a newer iter release, run"
 say "  sudo installers/iter_data/linux_aws/install.sh install --version <tag> on the instance (Session Manager)."

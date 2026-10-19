@@ -87,6 +87,19 @@ enum Action {
         #[arg(long, default_value_t = false)]
         forget: bool,
     },
+    /// fetch iter_data's local certificate authority (the one its own
+    /// certificate is signed with, `--tls auto`) over the trusted connection,
+    /// for the installers to add to this machine's trust stores so a browser
+    /// here shows the webui as secure; exit 1 when the server has none or is
+    /// not trusted yet
+    Ca {
+        /// iter_data URL [$ITER_DATA_URL]
+        #[arg(long)]
+        data_url: Option<String>,
+        /// write the PEM here instead of printing it
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// sign in with each key and say whether iter_data accepts it; exit 0
     /// when the current key is accepted
     Status {
@@ -216,6 +229,19 @@ pub fn run(args: KeyArgs) {
                 }
             })
         }
+        Action::Ca { data_url, out } => {
+            let Some(url) = crate::resolve_data_url(data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref()) else {
+                eprintln!("no --data-url given and $ITER_DATA_URL is not set");
+                std::process::exit(2);
+            };
+            std::process::exit(match server_ca(&url, out.as_deref()) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            })
+        }
         Action::Status { key_file, data_url } => {
             let file = key_file.map(PathBuf::from).unwrap_or_else(default_key_file);
             let url = crate::resolve_data_url(data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref());
@@ -296,6 +322,25 @@ fn rotate(file: &Path, url: &str) -> Result<(), String> {
 }
 
 /// Make, check or drop the trust in iter_data's certificate.
+/// `key ca`: iter_data's local CA, fetched over the trusted connection.
+fn server_ca(url: &str, out: Option<&str>) -> Result<(), String> {
+    let pem = Api::new(url, "").get_trusted_text("/tls/ca.crt").map_err(|e| match e.status {
+        404 => format!("{url} has no local certificate authority (it serves a certificate you brought, or is older than v2026.10.19)"),
+        _ => format!("{url}: {}", e.body),
+    })?;
+    if !pem.trim_start().starts_with("-----BEGIN CERTIFICATE-----") {
+        return Err(format!("{url}/tls/ca.crt did not return a certificate"));
+    }
+    match out {
+        Some(path) => {
+            std::fs::write(path, pem.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
+            println!("iter_data's local certificate authority: {path}");
+        }
+        None => print!("{pem}"),
+    }
+    Ok(())
+}
+
 fn trust(url: &str, fingerprint: Option<&str>, ca: bool, forget: bool) -> Result<(), String> {
     use crate::trust;
     if let Some(why) = trust::refuse_reason(url) {

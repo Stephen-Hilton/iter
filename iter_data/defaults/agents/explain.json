@@ -1,0 +1,13 @@
+{
+  "childstate": "queued",
+  "closegate": null,
+  "desc": "ELI5 agent: re-explains any work item (question, parked, closed, or in flight) for a human who has never seen the codebase. Read-only (the engine fixes its tools to Read/Glob/Grep); runs at once from the ELI5 button, outside the agent cap, never as a work item.",
+  "flags": "",
+  "lockshape": {
+    "none": true
+  },
+  "max": 2,
+  "model": "opus",
+  "name": "explain",
+  "timeoutsec": 900
+}

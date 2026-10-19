@@ -38,7 +38,7 @@ The steps:
 3. `config/engine.conf` (the iter_data URL and the engine name).
 4. `bin/iter_engine`, written to a temp file and then moved into place (a `cp` over a live binary gets it SIGKILLed on macOS), and the `/usr/local/bin/iter_engine` link. Then iter_data's certificate: `--fingerprint` (or the one you paste) is pinned with `iter_engine key trust` (see [HTTPS](#https-and-iter_datas-certificate)).
 5. The embedding model into `models/`.
-6. The engine key. You paste its public key into the webui's Engine keys screen, and the script waits until iter_data accepts it.
+6. The engine key. You paste its public key into the webui's Engine keys screen, and the script waits until iter_data accepts it. Then iter_data's local certificate authority goes into your login keychain (macOS asks for your password), so browsers here open the webui as secure ([below](#https-and-iter_datas-certificate)).
 7. On a MacBook, the script asks (default no) whether to run the engine under `caffeinate -s`. That stops system sleep while the Mac is on power, and only while the engine runs. Closing the lid still sleeps the Mac unless an external display is attached. To keep it awake system-wide instead, run `sudo pmset -c sleep 0`.
 8. Loads the launchd agent.
 9. Account tokens and project checkouts.
@@ -69,13 +69,15 @@ Recipes (each prints `DEV1_TOKEN=…` lines; use your own names and paths):
 
 The iter_data URL must be `https://`. iter_data serves HTTPS by default, and the engine never accepts plain `http://` across a network: the script stops on an `http://` URL unless the host is this machine (`127.0.0.1`, `localhost`, `::1`).
 
-iter_data's certificate is usually self-signed, so the engine does not ask a certificate authority about it. It pins the certificate's **fingerprint** (`sha256:` + 64 hex) in `config/server_trust.json`, one entry per server:
+iter_data's certificate is usually its own (signed by a local certificate authority iter_data makes, not a public one), so the engine does not ask a certificate authority about it. It pins the certificate's **fingerprint** (`sha256:` + 64 hex) in `config/server_trust.json`, one entry per server:
 
 - **Given up front** (recommended): `--fingerprint sha256:…`, or paste it when the script asks. The iter_data installer prints it, and the webui shows it in the 🔑 Engine keys screen. Right after the binary is installed, the script runs `iter_engine key trust --data-url URL --fingerprint …`, which pins it only if the server presents that same certificate. If it does not, the script stops: something else answers at that URL.
 - **Trust on first use**: press Enter at the question, and the first signed sign-in pins the certificate it sees. Compare it afterwards with `iter_engine key status`, which prints the trusted certificate.
 - **A TLS proxy with a real certificate** in front of iter_data: `--trust-ca` (`iter_engine key trust --ca`) checks it against certificate authorities instead.
 
 When iter_data's certificate changes on purpose, iter_data announces the next fingerprint at each sign-in, so the engine follows it. A certificate replaced by hand (for example `--tls-cert` on the server) needs `iter_engine key trust --data-url URL --fingerprint …` again; `iter_engine key trust --forget` drops the entry.
+
+**Browsers on this Mac.** iter_data (`--tls auto`) signs its certificate with a local certificate authority of its own, name-constrained to that server's names, `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. Once iter_data accepts the key, the script fetches that CA over the pinned connection (`iter_engine key ca --data-url URL`) and adds it to your login keychain as a trusted root for SSL (`security add-trusted-cert -r trustRoot -p ssl`); macOS shows a password dialog for that. Safari, Chrome and Edge then open the webui as secure; Firefox does too while `security.enterprise_roots.enabled` is on (the default in current Firefox). Skipped when the CA is trusted already, for plain `http://` and for `--trust-ca`; a failure is only a warning.
 
 Key commands: `iter_engine key show` prints this engine's public key (never the private one), `iter_engine key status` checks the key and the trusted certificate, and `iter_engine key rotate --data-url URL` replaces the key: the current key signs the new one, so no webui step is needed (a revoked key cannot rotate). The engine signs in only with its key.
 

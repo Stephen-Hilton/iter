@@ -1,0 +1,15 @@
+{
+  "childstate": "queued",
+  "desc": "Usecase agent: validates a use-case idea, writes its file, names the parts it needs, draws its flowmap from the code, declares its test node, and opens one plan item for whatever is missing",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "allow": [
+      "{topdir}/**/usecases"
+    ],
+    "outside": "refuse"
+  },
+  "max": 1,
+  "model": "opus",
+  "name": "usecase",
+  "timeoutsec": 3600
+}

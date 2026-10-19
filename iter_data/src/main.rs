@@ -10,6 +10,7 @@ mod authz;
 mod contract_tests;
 mod auth;
 mod datasync;
+mod defaults;
 mod filesync;
 mod graph;
 mod keys;
@@ -65,19 +66,22 @@ struct Args {
     /// (--tls auto) live beside it
     #[arg(long, default_value = "./iter_data.secret")]
     secret_file: String,
-    /// TLS: auto = a self-signed certificate made on first start, kept beside
-    /// the secret file, pinned by engines; off = plain HTTP (a loopback dev
-    /// loop, or behind a TLS proxy). ITER_TLS env wins over the default.
+    /// TLS: auto = a certificate made on first start and signed by a local CA
+    /// of iter_data's own (name-constrained to this server; browsers trust it
+    /// once the installers add the CA), both kept beside the secret file,
+    /// pinned by engines; off = plain HTTP (a loopback dev loop, or behind a
+    /// TLS proxy). ITER_TLS env wins over the default.
     #[arg(long, default_value = "")]
     tls: String,
     /// serve this certificate (PEM; a real one for a domain) instead of the
-    /// self-signed one; needs --tls-key
+    /// one iter_data makes; needs --tls-key
     #[arg(long, default_value = "")]
     tls_cert: String,
     /// the private key (PEM) for --tls-cert
     #[arg(long, default_value = "")]
     tls_key: String,
-    /// an extra name (DNS or IP) on the self-signed certificate; repeatable
+    /// an extra name (DNS or IP) on the certificate iter_data makes (and its
+    /// CA's name constraints); read when they are first made; repeatable
     #[arg(long)]
     tls_name: Vec<String>,
     /// .env file to load (KEY=VALUE lines; malformed lines skipped)
@@ -100,6 +104,18 @@ enum Cmd {
     /// engine keys, managed on this machine (no server is started)
     #[command(name = "engine-key", subcommand)]
     EngineKey(EngineKeyCmd),
+    /// the default agents and tooling (iter_data/defaults/), managed on this
+    /// machine (no server is started)
+    #[command(subcommand)]
+    Defaults(DefaultsCmd),
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum DefaultsCmd {
+    /// add every default agent and tooling row this database lacks (one an
+    /// admin deleted comes back; existing ones are never changed). The first
+    /// start of a new database does this by itself, once
+    Add,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -201,13 +217,31 @@ async fn main() {
         }
         return;
     }
+    if let Some(Cmd::Defaults(DefaultsCmd::Add)) = &args.cmd {
+        let added = match settings::bootstrap(store.as_ref()).await {
+            Ok(()) => defaults::add_missing(store.as_ref()).await,
+            Err(e) => Err(e),
+        };
+        match added {
+            Ok(a) if a.is_empty() => println!("every default agent and tooling row is already here"),
+            Ok(a) => println!("added: {}", a.join(", ")),
+            Err(e) => {
+                eprintln!("iter_data defaults add: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     bootstrap_admin(store.as_ref()).await;
-    bootstrap_summary_agent(store.as_ref()).await;
     // the settings graph (§7): placeholders, iter_data:self, providers,
     // workitem types, and the one-time iter4 -> iter5 edge migration
     if let Err(e) = settings::bootstrap(store.as_ref()).await {
         eprintln!("[iter_data] settings graph bootstrap failed: {e}");
+    }
+    // the default agents and tooling, once per database (defaults.rs)
+    if let Err(e) = defaults::add_once(store.as_ref()).await {
+        eprintln!("[iter_data] could not add the default agents: {e}");
     }
 
     rag::guide::ingest_at_startup(store.clone());
@@ -327,30 +361,6 @@ async fn open_arango(args: &Args) -> arango::ArangoBackend {
             b
         }
         Err(e) => fail(format!("init failed: {e}")),
-    }
-}
-
-/// First-run bootstrap: if no users exist, create "admin".
-/// Password from ITER_ADMIN_PASSWORD, else generated and printed ONCE.
-/// GraphRAG (2026-09-29): the `summary` agent record, created once so its
-/// model, timeout and prompt are editable in the webui like any agent's. It
-/// never runs as a work item: the engine's Summary worker reads it (rag.rs).
-async fn bootstrap_summary_agent(store: &dyn storage::Storage) {
-    if store.get("agent", "summary", "-").await.ok().flatten().is_some() {
-        return;
-    }
-    let row = json!({
-        "name": "summary", "model": "haiku", "timeoutsec": 300, "max": 2, "flags": "", "childstate": "queued",
-        "closegate": null, "lockshape": {"none": true},
-        "desc": "GraphRAG Summary agent: writes the retrieval summaries of document chunks, chapters and whole documents (Haiku by default). Runs on the engine outside the agent cap and the queue whenever the heartbeat reply says summaries are waiting; never a work item. Its output is embedded as each chunk's second vector.",
-        "promptbody": "# Agent Definition: summary\n\nYou are iter's Summary agent. You write short retrieval summaries for a semantic search index\n(GraphRAG): a developer or another agent will later search the project's documents in plain words, and your summary is what\nlets them find the right passage. Write for that search:\n- say what the passage is about and what it states, in plain declarative sentences — never \"this chunk\", \"this section\" or \"the text\";\n- name the concrete things it contains (components, functions, fields, commands, error codes, numbers, people, decisions) exactly as written;\n- no opinions, no advice, nothing that is not in the passage.\n"
-    });
-    match store.put("agent", "summary", "-", &row).await {
-        Ok(()) => {
-            let _ = store.bump_seq(GLOBAL, "agent").await;
-            println!("[iter_data] created the GraphRAG `summary` agent record (haiku)");
-        }
-        Err(e) => eprintln!("[iter_data] could not create the summary agent record: {e}"),
     }
 }
 

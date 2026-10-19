@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: the test sweep gate (`iter teststate`)",
+  "kind": "capability",
+  "name": "_teststate"
+}

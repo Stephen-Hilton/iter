@@ -47,7 +47,8 @@ steps; the claude CLI; asks before winget) -> iter_data URL + engine name
 script, else the GitHub Release, sha256-checked; bin\ goes on the user PATH)
 -> the embedding model into models\ -> the engine key (`iter_engine key new`:
 paste its public key into the webui's Engine keys screen; the script waits
-until iter_data accepts it) -> a laptop: no sleep on AC power (asks) -> the
+until iter_data accepts it) -> iter_data's local CA into the Windows certificate
+store (browsers here trust the webui) -> a laptop: no sleep on AC power (asks) -> the
 logon task "iter engine" (runs bin\iter-engine.ps1 start, a copy of this
 script) -> account tokens and project checkouts.
 
@@ -60,6 +61,12 @@ the server presents another certificate; without one, the first sign-in trusts
 the certificate it sees (compare: iter_engine key status). Other key commands:
 `iter_engine key show` (print the public key), `iter_engine key rotate` (a new
 key, signed by the current one, no webui step).
+
+Browsers: iter_data signs its certificate with a local CA of its own (name-
+constrained to that server); once the key is accepted the CA is fetched over the
+pinned connection (`iter_engine key ca`) and imported into this user's Trusted Root
+Certification Authorities (the machine's when run as administrator; Windows asks to
+confirm), so Edge and Chrome open the webui as secure.
 
 Everything this machine keeps for iter is in <iter dir>\iter_engine (C:\iter\iter_engine):
   bin\       iter_engine.exe, iter-engine.ps1 (the logon task's copy of this script)
@@ -710,6 +717,41 @@ function Step-Key {
     }
 }
 
+# iter_data (--tls auto) signs its certificate with a local certificate
+# authority of its own, limited by name constraints to that server's names, local
+# DNS suffixes (.local .lan .internal .home.arpa) and loopback / private addresses:
+# it cannot vouch for any public site. Trusting that CA in the Windows certificate
+# store (Trusted Root Certification Authorities: this user's, or the machine's when
+# run as administrator) makes Edge and Chrome show the webui as secure; Firefox
+# reads it too (security.enterprise_roots.enabled, on by default). The CA comes over
+# the engine's pinned connection (`iter_engine key ca`).
+function Step-Browsers {
+    $ErrorActionPreference = 'Continue'
+    Say '5b/8 browsers here trust iter_data'
+    if ($script:DataUrl -notmatch '^https://') { Ok "$($script:DataUrl) is plain http: nothing to trust"; return }
+    if ($TrustCa) { Ok 'iter_data has a certificate from a public authority: browsers trust it already'; return }
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $store = if ($admin) { 'Cert:\LocalMachine\Root' } else { 'Cert:\CurrentUser\Root' }
+    if ($DryRun) { Dry "$Exe key ca --data-url $($script:DataUrl), then Import-Certificate into $store (Windows asks to confirm)"; return }
+    $ca = Join-Path ([IO.Path]::GetTempPath()) "iter_data-ca-$PID.crt"
+    try {
+        $out = @(& $Exe key ca --data-url $script:DataUrl --out $ca 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            Warn "$($out | Select-Object -Last 1)"
+            Warn 'browsers here warn about iter_data''s certificate until its CA is trusted (rerun this installer)'; return
+        }
+        try { $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ca }
+        catch { Warn "$ca is not a certificate: browsers here may still warn about iter_data's certificate"; return }
+        $cn = $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+        if (Test-Path "$store\$($cert.Thumbprint)") { Ok "`"$cn`" is trusted already ($store)"; return }
+        if (-not $admin) { Write-Host "    Windows now asks you to confirm installing `"$cn`" (thumbprint $($cert.Thumbprint)): answer Yes" }
+        try {
+            Import-Certificate -FilePath $ca -CertStoreLocation $store -ErrorAction Stop | Out-Null
+            Ok "$($store): `"$cn`" trusted (restart the browser)"
+        } catch { Warn "the certificate store did not take it ($($_.Exception.Message)): browsers here may still warn about iter_data's certificate" }
+    } finally { Remove-Item $ca -Force -ErrorAction SilentlyContinue }
+}
+
 # What to paste and where, and why iter_data refused the last check; shown at
 # every try, so the screen always holds the one line to paste and the reason.
 function Show-KeyHelp($status) {
@@ -880,7 +922,7 @@ if ($Mode -in 'install', 'update') {
 }
 switch ($Mode) {
     'install' {
-        Step-Tools; Step-Settings; Step-Binary; Step-Trust; Step-Model; Step-Key; Step-Power; Step-Service
+        Step-Tools; Step-Settings; Step-Binary; Step-Trust; Step-Model; Step-Key; Step-Browsers; Step-Power; Step-Service
         Say '8/8 accounts and projects'
         Step-Accounts; Step-Projects
         if ($DryRun) { Write-Host "`nDry run done: nothing was changed."; break }

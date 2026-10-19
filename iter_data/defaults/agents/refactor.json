@@ -1,0 +1,12 @@
+{
+  "childstate": "queued",
+  "desc": "Refactor agent: behavior-preserving cleanups, verified by tests before and after",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "max_overlap": 3
+  },
+  "max": 1,
+  "model": "fable",
+  "name": "refactor",
+  "timeoutsec": 3600
+}

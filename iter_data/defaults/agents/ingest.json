@@ -1,0 +1,12 @@
+{
+  "childstate": "queued",
+  "desc": "Ingest agent: normalizes external requirements into node files and requirement sections, and migrates projects onto iter",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "max_overlap": 3
+  },
+  "max": 4,
+  "model": "opus",
+  "name": "ingest",
+  "timeoutsec": 7200
+}

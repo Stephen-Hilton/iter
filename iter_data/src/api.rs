@@ -185,6 +185,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::switches::routes())
         .merge(crate::keys::routes())
         .route("/health", get(health))
+        .route("/tls/ca.crt", get(tls_ca))
         .route("/auth/login", post(login))
         .route("/api/widget/validate", post(widget_validate))
         // users
@@ -252,6 +253,14 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 // ---------- misc ----------
+
+/// The local CA browsers are told to trust (public, no sign-in; tls.rs). An
+/// engine installer fetches it over the engine's pinned connection.
+async fn tls_ca(State(st): Ctx) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let pem = st.tls.ca_pem().ok_or_else(notfound)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "application/x-pem-file")], pem).into_response())
+}
 
 async fn health(State(st): Ctx) -> Json<Value> {
     // on arango, "ok" also means the database answered
@@ -421,11 +430,17 @@ async fn users_list(user: AuthUser, State(st): Ctx) -> Result<Json<Value>, ApiEr
     Ok(Json(Value::Array(rows.into_iter().map(redact).collect())))
 }
 
+/// Admins and the user themselves get the whole record (no password hash);
+/// anyone else signed in gets who it is and its role, for the read-only form.
 async fn user_get(user: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
-    if user.role != "admin" && user.sub != name {
+    if user.sub.contains(':') {
+        // an engine session
         return Err(forbidden());
     }
     let row = st.store.get("webui_user", &name, NOSK).await?.ok_or_else(notfound)?;
+    if user.role != "admin" && user.sub != name {
+        return Ok(Json(crate::settings::public_user(&row)));
+    }
     Ok(Json(redact(row)))
 }
 

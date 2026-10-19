@@ -1,0 +1,13 @@
+{
+  "childstate": "queued",
+  "closegate": null,
+  "desc": "GraphRAG Summary agent: writes the retrieval summaries of document chunks, chapters and whole documents (Haiku by default). Runs on the engine outside the agent cap and the queue whenever the heartbeat reply says summaries are waiting; never a work item. Its output is embedded as each chunk's second vector.",
+  "flags": "",
+  "lockshape": {
+    "none": true
+  },
+  "max": 6,
+  "model": "haiku",
+  "name": "summary",
+  "timeoutsec": 300
+}

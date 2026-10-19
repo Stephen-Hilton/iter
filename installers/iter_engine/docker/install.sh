@@ -72,6 +72,11 @@
 # pasted when asked) runs `iter_engine key trust` in the image right after it
 # is built and stops if the server presents another certificate; without one,
 # the first sign-in trusts the certificate it sees (compare: install.sh status).
+# Browsers: iter_data signs its certificate with a local CA of its own (name-
+# constrained to that server); once the key is accepted the engine in the image
+# fetches it (`iter_engine key ca`) and the script trusts it on this host (macOS:
+# the login keychain, asks for your password; Linux: the system store and the
+# browsers' certificate databases), so the webui opens as secure here.
 # Key commands, in <iter dir>/iter_engine/docker: docker compose run --rm --no-deps engine
 # iter_engine key show (the public key) | key rotate (a new key, signed by the
 # current one, no webui step) | key status.
@@ -618,6 +623,126 @@ key() {
   done
 }
 
+# ------------------------------------------------------------------ browsers trust iter_data
+# iter_data (--tls auto) signs its certificate with a local certificate
+# authority of its own, limited by name constraints to that server's names,
+# local DNS suffixes (.local .lan .internal .home.arpa) and loopback / private
+# addresses: it cannot vouch for any public site. The engine runs in the
+# container but the browser runs on this host, so the CA (fetched by the engine
+# in the image over its pinned connection, `iter_engine key ca`) is trusted on
+# the host: macOS = the login keychain, as a root for SSL (macOS asks for your
+# password; Firefox reads it while security.enterprise_roots.enabled is on, the
+# default); Linux = the system store plus the NSS databases Chrome, Chromium
+# and Firefox read; WSL also this Windows user's Trusted Root Certification
+# Authorities (Windows asks to confirm).
+nss_dbs() {
+  local d
+  for d in "$HOME/.pki/nssdb" "$HOME"/snap/chromium/current/.pki/nssdb "$HOME"/.var/app/*/.pki/nssdb \
+           "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/ "$HOME"/.var/app/org.mozilla.firefox/.mozilla/firefox/*/; do
+    [ -f "${d%/}/cert9.db" ] && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+has_browser() {
+  local b
+  for b in google-chrome-stable google-chrome chromium chromium-browser brave brave-browser firefox; do command -v "$b" >/dev/null && return 0; done
+  [ -n "$(nss_dbs)" ]
+}
+# ca_trust_linux FILE: add the CA certificate in FILE to this Linux host's trust stores
+ca_trust_linux() {
+  local ca="$1" cn file dir db n=0
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { warn "$ca is not a certificate"; return 1; }
+  file="iter_data-$(printf '%s' "$cn" | tr -c 'A-Za-z0-9_-' '_' | sed 's/__*/_/g; s/_$//').crt"
+  if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+    run sudo install -m 644 "$ca" "/usr/local/share/ca-certificates/$file" && run sudo update-ca-certificates >/dev/null \
+      && ok "system store: /usr/local/share/ca-certificates/$file"
+  elif command -v update-ca-trust >/dev/null; then
+    dir=/etc/pki/ca-trust/source/anchors; [ -d "$dir" ] || dir=/etc/ca-certificates/trust-source/anchors
+    run sudo install -D -m 644 "$ca" "$dir/$file" && run sudo update-ca-trust extract && ok "system store: $dir/$file"
+  else
+    warn "no update-ca-certificates or update-ca-trust here: the system store is left as it is"
+  fi
+  has_browser || { ok "no browser here: nothing more to trust it"; return 0; }
+  if ! command -v certutil >/dev/null; then
+    if command -v pacman >/dev/null; then run sudo pacman -S --needed --noconfirm nss
+    elif command -v apt-get >/dev/null; then run sudo apt-get install -y -q libnss3-tools
+    elif command -v dnf >/dev/null; then run sudo dnf install -y -q nss-tools; fi
+  fi
+  if [ $DRY = 1 ]; then printf '    [dry-run] certutil -A -t C,, -n "%s" into each browser certificate database\n' "$cn"; return 0; fi
+  command -v certutil >/dev/null || { warn "certutil (NSS tools) missing: browsers here do not trust iter_data yet"; return 1; }
+  # Chrome and Chromium read ~/.pki/nssdb: made now if this user has none yet
+  [ -f "$HOME/.pki/nssdb/cert9.db" ] || { mkdir -p "$HOME/.pki/nssdb" && certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password; }
+  while IFS= read -r db; do
+    certutil -d "sql:$db" -D -n "$cn" >/dev/null 2>&1 || true
+    certutil -d "sql:$db" -A -t "C,," -n "$cn" -i "$ca" && n=$((n + 1))
+  done < <(nss_dbs)
+  ok "browsers: \"$cn\" trusted in $n certificate database(s) (restart the browser)"
+}
+
+# ca_trust_mac FILE: add the CA certificate in FILE to the login keychain as an SSL root
+ca_trust_mac() {
+  local ca="$1" cn
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { warn "$ca is not a certificate"; return 1; }
+  if security verify-cert -c "$ca" -p ssl -L -l >/dev/null 2>&1; then ok "\"$cn\" is trusted already (login keychain)"; return 0; fi
+  if [ $DRY = 1 ]; then printf '    [dry-run] security add-trusted-cert -r trustRoot -p ssl -k %s %s\n' "$HOME/Library/Keychains/login.keychain-db" "$ca"; return 0; fi
+  printf '    macOS now asks for your password to trust "%s" for websites (login keychain)\n' "$cn"
+  security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$ca" \
+    || { warn "the login keychain did not take it (password dialog cancelled, or no screen session: run this in Terminal on the Mac)"; return 1; }
+  ok "login keychain: \"$cn\" trusted for SSL (restart the browser; Firefox: security.enterprise_roots.enabled, on by default)"
+}
+
+# win_trust FILE: add the CA certificate in FILE to the Windows user's root store
+win_trust() {
+  local ca="$1" pwsh=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe b64 script out
+  command -v powershell.exe >/dev/null 2>&1 && pwsh="$(command -v powershell.exe)"
+  if [ ! -x "$pwsh" ]; then
+    [ $DRY = 1 ] && { printf '    [dry-run] trust it in Windows too (powershell.exe is not reachable here)\n'; return 0; }
+    warn "Windows PowerShell is not reachable from this distro: browsers on Windows warn about iter_data's certificate until you open $DATA_URL/tls/ca.crt there and trust it as a certificate authority"; return 1
+  fi
+  if [ $DRY = 1 ]; then printf "    [dry-run] powershell.exe (Windows): add it to Cert:\\CurrentUser\\Root unless its thumbprint is there (Windows asks to confirm)\n"; return 0; fi
+  b64="$(openssl x509 -in "$ca" -outform der | base64 -w0)"
+  script="\$c = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[Convert]::FromBase64String('$b64'))
+if (Test-Path \"Cert:\\CurrentUser\\Root\\\$(\$c.Thumbprint)\") { 'trusted already'; exit 0 }
+\$s = New-Object Security.Cryptography.X509Certificates.X509Store 'Root', 'CurrentUser'
+try { \$s.Open('ReadWrite'); \$s.Add(\$c) } catch { \$_.Exception.Message; exit 2 } finally { \$s.Close() }
+if (Test-Path \"Cert:\\CurrentUser\\Root\\\$(\$c.Thumbprint)\") { 'trusted'; exit 0 } else { 'not added'; exit 2 }"
+  printf '    if Windows asks you to confirm installing a certificate authority "iter_data local CA ...": answer Yes\n'
+  if out="$("$pwsh" -NoProfile -NonInteractive -EncodedCommand "$(printf '%s' "$script" | iconv -f utf-8 -t utf-16le | base64 -w0)" 2>&1 | tr -d '\r')"; then
+    ok "Windows: $(tail -1 <<<"$out") in this user's Trusted Root Certification Authorities (restart the browser)"
+  else
+    warn "Windows did not take it ($(tail -1 <<<"$out")): browsers on Windows warn about iter_data's certificate"; return 1
+  fi
+}
+
+# host_trust FILE: the CA into the trust stores of this host, whichever it is
+host_trust() {
+  command -v openssl >/dev/null || { warn "openssl is missing on this host: cannot read iter_data's CA"; return 1; }
+  case "$(uname -s)" in
+    Darwin) ca_trust_mac "$1" ;;
+    Linux) ca_trust_linux "$1" || return 1
+           if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then win_trust "$1" || true; fi ;;
+    *) warn "$(uname -s): no trust store this script knows; open $DATA_URL/tls/ca.crt in the browser's machine and trust it as a certificate authority"; return 1 ;;
+  esac
+}
+
+browsers() {
+  say "6b/8 browsers on this host trust iter_data"
+  case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http: nothing to trust"; return ;; esac
+  [ $TRUST_CA = 0 ] || { ok "iter_data has a certificate from a public authority: browsers trust it already"; return; }
+  if [ $DRY = 1 ]; then
+    printf '    [dry-run] (in the image) iter_engine key ca --data-url %s, then add it to this host'"'"'s trust stores (%s)\n' "$DATA_URL" "$(uname -s)"
+    return
+  fi
+  if ! in_image iter_engine key ca --data-url "$DATA_URL" > "$WORK/ca.out" 2> "$TMPF"; then
+    warn "$(tail -1 "$TMPF")"; warn "browsers here warn about iter_data's certificate until its CA is trusted (rerun this installer)"; return
+  fi
+  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$WORK/ca.out" > "$WORK/iter_data-ca.crt"
+  [ -s "$WORK/iter_data-ca.crt" ] || { warn "iter_engine key ca printed no certificate: browsers here may still warn about iter_data's certificate"; return; }
+  host_trust "$WORK/iter_data-ca.crt" || warn "browsers here may still warn about iter_data's certificate"
+}
+
 # what to paste and where, and why iter_data refused the last check; printed at
 # every try, so the screen always shows the one line to paste and the reason
 key_help() {
@@ -733,7 +858,7 @@ uninstall() {
 case "$VERB" in
   install)
     docker_ok; say "iter dir: $ITER_DIR (the engine's files: $E)"; make_dirs; check_share; migrate
-    settings; build_files; model; image; trust; key; up
+    settings; build_files; model; image; trust; key; browsers; up
     say "8/8 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }

@@ -1,0 +1,16 @@
+{
+  "childstate": "queued",
+  "desc": "Tests: with an exec_shell the item runs deterministically (no LLM), the 95% case (`iter runtests <test node>`, `iter sweep`); without one, the LLM writes or repairs the scripts of a test node (*.test.iter.md). Renamed from testwriter 2026-09-28.",
+  "flags": "--dangerously-skip-permissions",
+  "lockshape": {
+    "allow": [
+      "{topdir}/**/{test_dir}",
+      "{topdir}/**/test"
+    ],
+    "outside": "warn"
+  },
+  "max": 2,
+  "model": "opus",
+  "name": "test",
+  "timeoutsec": 3600
+}

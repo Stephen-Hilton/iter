@@ -214,7 +214,7 @@ Yes. A work item type is an **agent record**; create one and any item can name i
  "promptbody": "# Agent Definition: notes\n\nYou are the notes agent. …"}
 ```
 
-Agent fields: `desc`, `max` (how many run at once), `timeoutsec`, `model`, `flags` (extra Claude Code flags; the webui's new-agent default is `--dangerously-skip-permissions`), `childstate` (the state of items it creates), `closegate` (how its results are checked), `lockshape` (which folders its items may lock) and `promptbody`. A fresh install has only the `summary` agent; the others come from the iter3 migration or are created this way. An item naming an agent that does not exist fails with "agent '<x>' not defined in iter_data".
+Agent fields: `desc`, `max` (how many run at once), `timeoutsec`, `model`, `flags` (extra Claude Code flags; the webui's new-agent default is `--dangerously-skip-permissions`), `childstate` (the state of items it creates), `closegate` (how its results are checked), `lockshape` (which folders its items may lock) and `promptbody`. A new install starts with the default agents (plan, code, test, usecase, refactor, ingest, explain, summary) and their tooling (`_shared`, `_critic`, the capabilities), added once at iter_data's first start; edit or delete them like any other. A deleted default stays deleted; `iter_data defaults add` on the server brings back any that are missing. An item naming an agent that does not exist fails with "agent '<x>' not defined in iter_data".
 
 ### How do I create a work item?
 

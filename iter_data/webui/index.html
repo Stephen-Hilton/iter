@@ -1682,16 +1682,24 @@ const AGENT_FIELDS=[
   {key:"lockshape",label:"lock shape",type:"json",rows:5,help:'what an item of this agent may lock, checked on create and on every lockdirs edit: {"allow":["{topdir}/devops/plan"],"outside":"refuse","max_overlap":0,"none":false} — allow patterns (* one segment, ** any, {test_dir}); outside: refuse | warn; max_overlap warns past N open items; none = takes no lock. Blank = anything goes'},
   {key:"promptbody",label:"prompt body",type:"textarea",rows:18,help:"the agent's full role prompt; project description + workitem request are appended at run time"},
 ];
-const userFields=(self,own)=>[
+/* the one user form (gear and settings graph): mode admin = every field; self =
+   your profile (role and project access are an admin's); view = someone else's
+   name and role, read only */
+const userFields=(mode,own)=>{
+  if(mode==="view")return [
+    {key:"user",label:"id",type:"readonly"},{key:"name",type:"readonly"},{key:"role",type:"readonly"}];
+  const self=mode==="self";
+  return [
   {key:"user",label:"id",type:"readonly",help:"the stable id — sign-in tokens carry it; it never changes"},{key:"name",type:"text",help:"the display name — you can also sign in with it"},
   self?{key:"role",type:"readonly"}:{key:"role",type:"select",options:["user","viewer","admin"]},
   {key:"email",type:"text"},
+  {key:"timezone",type:"select",options:TZ_CHOICES.map(([v])=>v),default:"",help:"times in the webui are shown in this zone (blank = the browser's)"},
   ...(own?[]:[{key:"password",type:"password",help:"set a new password for them (12+ characters; blank keeps theirs): they must change it at their next sign-in, and their sessions end"}]),
   {key:"css",label:"custom css url",type:"text"},
   {key:"settings",type:"json",rows:3,emptyValue:{}},
   self?{key:"authz",type:"readonly",help:"per-project access (admin sets this)"}:{key:"authz",type:"json",rows:3,emptyValue:{},help:'{"pdy-dev":"admin","other":"readonly"}'},
-  ...(self?[]:[{key:"tokenver",label:"token version",type:"number",help:"bump to revoke every outstanding token for this user"},{key:"pubkey",label:"approval pubkey",type:"text"}]),
-];
+  ...(self?[]:[{key:"must_change_password",label:"must change password",type:"readonly",help:"set when an admin gives them a password; cleared when they choose their own"},{key:"tokenver",label:"token version",type:"number",help:"bump to revoke every outstanding token for this user"},{key:"pubkey",label:"approval pubkey",type:"text"}]),
+];};
 
 async function openSettings(kind,name){
   try{
@@ -1775,6 +1783,7 @@ async function engineSettings(name){
 }
 async function userSettings(name){
   const self=name===me;
+  const mode=isAdmin()?"admin":self?"self":"view";
   const rec=await api("/api/users/"+encodeURIComponent(name));
   let extra="";
   if(isAdmin()){
@@ -1787,12 +1796,18 @@ async function userSettings(name){
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="mp-cur" type="password" placeholder="current password" autocomplete="current-password" style="width:150px">
       <input id="mp-new" type="password" placeholder="new (12+ characters)" autocomplete="new-password" style="width:170px"><input id="mp-new2" type="password" placeholder="new again" autocomplete="new-password" style="width:130px">
       <button class="sm" id="mp-go">change password</button></div><div class="help">Every other session signed in as you ends.</div><div class="kv" id="mp-note"></div>`+extra;
-  settingsBox(self?`My settings — ${rname(rec)}`:`User — ${rname(rec)}`,userFields(self&&!isAdmin(),self),rec,async(vals)=>{
+  extra=`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="user:${esc(name)}">${self?"Me":"This user"} in the settings graph ↗</button></div>`+extra;
+  const note=mode==="self"?"your profile and password; role and project access are set by an admin":mode==="view"?"another person's name and role; they and the admins see the rest":"";
+  settingsBox(self?`My settings — ${rname(rec)}`:`User — ${rname(rec)}`,userFields(mode,self),rec,async(vals)=>{
     const fresh=await api("/api/users/"+encodeURIComponent(name));
     Object.assign(fresh,vals);
+    delete fresh.must_change_password;
     await api("/api/users/"+encodeURIComponent(name),{method:"PUT",body:JSON.stringify(fresh)});
+    if(self&&"timezone" in vals)setTz(vals.timezone||"");
     sdlg.close();
-  },{extra,note:self?"your profile and password; role and project access are set by an admin":""});
+    if(tab==="settings")showSettings().catch(()=>{});
+  },{extra,note,canSave:mode!=="view"});
+  sdlg.querySelectorAll("[data-sgopen]").forEach(b=>b.onclick=()=>{sdlg.close();openSettingsGraph(b.dataset.sgopen);});
   sdlg.querySelectorAll("[data-user]").forEach(b=>b.onclick=()=>openSettings("user",b.dataset.user));
   const mp=sdlg.querySelector("#mp-go");
   if(mp)mp.onclick=async()=>{
@@ -1823,9 +1838,10 @@ async function keysScreen(note){
   const fp=f=>f?`sha256:${esc(f)}`:"";
   const tlsBox=tls.mode==="off"||!tls.mode
     ?`<div class="kv" id="k-tls">This server speaks plain HTTP (<code>--tls off</code>): fine on one machine or behind a TLS proxy, never across a network.</div>`
-    :`<div class="kv" id="k-tls">Engines reach this server over HTTPS and trust exactly this certificate (${tls.mode==="auto"?"self-signed, made by iter_data":"the one given with --tls-cert"}):
+    :`<div class="kv" id="k-tls">Engines reach this server over HTTPS and trust exactly this certificate (${tls.mode==="auto"?"made by iter_data":"the one given with --tls-cert"}):
         <div class="kid" style="margin:4px 0;word-break:break-all"><b>${fp(tls.fingerprint)}</b></div>
         An engine pins it at its first signed sign-in; compare it with <code>iter_engine key status</code> on the machine, or give it up front with <code>iter_engine key trust --fingerprint …</code>.
+        ${tls.mode==="auto"?`<div style="margin-top:6px">Browsers: the certificate is signed by this server's own certificate authority, which can vouch only for this server (its names, local names and private addresses). The installers add it to each machine they install on, so the webui opens as secure there; on any other machine, <a href="/tls/ca.crt" download="iter_data-ca.crt">download the CA certificate</a> and add it to that machine's trusted certificate authorities.${tls.ca_fingerprint?` <span class="kv">(CA sha256:${esc(tls.ca_fingerprint)})</span>`:""}</div>`:""}
         ${tls.next_fingerprint?`<div style="margin-top:6px">Next certificate, announced to engines since ${esc(fmtTs(tls.next_created))} ${esc(tzAbbrev())} (each picks it up at its next sign-in, within 12 hours): <span class="kid" style="word-break:break-all">${fp(tls.next_fingerprint)}</span></div>`:""}
         ${tls.rotatable?`<div style="margin-top:6px">${tls.next_fingerprint?`<button class="ghost sm" id="k-tls-promote">switch to the next certificate</button> `:""}<button class="ghost sm" id="k-tls-next">${tls.next_fingerprint?"make another next certificate":"prepare a new certificate"}</button></div>`:""}
       </div>`;
@@ -2171,7 +2187,7 @@ async function setTab(t){
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 async function showSettings(){
   if(!window.IterSettings){$("#tab-settings").innerHTML="<div id='g-loading'>settings.js did not load</div>";return;}
-  const ctx={api,isAdmin:isAdmin(),myRole,openProject:async name=>{if((projectsCache||[]).some(p=>rid(p)===name)){await loadItems(name);graphDrawnFor=null;await setTab("graph");}},
+  const ctx={api,isAdmin:isAdmin(),myRole,me,openUser:id=>openSettings("user",id),openProject:async name=>{if((projectsCache||[]).some(p=>rid(p)===name)){await loadItems(name);graphDrawnFor=null;await setTab("graph");}},
     onChange:()=>{load().catch(()=>{});}};
   if(!settingsMounted){settingsMounted=true;await IterSettings.mount($("#tab-settings"),ctx);}else await IterSettings.show(ctx);
 }

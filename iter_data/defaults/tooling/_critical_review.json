@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: request a critical review (`iter critreview`)",
+  "kind": "capability",
+  "name": "_critical_review"
+}

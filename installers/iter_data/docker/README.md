@@ -1,6 +1,6 @@
 # iter_data in Docker
 
-One container with ArangoDB Community Edition 3.12 and iter_data. The API and webui are on `https://<host>:8400` (HTTPS with a self-signed certificate, see below), and the Arango web console is on `127.0.0.1:8630` (never published beyond localhost). Everything the install makes is in one host folder, `<iter dir>/iter_data` (`/opt/iter/iter_data` by default, `~/iter/iter_data` under Docker Desktop), mounted into the container at `/var/lib/iter_data`:
+One container with ArangoDB Community Edition 3.12 and iter_data. The API and webui are on `https://<host>:8400` (HTTPS with a certificate signed by iter_data's own local CA, see below), and the Arango web console is on `127.0.0.1:8630` (never published beyond localhost). Everything the install makes is in one host folder, `<iter dir>/iter_data` (`/opt/iter/iter_data` by default, `~/iter/iter_data` under Docker Desktop), mounted into the container at `/var/lib/iter_data`:
 
 | Path | What |
 |---|---|
@@ -54,9 +54,9 @@ The script checks Docker and gets the binary: `--binary PATH`, else the one in t
 | `--name NAME` | `iter5` | container, compose project and image name; another name keeps its files in `<iter dir>/iter_data_<name>` |
 | `--model-dir DIR` | | copy an existing all-MiniLM-L6-v2 folder instead of downloading it |
 | `--memory SIZE` | `6g` | container memory cap; ArangoDB is sized 1G below it |
-| `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of the self-signed one |
-| `--tls-name NAME` | | another DNS name or IP on the self-signed certificate (repeatable) |
-| `--tls off\|auto` | `auto` | `off` = plain HTTP behind a TLS proxy; `auto` = self-signed again |
+| `--tls-cert PATH` `--tls-key PATH` | | serve this certificate (PEM) instead of iter_data's own |
+| `--tls-name NAME` | | another DNS name or IP on iter_data's own certificate (repeatable) |
+| `--tls off\|auto` | `auto` | `off` = plain HTTP behind a TLS proxy; `auto` = iter_data's own certificate again |
 | `--arango-url URL` | `local` | use an existing ArangoDB at `URL` instead of the container's own (also read from `ARANGO_URL`); `local` switches back |
 | `--arango-fingerprint FP` | | pin that ArangoDB's certificate, `sha256:<64 hex>` (comma-separated during a rotation) |
 | `--arango-ca-cert PATH` | | trust this CA (PEM) for that ArangoDB's certificate; copied to `config/arango-ca.crt` |
@@ -76,17 +76,17 @@ To compile the binary yourself, clone the repo and run `cargo build --release -p
 
 ## HTTPS and the certificate fingerprint
 
-iter_data serves HTTPS on `:8400`. On its first start it makes a self-signed certificate, `tls.crt` + `tls.key` (mode 600), in `state/` beside its secrets, and keeps it across reinstalls and upgrades. The engine-session signing secret, `engine_session.secret`, lives there too. The script makes the data folder owner-only.
+iter_data serves HTTPS on `:8400`. On its first start it makes a local certificate authority (`tls-ca.crt` + `tls-ca.key`) and a certificate signed by it (`tls.crt` + `tls.key`, keys mode 600) in `state/` beside its secrets, and keeps it across reinstalls and upgrades. The engine-session signing secret, `engine_session.secret`, lives there too. The script makes the data folder owner-only.
 
 After a successful install the script prints the certificate's **fingerprint** (`sha256:` + 64 hex: the SHA-256 of the certificate, the same as `openssl x509 -in tls.crt -noout -fingerprint -sha256` without the colons). Engines pin it. Give it to each engine installer (`--fingerprint sha256:…`, or `-Fingerprint` on Windows), or let the engine trust it at its first sign-in and compare it afterwards with `iter_engine key status`. It is also in the webui's 🔑 Engine keys screen, and in the container log: `docker logs iter5 2>&1 | grep fingerprint`.
 
-Browsers warn about a self-signed certificate. Accept it once, or:
+**Browsers.** The CA is name-constrained to this server's names (with every `--tls-name`), `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. iter_data serves it, without sign-in, at `https://<host>:<port>/tls/ca.crt`. The script copies it out of the container and trusts it on this host: on macOS in the login keychain as a root for SSL (macOS asks for your password; Firefox reads it while `security.enterprise_roots.enabled` is on, the default), on Linux in the system store and the desktop user's NSS databases (Chrome, Chromium, Firefox). The webui then opens as secure here after a browser restart. On another machine the engine installer does the same; without an engine there, open `https://<this host>:8400/tls/ca.crt` and trust it as a certificate authority. Other choices:
 
 - `--tls-cert PATH --tls-key PATH`: serve a certificate of your own (a real one for your domain). The script copies both to `config/custom-tls.crt` and `config/custom-tls.key` (key mode 600). The fingerprint changes, so engines that pinned the old one need `iter_engine key trust --data-url URL --fingerprint …` again, or `--ca` for a certificate from a public authority.
 - `--tls off`: plain HTTP, only for iter_data behind a TLS proxy on this host (Caddy, nginx, a load balancer). Engines refuse `http://` to anything but 127.0.0.1 / localhost / ::1, so they must reach it through the proxy's `https://` URL, with `iter_engine key trust --ca` when the proxy has a real certificate.
-- `--tls-name NAME` (repeatable): put another DNS name or IP on the self-signed certificate, such as the name browsers use. Names are read only when the certificate is first made; engines pin the fingerprint and do not check names.
+- `--tls-name NAME` (repeatable): put another DNS name or IP on iter_data's own certificate (and its CA's name constraints), such as the name browsers use. Names are read only when the certificate is first made; engines pin the fingerprint and do not check names.
 
-The script remembers these choices in `config/data.env` (`ITER_TLS=off`, `ITER_TLS_CERT`/`ITER_TLS_KEY`, `ITER_TLS_NAMES`), so a plain rerun keeps them. `--tls auto` goes back to the self-signed certificate. The container's health check uses `curl -fsSk https://127.0.0.1:8400/health` (and plain http when TLS is off).
+The script remembers these choices in `config/data.env` (`ITER_TLS=off`, `ITER_TLS_CERT`/`ITER_TLS_KEY`, `ITER_TLS_NAMES`), so a plain rerun keeps them. `--tls auto` goes back to iter_data's own certificate. The container's health check uses `curl -fsSk https://127.0.0.1:8400/health` (and plain http when TLS is off).
 
 ## ArangoDB: iter's own user and database
 

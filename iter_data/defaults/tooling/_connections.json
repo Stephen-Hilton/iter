@@ -1,0 +1,5 @@
+{
+  "desc": "Capability: connections between parts (`level: connection` code nodes; replaces interfaces)",
+  "kind": "capability",
+  "name": "_connections"
+}

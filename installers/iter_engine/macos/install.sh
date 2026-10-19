@@ -51,7 +51,8 @@
 # (the asset next to this script, else the GitHub Release, sha256-checked;
 # linked as /usr/local/bin/iter_engine) -> the embedding model into models/ ->
 # the engine key (`iter_engine key new`: paste its public key into the webui's
-# Engine keys screen; the script waits until iter_data accepts it) -> a laptop:
+# Engine keys screen; the script waits until iter_data accepts it) -> iter_data's
+# local CA into the login keychain (browsers here trust the webui) -> a laptop:
 # keep awake on power while the engine runs (asks) -> the launchd agent ->
 # account tokens and project checkouts.
 #
@@ -71,6 +72,11 @@
 # asked) runs `iter_engine key trust` right after the binary is installed and
 # stops if the server presents another certificate; without one, the first
 # sign-in trusts the certificate it sees (compare: iter_engine key status).
+# Browsers: iter_data signs its certificate with a local CA of its own (name-
+# constrained to that server); once the key is accepted the CA is fetched over
+# the pinned connection (`iter_engine key ca`) and added to your login keychain
+# as trusted for SSL (macOS asks for your password once), so Safari and Chrome
+# open the webui as secure.
 # Other key commands: `iter_engine key show` (print the public key),
 # `iter_engine key rotate` (a new key, signed by the current one, no webui step).
 set -euo pipefail
@@ -633,6 +639,40 @@ key() {
   done
 }
 
+# --------------------------------------------------------- browsers trust iter_data
+# iter_data (--tls auto) signs its certificate with a local certificate
+# authority of its own, limited by name constraints to that server's names,
+# local DNS suffixes (.local .lan .internal .home.arpa) and loopback / private
+# addresses: it cannot vouch for any public site. Trusting that CA in the login
+# keychain (trusted root, SSL only) makes Safari, Chrome and Edge on this Mac
+# show the webui as secure. Firefox uses it too while its
+# security.enterprise_roots.enabled is on (the default in current Firefox).
+# The CA comes over the engine's pinned connection (`iter_engine key ca`).
+LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
+# ca_trust FILE: add the CA certificate in FILE to the login keychain as an SSL root
+ca_trust() {
+  local ca="$1" cn
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { warn "$ca is not a certificate"; return 1; }
+  if security verify-cert -c "$ca" -p ssl -L -l >/dev/null 2>&1; then ok "\"$cn\" is trusted already (login keychain)"; return 0; fi
+  if [ $DRY = 1 ]; then printf '    [dry-run] security add-trusted-cert -r trustRoot -p ssl -k %s %s\n' "$LOGIN_KC" "$ca"; return 0; fi
+  printf '    macOS now asks for your password to trust "%s" for websites (login keychain)\n' "$cn"
+  security add-trusted-cert -r trustRoot -p ssl -k "$LOGIN_KC" "$ca" \
+    || { warn "the login keychain did not take it (password dialog cancelled, or no screen session: run this in Terminal on the Mac)"; return 1; }
+  ok "login keychain: \"$cn\" trusted for SSL (restart the browser; Firefox: security.enterprise_roots.enabled, on by default)"
+}
+
+browsers() {
+  say "6b/9 browsers here trust iter_data"
+  case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http: nothing to trust"; return ;; esac
+  [ $TRUST_CA = 0 ] || { ok "iter_data has a certificate from a public authority: browsers trust it already"; return; }
+  if [ $DRY = 1 ]; then printf '    [dry-run] %s key ca --data-url %s, then add it to the login keychain as trusted for SSL (macOS asks for your password)\n' "$BIN" "$DATA_URL"; return; fi
+  if ! "$BIN" key ca --data-url "$DATA_URL" --out "$WORK/iter_data-ca.crt" > "$TMPF" 2>&1; then
+    warn "$(tail -1 "$TMPF")"; warn "browsers here warn about iter_data's certificate until its CA is trusted (rerun this installer)"; return
+  fi
+  ca_trust "$WORK/iter_data-ca.crt" || warn "browsers here may still warn about iter_data's certificate"
+}
+
 # what to paste and where, and why iter_data refused the last check; printed at
 # every try, so the screen always shows the one line to paste and the reason
 key_help() {
@@ -854,7 +894,7 @@ uninstall() {
 
 case "$VERB" in
   install)
-    place; tools; claude_cli; settings; binary; trust; model; key; power; agent
+    place; tools; claude_cli; settings; binary; trust; model; key; browsers; power; agent
     say "9/9 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }

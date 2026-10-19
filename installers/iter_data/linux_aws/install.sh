@@ -61,8 +61,11 @@
 # not on the root filesystem, which systemd reads before other disks are mounted).
 # An install from before 2026-10-18 (/opt/iter/bin, /etc/iter, /var/lib/iter,
 # /var/lib/arangodb3, /usr/sbin/arangod) is moved into the iter dir by the next run.
-# HTTPS by default: iter_data makes a self-signed certificate on first start
-# (D/state/tls.crt, kept across reinstalls); the script prints its fingerprint,
+# HTTPS by default: iter_data makes a local CA and a certificate signed by it on first
+# start (D/state/tls-ca.crt, tls.crt, kept across reinstalls); the CA is added to this
+# host's system store. Browsers elsewhere trust it once an engine is installed on their
+# machine, or by opening https://<host>:<port>/tls/ca.crt and trusting it as a CA.
+# The script prints the certificate's fingerprint,
 # to give to each engine installer (--fingerprint) or compare with `iter_engine key
 # status`. The TLS choices are kept in D/config/tls.env, so a plain rerun keeps them.
 # Logs: journalctl -u iter-data -u arangodb3. Run as ec2-user (sudo) or root. Needs
@@ -539,8 +542,8 @@ setup_iter_user() {
 }
 
 # ---------------------------------------------------------------- TLS
-# iter_data serves HTTPS (--tls auto): a self-signed certificate it makes on first start
-# beside its secret file (state/tls.crt + tls.key, user iter, 600), kept across
+# iter_data serves HTTPS (--tls auto): a certificate signed by a local CA it makes on first
+# start beside its secret file (state/tls-ca.crt, tls.crt + their keys, user iter), kept across
 # reinstalls like iter_data.secret and engine_session.secret. The choice made here is
 # kept in config/tls.env, so a rerun without TLS options leaves it as it was.
 CUSTOM_CRT="$STATE/custom-tls.crt"
@@ -571,7 +574,7 @@ tls_setup() {
        local n
        for n in ${names//,/ }; do TLS_ARGS="$TLS_ARGS --tls-name $n"; done
        TLS_ARGS="${TLS_ARGS# }"
-       say "TLS: a self-signed certificate (made on first start, kept in $STATE)${names:+, extra names $names}" ;;
+       say "TLS: iter_data's own certificate, signed by its local CA (made on first start, kept in $STATE)${names:+, extra names $names}" ;;
   esac
   [ -z "$TLS_ARGS" ] || say "TLS: iter-data runs with $TLS_ARGS"
   SCHEME=https; [ "$TLS_MODE" != off ] || SCHEME=http
@@ -644,7 +647,7 @@ start_services() {
 }
 
 wait_health() {
-  if [ "$DRY" = 1 ]; then echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is self-signed)')"; return; fi
+  if [ "$DRY" = 1 ]; then echo "  + wait for $SCHEME://127.0.0.1:$PORT/health to answer {\"ok\":true}$([ "$SCHEME" = http ] || echo ' (curl -k: the certificate is not checked here)')"; return; fi
   local h
   for _ in $(seq 1 180); do
     if h="$(curl -fsSk "$SCHEME://127.0.0.1:$PORT/health" 2>/dev/null)" && grep -q '"ok":true' <<<"$h"; then say "iter_data up: $h"; return 0; fi
@@ -652,6 +655,37 @@ wait_health() {
   done
   $SUDO journalctl -u iter-data -u arangodb3 --no-pager -n 30 || true
   die "iter_data did not answer on :$PORT within 3 minutes"
+}
+
+# ---------------------------------------------------------------- this host trusts iter_data
+# --tls auto: iter_data signs its certificate with a local certificate authority
+# of its own (D/state/tls-ca.crt), limited by name constraints to this server's
+# names (with every --tls-name), local DNS suffixes (.local .lan .internal
+# .home.arpa) and loopback / private addresses: it cannot vouch for any public
+# site. This instance is headless, so the CA only goes into the system store
+# (curl and other programs here). Browsers run on other machines: the engine
+# installer adds it there; without one, open https://<this host>:<port>/tls/ca.crt
+# and trust it as a certificate authority.
+host_trust() {
+  [ "$TLS_MODE" = auto ] || return 0
+  local ca cn file dir=/etc/pki/ca-trust/source/anchors
+  say "this host: trusting iter_data's local certificate authority ($STATE/tls-ca.crt)"
+  [ "$DRY" = 0 ] || { echo "  + add $STATE/tls-ca.crt to the system store ($dir, update-ca-trust extract)"; return 0; }
+  $SUDO test -f "$STATE/tls-ca.crt" || { say "  no $STATE/tls-ca.crt (an iter_data older than v2026.10.19): its certificate is self-signed"; return 0; }
+  ca="$(tmpdir)/iter_data-ca.crt"; $SUDO cat "$STATE/tls-ca.crt" > "$ca"; chmod 644 "$ca"; chmod 755 "$(dirname "$ca")" "$TMPROOT"
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { say "  WARNING: $STATE/tls-ca.crt is not a certificate"; return 0; }
+  file="iter_data-$(printf '%s' "$cn" | tr -c 'A-Za-z0-9_-' '_' | sed 's/__*/_/g; s/_$//').crt"
+  if command -v update-ca-trust >/dev/null; then
+    [ -d "$dir" ] || dir=/etc/ca-certificates/trust-source/anchors
+    run $SUDO install -D -m 644 "$ca" "$dir/$file"; run $SUDO update-ca-trust extract
+    say "  system store: $dir/$file"
+  elif [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+    run $SUDO install -m 644 "$ca" "/usr/local/share/ca-certificates/$file"; run $SUDO update-ca-certificates >/dev/null
+    say "  system store: /usr/local/share/ca-certificates/$file"
+  else
+    say "  no update-ca-trust or update-ca-certificates: the system store is left as it is"
+  fi
 }
 
 # ---------------------------------------------------------------- moving an older install
@@ -774,6 +808,7 @@ do_install() {
   install_units
   start_services
   wait_health
+  host_trust
   [ "$DRY" = 1 ] && { say "dry run done"; return; }
   # || true: Arch has no hostname command without inetutils
   local ip; ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -806,8 +841,10 @@ tls_report() {
   say "TLS certificate fingerprint: ${fp:-(not found: journalctl -u iter-data | grep fingerprint)}"
   say "  give it to each engine installer (--fingerprint ${fp:-sha256:...}), or compare it with \`iter_engine key status\` on the engine"
   say "  (also in the webui's Engine keys screen, and: $0 status)"
-  [ "$TLS_MODE" = custom ] || say "  browsers warn about this self-signed certificate: accept it once, or rerun with --tls-cert/--tls-key (or put a TLS proxy in front)"
-    [ -n "$TLS_NAMES" ] || say "  (engines pin the fingerprint, so names do not matter to them; for browsers, rerun with --tls-name <public DNS or Elastic IP> before the first start, or use --tls-cert)"
+  [ "$TLS_MODE" = custom ] && return
+  say "  browsers on other machines trust it once an engine is installed there (its installer adds iter_data's local CA),"
+  say "  or open $SCHEME://<this host>:$PORT/tls/ca.crt and trust it as a certificate authority"
+  [ -n "$TLS_NAMES" ] || say "  (engines pin the fingerprint, so names do not matter to them; for browsers, rerun with --tls-name <public DNS or Elastic IP> before the first start, or use --tls-cert)"
 }
 
 do_status() {

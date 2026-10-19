@@ -66,6 +66,10 @@
 # asked) runs `iter_engine key trust` right after the binary is installed and
 # stops if the server presents another certificate; without one, the first
 # sign-in trusts the certificate it sees (compare: iter_engine key status).
+# Browsers: iter_data signs its certificate with a local CA of its own (name-
+# constrained to that server); once the key is accepted the CA is fetched over
+# the pinned connection (`iter_engine key ca`) and added to this machine's
+# system store and browser certificate databases, so the webui opens as secure.
 # Other key commands: `iter_engine key show` (print the public key),
 # `iter_engine key rotate` (a new key, signed by the current one, no webui step).
 set -euo pipefail
@@ -600,7 +604,7 @@ register_local() {
     ok "iter_data on this machine: $(printf '%s\n' "$out" | grep -v '^\[iter_data\]' | tail -1)"
   else
     printf '%s\n' "$out" | grep -v '^\[iter_data\]' | tail -3 | sed 's/^/    /'
-    warn "could not register the key with iter_data on this machine (an older iter_data, without `iter_data engine-key add`?): add it in the webui"
+    warn "could not register the key with iter_data on this machine (an older iter_data, without iter_data engine-key add?): add it in the webui"
     return 1
   fi
 }
@@ -627,6 +631,71 @@ trust() {
   fi
   run "$BIN" key trust --data-url "$DATA_URL" --fingerprint "$fp" \
     || die "$DATA_URL does not present the certificate $fp: something else answers at that URL (or the fingerprint is mistyped). Nothing was trusted; check the URL and the fingerprint (iter_data installer output, webui Engine keys screen)"
+}
+
+# ------------------------------------------------------------------ browsers trust iter_data
+# iter_data (--tls auto) signs its certificate with a local certificate
+# authority of its own, limited by name constraints to that server's names,
+# local DNS suffixes (.local .lan .internal .home.arpa) and loopback / private
+# addresses: it cannot vouch for any public site. Trusting that CA here makes a
+# browser on this machine show the webui as secure. It goes into the system
+# store (curl and most programs) and the NSS databases Chrome, Chromium and
+# Firefox read (~/.pki/nssdb, snap and flatpak copies, Firefox profiles).
+# The CA comes over the engine's pinned connection (`iter_engine key ca`).
+nss_dbs() {
+  local d
+  for d in "$HOME/.pki/nssdb" "$HOME"/snap/chromium/current/.pki/nssdb "$HOME"/.var/app/*/.pki/nssdb \
+           "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/ "$HOME"/.var/app/org.mozilla.firefox/.mozilla/firefox/*/; do
+    [ -f "${d%/}/cert9.db" ] && printf '%s\n' "${d%/}"
+  done
+  return 0
+}
+has_browser() {
+  local b
+  for b in google-chrome-stable google-chrome chromium chromium-browser brave brave-browser firefox; do command -v "$b" >/dev/null && return 0; done
+  [ -n "$(nss_dbs)" ]
+}
+# ca_trust FILE: add the CA certificate in FILE to this machine's trust stores
+ca_trust() {
+  local ca="$1" cn file dir db n=0
+  cn="$(openssl x509 -in "$ca" -noout -subject -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')"
+  [ -n "$cn" ] || { warn "$ca is not a certificate"; return 1; }
+  file="iter_data-$(printf '%s' "$cn" | tr -c 'A-Za-z0-9_-' '_' | sed 's/__*/_/g; s/_$//').crt"
+  if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
+    run sudo install -m 644 "$ca" "/usr/local/share/ca-certificates/$file" && run sudo update-ca-certificates >/dev/null \
+      && ok "system store: /usr/local/share/ca-certificates/$file"
+  elif command -v update-ca-trust >/dev/null; then
+    dir=/etc/pki/ca-trust/source/anchors; [ -d "$dir" ] || dir=/etc/ca-certificates/trust-source/anchors
+    run sudo install -D -m 644 "$ca" "$dir/$file" && run sudo update-ca-trust extract && ok "system store: $dir/$file"
+  else
+    warn "no update-ca-certificates or update-ca-trust here: the system store is left as it is"
+  fi
+  has_browser || { ok "no browser here: nothing more to trust it"; return 0; }
+  if ! command -v certutil >/dev/null; then
+    if command -v pacman >/dev/null; then run sudo pacman -S --needed --noconfirm nss
+    elif command -v apt-get >/dev/null; then run sudo apt-get install -y -q libnss3-tools
+    elif command -v dnf >/dev/null; then run sudo dnf install -y -q nss-tools; fi
+  fi
+  if [ $DRY = 1 ]; then printf '    [dry-run] certutil -A -t C,, -n "%s" into each browser certificate database\n' "$cn"; return 0; fi
+  command -v certutil >/dev/null || { warn "certutil (NSS tools) missing: browsers here do not trust iter_data yet"; return 1; }
+  # Chrome and Chromium read ~/.pki/nssdb: made now if this user has none yet
+  [ -f "$HOME/.pki/nssdb/cert9.db" ] || { mkdir -p "$HOME/.pki/nssdb" && certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password; }
+  while IFS= read -r db; do
+    certutil -d "sql:$db" -D -n "$cn" >/dev/null 2>&1 || true
+    certutil -d "sql:$db" -A -t "C,," -n "$cn" -i "$ca" && n=$((n + 1))
+  done < <(nss_dbs)
+  ok "browsers: \"$cn\" trusted in $n certificate database(s) (restart the browser)"
+}
+
+browsers() {
+  say "6b/9 browsers here trust iter_data"
+  case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http: nothing to trust"; return ;; esac
+  [ $TRUST_CA = 0 ] || { ok "iter_data has a certificate from a public authority: browsers trust it already"; return; }
+  if [ $DRY = 1 ]; then printf '    [dry-run] %s key ca --data-url %s, then add it to the system store and the browsers\n' "$BIN" "$DATA_URL"; return; fi
+  if ! "$BIN" key ca --data-url "$DATA_URL" --out "$WORK/iter_data-ca.crt" > "$TMPF" 2>&1; then
+    warn "$(tail -1 "$TMPF")"; warn "browsers here warn about iter_data's certificate until its CA is trusted (rerun this installer)"; return
+  fi
+  ca_trust "$WORK/iter_data-ca.crt" || warn "browsers here may still warn about iter_data's certificate"
 }
 
 # the embedding model (sentence-transformers/all-MiniLM-L6-v2, Apache-2.0,
@@ -978,7 +1047,7 @@ uninstall() {
 
 case "$VERB" in
   install)
-    place; packages; claude_cli; settings; binary; trust; model; key; power; desktop; service
+    place; packages; claude_cli; settings; binary; trust; model; key; browsers; power; desktop; service
     say "9/9 accounts and projects"
     accounts; projects
     [ $DRY = 0 ] || { printf '\nDry run done: nothing was changed.\n'; exit 0; }
