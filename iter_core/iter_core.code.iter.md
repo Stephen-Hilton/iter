@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/iter_core/src/model.code.iter.md", "{topdir}/iter_core/src/nodefile/nodefile.code.iter.md", "{topdir}/iter_core/src/settings.code.iter.md", "{topdir}/iter_core/src/testresult.code.iter.md", "{topdir}/iter_core/src/waits.code.iter.md", "{topdir}/iter_core/src/sched.code.iter.md", "{topdir}/iter_core/src/dedupkeys.code.iter.md", "{topdir}/iter_core/src/cluster.code.iter.md", "{topdir}/iter_core/src/widget.code.iter.md", "{topdir}/iter_core/src/rag/rag.code.iter.md"]
   tests:     ["{topdir}/test/iter_core/*.test.iter.md"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 
 # iter_core — shared rules and node-file library
@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00
 
 The shared rulebook and file format both the server and the engines are built with.
 
-iter_core is a Rust library that defines iter5's records and decides questions about them. It performs no input or output: it never opens a file, a socket or a database. Given records, text and a time, it returns an answer.
+iter_core is a Rust library that defines iter's records and decides questions about them. It performs no input or output: it never opens a file, a socket or a database. Given records, text and a time, it returns an answer.
 
 ## What is in it
 
@@ -44,4 +44,4 @@ The server and the engines run on different machines and are deployed separately
 
 The engine conforms an edited `lib.code.iter.md` and syncs it; the server parses the same text with the same `nodefile::parse`, derives the same edges with `edges_of`, and when a person later edits the node in the graph, `render` produces exactly the text `conform` would — so the file the engine writes back never ping-pongs.
 
-Built and tested as the cargo package `iter_core` in the iter5 workspace (`cargo test -p iter_core` from the repo root; test node `test/iter_core.test.iter.md`).
+Built and tested as the cargo package `iter_core` in the iter workspace (`cargo test -p iter_core` from the repo root; test node `test/iter_core.test.iter.md`).

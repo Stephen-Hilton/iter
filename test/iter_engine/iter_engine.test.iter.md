@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/cargo_test.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # iter_engine — unit tests
@@ -18,7 +18,7 @@ One script, `cargo_test.sh`, runs the crate's whole `cargo test` through `test/c
 
 ## What it covers
 
-The engine side of iter5 without a live server: file sync against fake replies (`filesync_tests.rs`), the assignments → per-project accounts view, provider dispatch through the `mock` provider (directives, usage from `ITER_MOCK_USAGE`), the close gate's verdict parsing and question widgets, dedup triage, schedules firing, prompt and context assembly, and the `iter` CLI verbs.
+The engine side of iter without a live server: file sync against fake replies (`filesync_tests.rs`), the assignments → per-project accounts view, provider dispatch through the `mock` provider (directives, usage from `ITER_MOCK_USAGE`), the close gate's verdict parsing and question widgets, dedup triage, schedules firing, prompt and context assembly, and the `iter` CLI verbs.
 
 The checkout helpers in `src/local/` (the former iter_local crate) are covered here too: the checkout walk (git-ignore aware, skips `.git`, `target`, `node_modules`), `iter validate` (conform-check, duplicate ids) and the test runner (`runtests.rs`: a test node's `children.tests` scripts run under bash in the node's directory with `ITER_TEST_NODE_ID` / `ITER_TEST_NODE_NAME` / `ITER_TEST_OUT` set, one wall-clock budget per node, the last-line JSON or legacy `ITER_RESULT` parsed and aggregated).
 

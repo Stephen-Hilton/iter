@@ -1,7 +1,7 @@
 ---
 id: c0f3cd16-cbb8-448d-9e35-dc58a31ed0a7
 name: "iter_data unit tests"
-desc: "Runs cargo test -p iter_data against the dev ArangoDB on 127.0.0.1:8529 (throwaway iter5_test_* databases) — project graph node CRUD and edges, file sync with conflicts, pending writes and acks, designer build, settings graph CRUD and placeholders, server-side get_next ordering, locks and authz, engine-token authz, test results and logs, MCP tools — and reports one standard result line counted per test; without ArangoDB it reports could-not-run (exit 2)."
+desc: "Runs cargo test -p iter_data against the dev ArangoDB on 127.0.0.1:8529 (throwaway iter_test_* databases) — project graph node CRUD and edges, file sync with conflicts, pending writes and acks, designer build, settings graph CRUD and placeholders, server-side get_next ordering, locks and authz, engine-token authz, test results and logs, MCP tools — and reports one standard result line counted per test; without ArangoDB it reports could-not-run (exit 2)."
 creator: "iter migrate5"
 teststate: inherit
 children:
@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/cargo_test.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:53:14Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # iter_data — unit tests
@@ -18,7 +18,7 @@ One script, `cargo_test.sh`, runs the crate's whole `cargo test` through `test/c
 
 ## Needs
 
-The dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local` starts it); the tests create and drop `iter5_test_*` databases. `ITER_TEST_ARANGO_URL` / `ITER_TEST_ARANGO_PASSWORD` override the address and password (default `iter4dev`). Without a reachable ArangoDB the script exits 2 — could not run, never red.
+The dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local` starts it); the tests create and drop `iter_test_*` databases. `ITER_TEST_ARANGO_URL` / `ITER_TEST_ARANGO_PASSWORD` override the address and password (default `iterdev`). Without a reachable ArangoDB the script exits 2 — could not run, never red.
 
 ## What it covers
 

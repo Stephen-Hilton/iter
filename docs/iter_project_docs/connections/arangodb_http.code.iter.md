@@ -13,7 +13,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # ArangoDB HTTP API
 
@@ -24,7 +24,7 @@ HTTP/JSON to ArangoDB's REST API (`iter_data/src/arango.rs`, reqwest):
 then every call under `/_db/<db>/...` — `_api/cursor` for AQL
 (`{query, bindVars, batchSize}`), document and collection endpoints, and stream
 transactions for multi-document writes. `ARANGO_URL` (default
-`http://127.0.0.1:8529`) and `ARANGO_DB` (`iter_db`; `iter5` on installs from
+`http://127.0.0.1:8529`) and `ARANGO_DB` (`iter_db`; `iter` on installs from
 before 2026-10-17) choose the server and database.
 
 To another machine it is HTTPS: the certificate is pinned

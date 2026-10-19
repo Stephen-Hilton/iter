@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-02 23:10:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Model providers
@@ -22,7 +22,7 @@ The one doorway through which the engine talks to an AI model, with a real Claud
 
 ## How it works
 
-`iter_engine/src/provider/mod.rs` (iter5 spec §5) defines `AgentContext` (prompt, cwd, env, MCP config,
+`iter_engine/src/provider/mod.rs` (iter spec §5) defines `AgentContext` (prompt, cwd, env, MCP config,
 resume session, allowed tools, extra args), `DispatchSettings` (account, token, timeout, max turns,
 stop check), `DispatchOut` (text, subtype, turns, cost, token counts, session id, raw output) and a
 `Role` (work, verifier, judge, explain, summary, ocr, critic, nudge). `dispatch_agent` sends

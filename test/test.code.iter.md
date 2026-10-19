@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 # test — every test suite outside the crates
 
@@ -35,4 +35,4 @@ outside, lives here.
 
 `iter runtests test/<crate>/<crate>.test.iter.md`, or by hand `test/cargo-test-crate.sh iter_core`,
 `./test/e2e.sh [--live] [--keep]`, `test/e2e/playwright/run.sh`. iter_data's tests, the e2e run and the
-Playwright suite need the dev ArangoDB on 127.0.0.1:8529 (`docker start iter4-arango-dev`).
+Playwright suite need the dev ArangoDB on 127.0.0.1:8529 (`docker start iter-arango-dev`).

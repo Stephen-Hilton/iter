@@ -1,6 +1,6 @@
 ---
 id: dd366398-147d-450e-a792-59ef7ae020bc
-name: "iter5"
+name: "iter"
 desc: "The iter harness, version 5: one ArangoDB-backed data server (iter_data) and one engine per machine (iter_engine) that runs AI agents on every project the settings graph assigns to it. A project's node files (*.iter.md) and its project graph stay in step within seconds, so the graph is also a designer: draw a project, press Build, and an engine creates the repo. Connections replace interfaces, every setting is a node or edge in the settings graph, and every model call goes through a provider (claude, or the deterministic mock)."
 creator: "iter migrate5"
 teststate: inherit
@@ -12,9 +12,9 @@ children:
   codenodes: ["{topdir}/docs/iter_project_docs/map/orchestration/orchestration.code.iter.md", "{topdir}/docs/iter_project_docs/map/engine/engine.code.iter.md", "{topdir}/docs/iter_project_docs/map/shared/shared.code.iter.md", "{topdir}/docs/iter_project_docs/map/delivery/delivery.code.iter.md", "{topdir}/docs/iter_project_docs/map/external/external.code.iter.md"]
   tests:     ["{topdir}/test/e2e/e2e.test.iter.md", "{topdir}/test/e2e/playwright.test.iter.md"]
   reqs:      ["{topdir}/docs/requirements.md"]
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
-# iter5
+# iter
 
 iter keeps AI coding agents working on real software projects without letting
 them trip over each other. A person, or an agent, files a **work item**: "make
@@ -60,7 +60,7 @@ against the request (the **close gate**), commits just those files, and moves on
 
 ## The map of this repository
 
-This repository is iter5's own checkout, and iter5 maps itself. This file is
+This repository is iter's own checkout, and iter maps itself. This file is
 the root: its `children.codenodes` are the five context nodes —
 
 - **Orchestration and data** (`docs/iter_project_docs/map/orchestration/`) — `iter_data`, the server

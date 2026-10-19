@@ -1,7 +1,7 @@
 ---
 id: 52993009-49c9-4ea4-954d-be2bbdc179fb
 name: "Operator"
-desc: "The person who stands iter5 up and keeps it running: starts the server (./deploy.sh docker → container iter5 on :8400 with ArangoDB, or ./deploy.sh local), sets up the one engine of each machine with iter_data/iter_engine_setup.sh (env file with the engine token and account tokens), keeps engines running and restarts them after upgrades."
+desc: "The person who stands iter up and keeps it running: starts the server (./deploy.sh docker → container iter on :8400 with ArangoDB, or ./deploy.sh local), sets up the one engine of each machine with iter_data/iter_engine_setup.sh (env file with the engine token and account tokens), keeps engines running and restarts them after upgrades."
 creator: "iter migrate5"
 teststate: inherit
 drives: ["{topdir}/docs/iter_project_docs/usecases/connect_an_engine_to_a_project.usecase.iter.md"]
@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Operator
 

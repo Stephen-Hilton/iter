@@ -11,14 +11,14 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 
 # Settings-graph types (`iter_core::settings`)
 
 ## Summary
 
-The vocabulary of iter5's settings: every setting is a node or an edge, and this module says which nodes and edges exist and what they may carry.
+The vocabulary of iter's settings: every setting is a node or an edge, and this module says which nodes and edges exist and what they may carry.
 
 ## How it works
 

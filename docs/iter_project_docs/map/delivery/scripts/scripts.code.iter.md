@@ -1,7 +1,7 @@
 ---
 id: 87c47715-828b-47ca-9cc5-06adc2c00800
 name: "scripts — deploy, engine setup, e2e and test tools"
-desc: "The shell entry points around the binaries: deploy.sh (docker or local mode on :8400), test/e2e.sh (the whole stack — iter_data on a throwaway iter5_e2e_* database and one engine serving two projects on the mock provider), the Playwright web suite under test/e2e/playwright, and the test/ helpers (one crate's tests as a test result)."
+desc: "The shell entry points around the binaries: deploy.sh (docker or local mode on :8400), test/e2e.sh (the whole stack — iter_data on a throwaway iter_e2e_* database and one engine serving two projects on the mock provider), the Playwright web suite under test/e2e/playwright, and the test/ helpers (one crate's tests as a test result)."
 creator: "iter migrate5"
 teststate: inherit
 level: container
@@ -11,13 +11,13 @@ children:
   codenodes: ["{topdir}/test/test.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # scripts — deploy, engine setup, e2e and test tools
 
 ## Summary
 
-The commands that switch iter5 on and prove the whole thing works.
+The commands that switch iter on and prove the whole thing works.
 
 ## How it works
 
@@ -25,7 +25,7 @@ The commands that switch iter5 on and prove the whole thing works.
   `installers/build.sh` and runs `installers/iter_data/docker/install.sh`,
   which writes `<iter dir>/iter_data/config/data.env` (iter dir `~/iter`) from the repo `.env`
   (`ITER_ADMIN_PASSWORD`, `ITER_JWT_SECRET`; read key by key, never sourced)
-  and brings up container `iter5`. `local` builds
+  and brings up container `iter`. `local` builds
   release `iter_data` and `iter_engine` into `bin/` (remove-then-copy: macOS
   kills a binary copied over a running one), starts or reuses the dev
   ArangoDB container on :8529 and runs iter_data natively. Every mode waits
@@ -38,7 +38,7 @@ The commands that switch iter5 on and prove the whole thing works.
   conflicts, designer → build → repo + plan item, standard test results → test
   node + log, account switch/stop through the `bills` edge, deactivating a
   `serves` edge and MCP tool calls.
-  The fixture's node files are stored as `*.iter.md.fixture` so iter5's own
+  The fixture's node files are stored as `*.iter.md.fixture` so iter's own
   scan never reads them. The database is dropped on success and failure.
   `E2E_ONLY=b,c` runs only some sections.
 - **`test/e2e/playwright/run.sh`.** The web suite: login, queue, project graph,

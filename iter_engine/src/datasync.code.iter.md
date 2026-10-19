@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # GraphRAG document writer
@@ -22,7 +22,7 @@ Saves files people upload for GraphRAG search into the project's folder (and kee
 
 ## How it works
 
-In iter5 datasync survives only for GraphRAG documents (spec §12.1 item 10); node edits go through the
+In iter datasync survives only for GraphRAG documents (spec §12.1 item 10); node edits go through the
 project graph and Node-file sync, never datasync rows. On each tick the Engine tick loop sends its
 heartbeat; when the reply's `datasync_waiting` names a project this engine serves (and the checkout is
 not read-only), the loop's `run_filesync` calls `apply_waiting` (`iter_engine/src/datasync.rs`):

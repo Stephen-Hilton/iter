@@ -1,7 +1,7 @@
 ---
 id: f0ecfa98-f3cd-43f7-888b-64b9d3b53d81
 name: "Test result line (script stdout)"
-desc: "How a test script reports to iter5: a script listed in a test node's children.tests runs under bash in the checkout and prints the standard result JSON as its LAST stdout line ({name, id, overall_success, normal, longtail, failure, details}); exit 0 = pass, 1 = fail, anything else = could not run. The legacy last line ITER_RESULT pass= fail= total= is still accepted. Read by the test runner via iter_core::testresult, then posted to the test node."
+desc: "How a test script reports to iter: a script listed in a test node's children.tests runs under bash in the checkout and prints the standard result JSON as its LAST stdout line ({name, id, overall_success, normal, longtail, failure, details}); exit 0 = pass, 1 = fail, anything else = could not run. The legacy last line ITER_RESULT pass= fail= total= is still accepted. Read by the test runner via iter_core::testresult, then posted to the test node."
 creator: "stephen"
 teststate: inherit
 connects:
@@ -13,7 +13,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Test result line (script stdout)
 

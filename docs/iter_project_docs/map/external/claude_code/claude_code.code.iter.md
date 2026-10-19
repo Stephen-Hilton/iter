@@ -1,7 +1,7 @@
 ---
 id: aa5a25e1-6fbd-4d35-9d7c-ad76672f861d
 name: "Claude Code CLI (agent runtime)"
-desc: "Anthropic's claude command-line program, run headless by the engine's claude provider for every model call (claude -p <prompt> --output-format stream-json --verbose, billed to the account token in CLAUDE_CODE_OAUTH_TOKEN). Inside a session the agent reads and edits the checkout, runs the iter shim ({topdir}/.iter/bin/iter) and calls iter_data's MCP tools. Not iter5 code; the mock provider stands in for it in tests."
+desc: "Anthropic's claude command-line program, run headless by the engine's claude provider for every model call (claude -p <prompt> --output-format stream-json --verbose, billed to the account token in CLAUDE_CODE_OAUTH_TOKEN). Inside a session the agent reads and edits the checkout, runs the iter shim ({topdir}/.iter/bin/iter) and calls iter_data's MCP tools. Not iter code; the mock provider stands in for it in tests."
 creator: "stephen"
 teststate: inherit
 level: container
@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Claude Code CLI (agent runtime)
 

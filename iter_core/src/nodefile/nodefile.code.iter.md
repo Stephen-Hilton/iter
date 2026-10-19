@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 
 # Node-file library (`iter_core::nodefile`)
@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00
 
 The one piece of code that knows what a node file says and how it must be written, used by both the server and the engine.
 
-In iter5 a project lives twice: as `*.iter.md` files in the repository and as nodes in iter_data's project graph. This library is the bridge. It works on strings only — the engine hands it file text, the server hands it node paths — and never touches the filesystem.
+In iter a project lives twice: as `*.iter.md` files in the repository and as nodes in iter_data's project graph. This library is the bridge. It works on strings only — the engine hands it file text, the server hands it node paths — and never touches the filesystem.
 
 ## How it works
 

@@ -11,13 +11,13 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:53:14Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # ArangoDB Community Edition
 
 Where it runs:
 
-- **Production / docker mode** — inside container `iter5`, started by
+- **Production / docker mode** — inside container `iter`, started by
   `installers/iter_data/docker/entrypoint.sh`; iter_data reaches it on `127.0.0.1:8529`
   inside the container, the console is published on `127.0.0.1:8630` only.
   Database `iter_db` (`iter5` on older installs, which the entrypoint detects),
@@ -27,7 +27,7 @@ Where it runs:
   existing ArangoDB (`--arango-url`, over HTTPS) shared with other apps.
 - **Local mode and tests** — the dev container on `:8529` (`./deploy.sh local`
   starts or reuses it); `cargo test` and `test/e2e.sh` create throwaway
-  `iter5_test_*` / `iter5_e2e_*` databases and drop them afterwards
+  `iter_test_*` / `iter_e2e_*` databases and drop them afterwards
   (`ITER_TEST_ARANGO_URL`, `ITER_TEST_ARANGO_PASSWORD` point elsewhere).
 
 Only iter_data talks to it (see the "ArangoDB HTTP API" connection); engines,

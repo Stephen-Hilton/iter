@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Node-file sync and build
@@ -22,7 +22,7 @@ Makes sure a change to a description file shows up in the project graph within s
 
 ## How it works
 
-`iter_engine/src/filesync.rs: tick` runs for every served project on every engine tick (iter5 spec §3),
+`iter_engine/src/filesync.rs: tick` runs for every served project on every engine tick (iter spec §3),
 with per-checkout state in `.iter/filesync.json` (`FileSyncState`: each file's id, content hash, semantic
 hash, acked version and stat):
 

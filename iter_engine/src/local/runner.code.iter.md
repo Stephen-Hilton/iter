@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Test runner
@@ -23,7 +23,7 @@ Runs a set of automated tests the same way every time and reports, in one standa
 ## How it works
 
 A test node (`*.test.iter.md`) is metadata; its `children.tests` entries are globs or paths of scripts
-(iter5 spec §3.5). `iter_engine/src/local/runtests.rs`:
+(iter spec §3.5). `iter_engine/src/local/runtests.rs`:
 
 - `test_node_files`, `load_test_node` and `find_test_node` locate a test node by id, id tail, name,
   file stem or path; `scripts_of` resolves its scripts on disk.

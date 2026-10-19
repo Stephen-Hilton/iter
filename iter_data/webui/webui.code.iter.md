@@ -1,7 +1,7 @@
 ---
 id: 7b63d1a2-84f0-405e-9dbf-691237a04a6a
 name: "webui — web page"
-desc: "The one browser page people use to see and steer iter5: the Intro story and new-project designer wizard, the Work queue, the Project graph (view, design and edit every node file and its links), GraphRAG search and the Settings graph. Static HTML, CSS and JavaScript compiled into iter_data; it sends every request to the data server, which makes every decision."
+desc: "The one browser page people use to see and steer iter: the Intro story and new-project designer wizard, the Work queue, the Project graph (view, design and edit every node file and its links), GraphRAG search and the Settings graph. Static HTML, CSS and JavaScript compiled into iter_data; it sends every request to the data server, which makes every decision."
 creator: "iter migrate5"
 teststate: omit
 level: container
@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/iter_data/webui/queue.code.iter.md", "{topdir}/iter_data/webui/projectgraph.code.iter.md", "{topdir}/iter_data/webui/grapheditor.code.iter.md", "{topdir}/iter_data/webui/settings.code.iter.md", "{topdir}/iter_data/webui/kit.code.iter.md", "{topdir}/iter_data/webui/intro.code.iter.md", "{topdir}/iter_data/webui/rag.code.iter.md"]
   tests:     ["{topdir}/test/e2e/playwright.test.iter.md"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # webui — web page
@@ -50,4 +50,4 @@ The Playwright suite (`test/e2e/playwright.test.iter.md`, run by `test/e2e/playw
 
 ## Example
 
-Opening `http://127.0.0.1:8400/#tab=graph&p=iter5` logs in, selects project iter5 and draws its graph: contexts holding containers holding components, connection nodes between them, and the test and requirement nodes around them.
+Opening `http://127.0.0.1:8400/#tab=graph&p=iter` logs in, selects project iter and draws its graph: contexts holding containers holding components, connection nodes between them, and the test and requirement nodes around them.

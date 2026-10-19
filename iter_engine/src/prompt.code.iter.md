@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Agent prompt builder
@@ -24,7 +24,7 @@ Writes the briefing an AI worker reads before it starts a task: who it is, the r
 
 `iter_engine/src/prompt.rs` never inlines file content; it names files for the agent to read.
 
-- **Node context** (iter5 spec §8): `load_context` reads the project's nodes from iter_data
+- **Node context** (iter spec §8): `load_context` reads the project's nodes from iter_data
   (`nodes_from_graph`, `GET /api/projects/{p}/graph`), falling back to the checkout's node files
   (`nodes_from_files`). `build_context` picks the item's node (`item.node`, else the node owning its
   first lockdir, else the project node), lists every child edge's other end as `[id, name, desc,

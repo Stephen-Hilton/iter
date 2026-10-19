@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-02 23:10:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Engine assignments
@@ -22,7 +22,7 @@ Tells the engine which projects it works on, where their files are and which AI 
 
 ## How it works
 
-`iter_engine/src/assign.rs` holds the serde shapes of the assignments reply (iter5 spec §4.2):
+`iter_engine/src/assign.rs` holds the serde shapes of the assignments reply (iter spec §4.2):
 `Assignments { engine, projects: [Assignment], accounts: [AssignedAccount] }`. An `Assignment` is one
 active `serves` edge (engine → project) with its `topdir`, `read_only`, project `state` and `edge_tag`,
 plus the accounts that bill the project (`bills` edge: `order`, `switch`, `stop`, `model`) and that this

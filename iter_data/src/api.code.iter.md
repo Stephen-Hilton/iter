@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:10:16Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 
 # Long Description
@@ -28,4 +28,4 @@ What goes in and out: callers are iter_engine (heartbeat, locks, results, explai
 
 Why it matters: without it every client would have to be trusted to follow the rules.
 
-Example: an agent runs `iter add` for a follow-up; `POST /api/projects/iter5/workitems` stores it with the parent's priority and use-case tag and returns the new record, with a warning if the requested priority was overridden.
+Example: an agent runs `iter add` for a follow-up; `POST /api/projects/iter/workitems` stores it with the parent's priority and use-case tag and returns the new record, with a warning if the requested priority was overridden.

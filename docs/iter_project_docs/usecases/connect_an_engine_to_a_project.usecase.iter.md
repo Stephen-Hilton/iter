@@ -62,11 +62,11 @@ children:
   codenodes: ["{topdir}/installers/installers.code.iter.md", "{topdir}/iter_data/webui/settings.code.iter.md", "{topdir}/iter_data/src/settings.code.iter.md", "{topdir}/iter_engine/src/assign.code.iter.md", "{topdir}/iter_engine/src/loop.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Connect an engine and an account to a project in the settings graph
 
-iter5 runs one engine per machine and keeps every setting on a node or an
+iter runs one engine per machine and keeps every setting on a node or an
 edge of the settings graph. Connecting work to a machine is therefore two
 small jobs.
 

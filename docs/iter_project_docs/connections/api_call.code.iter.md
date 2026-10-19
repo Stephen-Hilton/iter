@@ -13,11 +13,11 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # HTTP JSON API
 
-The main connection type of iter5: plain request/reply HTTP with JSON bodies,
+The main connection type of iter: plain request/reply HTTP with JSON bodies,
 served by iter_data (default `0.0.0.0:8400`; `ITER_PORT` / `ITER_LISTEN`).
 `connects.from` lists the iter_data parts whose routes make up the API;
 `connects.to` the parts that call it.

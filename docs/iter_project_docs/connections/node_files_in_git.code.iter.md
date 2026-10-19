@@ -1,7 +1,7 @@
 ---
 id: 090b870c-dea5-4b5b-8ec1-74ce1dbf6d15
 name: "Node files in a git checkout"
-desc: "The repository itself as a connection: *.iter.md node files (and the code they describe) on disk in a git checkout. The engine is the only iter5 writer — conform write-backs, graph edits pulled from files/pending, the designer build (git init + first commit), scoped commits after each work item, GraphRAG document originals — and agent sessions edit files inside an item's lock scope. Readers: the engine's file scan and prompt builder (node context, agent memory) and `iter_engine::local`'s git-ignore aware walk, validate, test runner and migrate5."
+desc: "The repository itself as a connection: *.iter.md node files (and the code they describe) on disk in a git checkout. The engine is the only iter writer — conform write-backs, graph edits pulled from files/pending, the designer build (git init + first commit), scoped commits after each work item, GraphRAG document originals — and agent sessions edit files inside an item's lock scope. Readers: the engine's file scan and prompt builder (node context, agent memory) and `iter_engine::local`'s git-ignore aware walk, validate, test runner and migrate5."
 creator: "stephen"
 teststate: inherit
 connects:
@@ -13,7 +13,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Node files in a git checkout
 

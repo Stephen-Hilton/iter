@@ -1,7 +1,7 @@
 ---
 id: d12996da-9a77-4fa0-a5c4-708b45515dcb
 name: "Settings graph"
-desc: "The Settings tab: draws iter5's settings graph — iter_data, engines, projects, accounts, providers, agents, agent tooling, users and work-item states, each with a _deactivated placeholder — and the edges that carry the settings joining them (serves with a topdir, bills with switch/stop percents, holds, member, runs…); admins create nodes, configure nodes and edges, draw, tag, copy and drag edges, and drop an edge end on a placeholder to switch it off."
+desc: "The Settings tab: draws iter's settings graph — iter_data, engines, projects, accounts, providers, agents, agent tooling, users and work-item states, each with a _deactivated placeholder — and the edges that carry the settings joining them (serves with a topdir, bills with switch/stop percents, holds, member, runs…); admins create nodes, configure nodes and edges, draw, tag, copy and drag edges, and drop an edge end on a placeholder to switch it off."
 creator: "agent.code"
 teststate: inherit
 level: component
@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Settings graph

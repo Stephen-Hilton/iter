@@ -11,13 +11,13 @@ children:
   codenodes: ["{topdir}/iter_engine/iter_engine.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Engines and checkout tools
 
 ## Summary
 
-The workers that sit next to the code: the only part of iter5 that reads or
+The workers that sit next to the code: the only part of iter that reads or
 writes a repository.
 
 It holds one container: **iter_engine — local engine** (the long-running

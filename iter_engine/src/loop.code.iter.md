@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Engine tick loop
@@ -62,6 +62,6 @@ without a token, and keep one engine fair across every project it serves.
 
 ## Example
 
-An engine serves projects `pdy` and `iter5`. In one tick it syncs both checkouts, finds `pdy` Stopped
-(starts nothing there), and for `iter5` asks `next`, gets an item claimed and locked on the server, and
+An engine serves projects `pdy` and `iter`. In one tick it syncs both checkouts, finds `pdy` Stopped
+(starts nothing there), and for `iter` asks `next`, gets an item claimed and locked on the server, and
 starts it billed to the account whose usage is below its switch percentage.

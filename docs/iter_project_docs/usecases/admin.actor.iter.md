@@ -11,11 +11,11 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Admin
 
-Every iter5 setting lives on a node or an edge of the settings graph; writes
+Every iter setting lives on a node or an edge of the settings graph; writes
 to it are admin only (users read the parts that touch their projects). The
 admin works in the **Settings** tab (also reachable as "Settings graph" from
 the graph picker): configure lightbox on any node or edge, draw edges, drag

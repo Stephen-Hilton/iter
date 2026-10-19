@@ -10,8 +10,8 @@ children:
   codedirs:  ["{thisfiledir}/"]
   codenodes: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/assign.code.iter.md", "{topdir}/iter_engine/src/runner.code.iter.md", "{topdir}/iter_engine/src/provider/provider.code.iter.md", "{topdir}/iter_engine/src/accounts.code.iter.md", "{topdir}/iter_engine/src/prompt.code.iter.md", "{topdir}/iter_engine/src/gate.code.iter.md", "{topdir}/iter_engine/src/dedup.code.iter.md", "{topdir}/iter_engine/src/mapsync.code.iter.md", "{topdir}/iter_engine/src/datasync.code.iter.md", "{topdir}/iter_engine/src/rag.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_engine/src/cli.code.iter.md", "{topdir}/iter_engine/src/client.code.iter.md", "{topdir}/iter_engine/src/local/local.code.iter.md"]
   tests:     ["{topdir}/test/iter_engine/*.test.iter.md"]
-  reqs:      ["{topdir}/docs/iter5_spec.md"]
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+  reqs:      ["{topdir}/docs/iter_spec.md"]
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # iter_engine — the machine's engine

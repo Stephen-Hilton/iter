@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # iter command line
@@ -42,7 +42,7 @@ clap parses the words into the `Verb` enum. Inside an engine run, agents reach i
 - `init` (`iter_engine/src/init.rs: init_project`) scaffolds a v5 project with `iter_core::nodefile`:
   `global/<slug>.project.iter.md` and `global/requirements/{philosophy,bizreq,techreq}` files, already
   conformed, never overwriting without `--force`; no engine config is written.
-- Anything else gets a plain message (`retired`): `ids` and `graph-apply` are gone in iter5.
+- Anything else gets a plain message (`retired`): `ids` and `graph-apply` are gone in iter.
 
 ## What goes in and out
 

@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-02 23:10:16Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 
 # Long Description
@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-02 23:10:16
 
 Keeps the project's map as nodes that mirror its node files one for one.
 
-The project graph store (`iter_data/src/nodes.rs`) is iter5's "nodes = files" model on the server. Every `*.iter.md` node file of a project is one document of the ArangoDB collection `node` (key `node_key(project, id)`); the graph never holds anything a file could not say.
+The project graph store (`iter_data/src/nodes.rs`) is iter's "nodes = files" model on the server. Every `*.iter.md` node file of a project is one document of the ArangoDB collection `node` (key `node_key(project, id)`); the graph never holds anything a file could not say.
 
 How it works: `StoredNode` holds the parsed file (`iter_core::nodefile::NodeDoc`) plus `node_version` (+1 on every server-side change), `file_version` (the version last written to or read from the file), `file_hash`, `file_state`, `deleted`, `test` and `updated_by`. Every write goes through `canonical`, the same render/conform the engine uses, so the file the engine later writes is byte-for-byte what conform would produce. Work on one project is serialised in-process (`lock`): `Graph::load` reads all its nodes, operations change them in memory — `insert_new`, `commit_edit`, `add_edge` / `remove_edge` (made on the node that owns the children entry; a glob that owns an edge is refused), `delete_node` (also removes it from every parent), `move_node` (rewrites references) — and `save` recomputes the whole project's edges with `nodefile::edges_of` against the project's node paths and writes the changed nodes and only the added or removed `link` edges in one stream transaction. `edit_state` makes an edit `pending_write`, or `designed` when no engine serves the project yet (`is_served`). `ensure_project_node` seeds a designed project's project node plus one philosophy, bizreq and techreq; `purge_project` removes a deleted project's nodes, links, `node_conflict` and `test_log` rows.
 

@@ -1,7 +1,7 @@
 ---
 id: b5703965-cba5-4f2a-a434-adff26013938
 name: "Orchestration and data"
-desc: "The one data server, iter_data, and the web page it serves. It keeps every record iter5 holds — work items, locks, the project graph (one node per node file), the settings graph (engines, projects, accounts, providers, agents, users and the edges between them), test logs, spend and GraphRAG documents — in ArangoDB behind one authorized HTTP API and MCP endpoint. It picks and claims the next work item for an engine, but never touches a repository."
+desc: "The one data server, iter_data, and the web page it serves. It keeps every record iter holds — work items, locks, the project graph (one node per node file), the settings graph (engines, projects, accounts, providers, agents, users and the edges between them), test logs, spend and GraphRAG documents — in ArangoDB behind one authorized HTTP API and MCP endpoint. It picks and claims the next work item for an engine, but never touches a repository."
 creator: "iter migrate5"
 teststate: inherit
 level: context
@@ -11,13 +11,13 @@ children:
   codenodes: ["{topdir}/iter_data/iter_data.code.iter.md", "{topdir}/iter_data/webui/webui.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Orchestration and data
 
 ## Summary
 
-The one place iter5's information is kept, the only door to it, and the page
+The one place iter's information is kept, the only door to it, and the page
 people use to watch, steer and design the work.
 
 It holds two containers: **iter_data — data server** (`iter_data/`) and

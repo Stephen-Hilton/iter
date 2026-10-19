@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-02 23:10:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:10:52Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
 ---
 
 # Node-file walker
@@ -22,7 +22,7 @@ Finds the project's description files on disk, quickly and without being fooled 
 
 ## How it works
 
-`iter_engine/src/local/walk.rs` (iter5 spec §3.2):
+`iter_engine/src/local/walk.rs` (iter spec §3.2):
 
 - `is_node_name` asks `iter_core::nodefile::type_of` whether a filename is a node file (plain
   `*.iter.md` context docs are not).

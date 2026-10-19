@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:12:30Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
 ---
 # Agent session
 
@@ -21,7 +21,7 @@ context from the node the item is about (the node file, its children's
 philosophy, and the agentmem file) and dispatches it with the account the
 `bills` edge picks.
 
-Where it touches iter5:
+Where it touches iter:
 
 - **The checkout** — reads and edits files inside the item's lock scope; node
   file edits reach the graph through file sync.
