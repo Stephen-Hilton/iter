@@ -1,7 +1,7 @@
 ---
 id: b5280c91-7f58-4790-9078-cb69f4a8ea20
 name: "ArangoDB Community Edition"
-desc: "The database behind iter_data (ArangoDB 3.12 CE): one database per deployment (iter_db, or iter5 on installs from before 2026-10-17; iter5_test_* and iter5_e2e_* throwaway databases on the dev container at :8529), holding work items, details, locks, projects, engines, users, spend, the project graph (node + link collections), the settings graph (sys_edge), test logs and GraphRAG documents. Reached only by iter_data, as its own user with rw on that database only, over HTTP on the same machine or HTTPS to a shared or remote ArangoDB."
+desc: "The database behind iter_data (ArangoDB 3.12 CE): one database per deployment (iter_db; iter_test_* and iter_e2e_* throwaway databases on the dev container at :8529), holding work items, details, locks, projects, engines, users, spend, the project graph (node + link collections), the settings graph (sys_edge), test logs and GraphRAG documents. Reached only by iter_data, as its own user with rw on that database only, over HTTP on the same machine or HTTPS to a shared or remote ArangoDB."
 creator: "stephen"
 teststate: inherit
 level: container
@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:12:30Z", last_modified: "2026-10-19 23:02:15Z", last_tested: ""}
 ---
 # ArangoDB Community Edition
 
@@ -20,7 +20,7 @@ Where it runs:
 - **Production / docker mode** — inside container `iter`, started by
   `installers/iter_data/docker/entrypoint.sh`; iter_data reaches it on `127.0.0.1:8529`
   inside the container, the console is published on `127.0.0.1:8630` only.
-  Database `iter_db` (`iter5` on older installs, which the entrypoint detects),
+  Database `iter_db`,
   data in the `arango` named volume. Or no ArangoDB in the container at all:
   `--arango-url` points iter_data at one you already run.
 - **Linux / EC2** — the `arangodb3` systemd service on localhost, or an
