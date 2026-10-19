@@ -1,7 +1,7 @@
 ---
 id: 8283c45c-f091-4417-a3c1-a210d3602200
 name: "Server startup"
-desc: "Starts iter_data: loads the .env file, opens ArangoDB, creates the first admin user and the GraphRAG summary agent record, seeds the settings graph (placeholders, providers, work item states, the one-time iter4 edge migration), loads the embedding model and the login secret, then serves the API, MCP, the engine setup script and the embedded web page from one binary on port 8400, so a container needs no files on disk."
+desc: "Starts iter_data: loads the .env file, opens ArangoDB, creates the first admin user and the GraphRAG summary agent record, seeds the settings graph (placeholders, providers, work item states), loads the embedding model and the login secret, then serves the API, MCP, the engine setup script and the embedded web page from one binary on port 8400, so a container needs no files on disk."
 creator: "iter migrate5"
 teststate: inherit
 level: component
@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 22:47:22Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
 ---
 
 # Long Description
@@ -22,7 +22,7 @@ Turns the data server on, connects it to its database and puts the web page insi
 
 Server startup is iter_data's `main` (`iter_data/src/main.rs`). It parses the command line (`Args`: `--arango-url`, `--arango-db` default `iter_db`, `--listen`, `--webui-dir`, `--secret-file`, `--env-file`, `--embed-model`) and loads the `.env` file line by line without shell semantics (`load_env_file`; a variable already set wins).
 
-How it works: `open_arango` connects to ArangoDB (`ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER` [iter_user], `ARANGO_PASSWORD` override the flags; `ARANGO_ROOT_PASSWORD` only sets that user and database up; `ARANGO_CERT_FINGERPRINT`, `ARANGO_CA_CERT` and `ARANGO_ALLOW_PLAIN_HTTP` decide how the connection is checked; see the ArangoDB storage backend) — the only store iter5 has; any `--backend` other than `arango` exits. Then, in order: `bootstrap_admin` creates `admin` when there are no users (password from `ITER_ADMIN_PASSWORD`, else generated and printed once); `settings::bootstrap` seeds the settings graph; `defaults::add_once` adds the default agents and tooling (`iter_data/defaults/`, embedded) the first time a database starts, never again, so one an admin deletes stays deleted (`iter_data defaults add` adds the missing ones on request); `rag::guide::ingest_at_startup` indexes the built-in user guide (compiled in by `build.rs` from `docs/iter_guide.md`); `auth::load_secret` loads the token-signing secret; `rag::embed` locates the embedding model. The router is `api::router` (which merges the graph, file sync, test log, settings, GraphRAG and datasync routes under the authz layer) plus `mcp::routes`, `/iter_engine_setup.sh` (the retired setup stub `iter_data/iter_engine_setup.sh`, no sign-in) and a permissive CORS layer. It listens on `127.0.0.1:8400` unless `--listen` or `ITER_PORT` says otherwise.
+How it works: `open_arango` connects to ArangoDB (`ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER` [iter_user], `ARANGO_PASSWORD` override the flags; `ARANGO_ROOT_PASSWORD` only sets that user and database up; `ARANGO_CERT_FINGERPRINT`, `ARANGO_CA_CERT` and `ARANGO_ALLOW_PLAIN_HTTP` decide how the connection is checked; see the ArangoDB storage backend) — the only store iter has; any `--backend` other than `arango` exits. Then, in order: `bootstrap_admin` creates `admin` when there are no users (password from `ITER_ADMIN_PASSWORD`, else generated and printed once); `settings::bootstrap` seeds the settings graph; `defaults::add_once` adds the default agents and tooling (`iter_data/defaults/`, embedded) the first time a database starts, never again, so one an admin deletes stays deleted (`iter_data defaults add` adds the missing ones on request); `rag::guide::ingest_at_startup` indexes the built-in user guide (compiled in by `build.rs` from `docs/iter_guide.md`); `auth::load_secret` loads the token-signing secret; `rag::embed` locates the embedding model. The router is `api::router` (which merges the graph, file sync, test log, settings, GraphRAG and datasync routes under the authz layer) plus `mcp::routes`, `/iter_engine_setup.sh` (the retired setup stub `iter_data/iter_engine_setup.sh`, no sign-in) and a permissive CORS layer. It listens on `127.0.0.1:8400` unless `--listen` or `ITER_PORT` says otherwise.
 
 The web page is compiled into the binary (`WEBUI_INDEX`, `WEBUI_FILES`: the page, Project graph viewer and editor, Intro, GraphRAG tab, settings graph, the shared UI kit and the vendored Cytoscape libraries), served by `embedded_index`; `--webui-dir` serves a folder instead, for development.
 

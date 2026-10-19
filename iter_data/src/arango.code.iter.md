@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
 ---
 
 # Long Description
@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:43
 
 Where iter saves everything it knows, in the ArangoDB database.
 
-The ArangoDB backend is the only implementation of the Storage interface. It keeps every table as an ArangoDB collection and every project graph as documents and edges, all in one database (default `iter_db`; installs from before 2026-10-17 keep `iter5`).
+The ArangoDB backend is the only implementation of the Storage interface. It keeps every table as an ArangoDB collection and every project graph as documents and edges, all in one database (default `iter_db`).
 
 Signing in: `ArangoBackend::open` takes an `ArangoConfig` and signs in as its user (default `iter_user`). `prepare` opens the database (creating it when the user may, which only a user with rights on `_system` can) and checks the user holds `rw` on it. Arango answers a missing user, a wrong password, no access and a missing database alike with 401, so any of those, or too little access, falls back to root when `ARANGO_ROOT_PASSWORD` is set: `provision` creates the user (refusing an empty password or root's own), creates the database, grants `rw`, and the user is tried once more. An existing user keeps its password. Then `ensure_schema` runs as the user. `http_client` reaches ArangoDB over HTTPS checked against pinned fingerprints (`PinVerifier`: exactly those certificates, any name or issuer), a CA file, or the public CAs, and refuses plain `http://` to another machine unless `allow_plain_http`. `wait_reachable` counts any answer, even a refusal, as up and stops at once on a certificate failure.
 

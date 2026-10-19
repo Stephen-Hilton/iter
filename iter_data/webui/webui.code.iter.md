@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/iter_data/webui/queue.code.iter.md", "{topdir}/iter_data/webui/projectgraph.code.iter.md", "{topdir}/iter_data/webui/grapheditor.code.iter.md", "{topdir}/iter_data/webui/settings.code.iter.md", "{topdir}/iter_data/webui/kit.code.iter.md", "{topdir}/iter_data/webui/intro.code.iter.md", "{topdir}/iter_data/webui/rag.code.iter.md"]
   tests:     ["{topdir}/test/e2e/playwright.test.iter.md"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
 ---
 
 # webui — web page
@@ -38,7 +38,7 @@ webui is static HTML, CSS and JavaScript with no server code of its own. At buil
 
 ## What goes in and out
 
-It calls only iter_data's HTTP API: `/auth/login`, work items and their details, engines, projects, `/api/projects/{p}/graph*` (view, nodes, edges, build, run_tests, conflicts), `/testlogs`, `/rag*`, `/api/settings/*`. Nothing calls it. iter4's interface views and the `/graph/edits` / datasync edit queue are gone: graph edits change nodes directly and the engine writes the files.
+It calls only iter_data's HTTP API: `/auth/login`, work items and their details, engines, projects, `/api/projects/{p}/graph*` (view, nodes, edges, build, run_tests, conflicts), `/testlogs`, `/rag*`, `/api/settings/*`. Nothing calls it. The old interface views and the `/graph/edits` / datasync edit queue are gone: graph edits change nodes directly and the engine writes the files.
 
 ## Why it matters
 

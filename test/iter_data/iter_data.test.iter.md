@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/cargo_test.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
 ---
 
 # iter_data — unit tests
@@ -22,6 +22,6 @@ The dev ArangoDB on `127.0.0.1:8529` (`./deploy.sh local` starts it); the tests 
 
 ## What it covers
 
-Project graph store and API (`graph_tests.rs`): node create / patch / delete with designer path planning, edges add / remove / move, `files/sync` upserts and conflicts, `files/pending` + `files/ack`, build and `build/done`, test results on test nodes and the test log. Settings graph (`settings/tests.rs`): CRUD, edge-type inference, placeholders, copy, the one-time iter4 migration, assignments, `POST …/next` ordering / holds / locks / rollback / refusals, project-route and MCP authz by edges, engine heartbeats. API rules (`api.rs`): dependency cycles refused, dedup stage 1 and `duplicate_of`, lock leases and reservations, closed items, the test-sweep schedule. MCP tool schemas (`mcp.rs`), GraphRAG search (`rag/`), and the storage contract on ArangoDB (`contract_tests.rs`).
+Project graph store and API (`graph_tests.rs`): node create / patch / delete with designer path planning, edges add / remove / move, `files/sync` upserts and conflicts, `files/pending` + `files/ack`, build and `build/done`, test results on test nodes and the test log. Settings graph (`settings/tests.rs`): CRUD, edge-type inference, placeholders, copy, assignments, `POST …/next` ordering / holds / locks / rollback / refusals, project-route and MCP authz by edges, engine heartbeats. API rules (`api.rs`): dependency cycles refused, dedup stage 1 and `duplicate_of`, lock leases and reservations, closed items, the test-sweep schedule. MCP tool schemas (`mcp.rs`), GraphRAG search (`rag/`), and the storage contract on ArangoDB (`contract_tests.rs`).
 
 GraphRAG search quality is a separate test node (`rag_search_quality.test.iter.md`) because it needs a running server.

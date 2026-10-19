@@ -9,7 +9,7 @@ children:
   codenodes: []
   tests:     ["{thisfiledir}/cargo_test.sh"]
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:00Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
 ---
 
 # iter_core — unit tests
@@ -19,8 +19,8 @@ One script, `cargo_test.sh`, runs the crate's whole `cargo test` through `test/c
 ## What it covers
 
 - **Work-item model** (`lib.rs`): dependency gate and cycles, priority bands, account ladder, lock shape, close-gate settings.
-- **Node-file library** (`nodefile/tests.rs`): parse/render round trip, `conform` idempotence on hand-made messy files, on the iter4 files in `nodefile/fixtures/` and on **every `*.iter.md` in this checkout** (`conform_idempotent_over_repo_tree`) — so a malformed node file anywhere in iter5 turns this red — legacy key migration, glob resolution, designer path planning with sequence / uuid12 collisions, edge derivation, add / remove child.
+- **Node-file library** (`nodefile/tests.rs`): parse/render round trip, `conform` idempotence on hand-made messy files, on the legacy-format files in `nodefile/fixtures/` and on **every `*.iter.md` in this checkout** (`conform_idempotent_over_repo_tree`) — so a malformed node file anywhere in this repo turns this red — legacy key migration, glob resolution, designer path planning with sequence / uuid12 collisions, edge derivation, add / remove child.
 - **Settings-graph types**, **standard test result** parsing and verdicts, **schedules**, **dedup keys**, **wait graph**, **cluster hold**, **question forms**.
 - **GraphRAG text code** (`rag/`, the former iter_rag crate): text extraction, chunking, frontmatter splitting and the embedder. The embedding test needs the model weights (`models/all-MiniLM-L6-v2`, `$ITER_EMBED_MODEL` or `~/.cache/iter/models`); without them it prints "skipped" and passes.
 
-Needs only cargo; runs in well under a minute when the build is cached. Run it with `iter runtests test/iter_core/iter_core.test.iter.md` (add `--no-record` to keep the result out of iter_data). By name or id it is ambiguous while the iter4 fixture `src/nodefile/fixtures/iter_core.tests.iter.md` carries the same id and name.
+Needs only cargo; runs in well under a minute when the build is cached. Run it with `iter runtests test/iter_core/iter_core.test.iter.md` (add `--no-record` to keep the result out of iter_data). By name or id it is ambiguous while the legacy-format fixture `src/nodefile/fixtures/iter_core.tests.iter.md` carries the same id and name.
