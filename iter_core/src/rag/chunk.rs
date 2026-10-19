@@ -384,10 +384,10 @@ mod tests {
         // code-heavy text: short in characters, long in word-pieces
         let line = "- `{topdir}/iter_data/src/rag/mod.rs: work_claim` claims `rag_chunk` rows (sum_state=claimed).\n";
         let text = format!("# Doc\n\n## Paths\n\n{}\n\n## Prose\n\n{}", line.repeat(40), "The engine runs the agent. ".repeat(120));
-        let (_, ck) = chunk_with(&text, "iter4 spec", &sz);
+        let (_, ck) = chunk_with(&text, "iter spec", &sz);
         assert!(ck.len() > 4);
         for c in &ck {
-            let n = e.count_tokens(&embed_input("iter4 spec", &c.heading, &c.text));
+            let n = e.count_tokens(&embed_input("iter spec", &c.heading, &c.text));
             assert!(n + 2 <= crate::rag::embed::MAX_TOKENS, "chunk {} is {n} tokens: {}", c.idx, c.text);
         }
     }

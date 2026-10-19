@@ -62,16 +62,6 @@ if [ "$LOCAL" = 1 ]; then
     kill -0 "$ARANGO_PID" 2>/dev/null || { echo "[iter_data] arangod exited during startup" >&2; exit 1; }
     sleep 1
   done
-
-  # Images before 2026-10-17 kept iter's data in database iter5 (ARANGO_DB=iter5 in
-  # the image); with no ARANGO_DB given, keep using it while iter_db does not exist.
-  if [ -z "${ARANGO_DB:-}" ]; then
-    dbs="$(curl -fsS -u "root:${ARANGO_ROOT_PASSWORD:-}" http://127.0.0.1:8529/_api/database 2>/dev/null || true)"
-    if grep -q '"iter"' <<<"$dbs" && ! grep -q '"iter_db"' <<<"$dbs"; then
-      export ARANGO_DB=iter5
-      echo "[iter_data] using the existing database iter5 (from before iter_db; set ARANGO_DB to choose)"
-    fi
-  fi
 else
   echo "[iter_data] ArangoDB at $ARANGO_URL: not starting arangod in this container"
 fi

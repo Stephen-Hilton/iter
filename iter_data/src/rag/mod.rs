@@ -1,4 +1,4 @@
-//! GraphRAG (iter4, 2026-09-29): retrieval over a project's documents, tied
+//! GraphRAG (2026-09-29): retrieval over a project's documents, tied
 //! to its architecture map.
 //!
 //! Two kinds of document, both per project:

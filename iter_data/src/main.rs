@@ -1,7 +1,6 @@
 //! iter_data — the central API server + persistence for iter.
 //! Storage is ArangoDB only (graph + documents in one engine, usually in the
-//! same container; decided 2026-09-29 — no SQLite, no DynamoDB). The iter3
-//! DynamoDB migration was removed in iter.
+//! same container; decided 2026-09-29 — no SQLite, no DynamoDB).
 
 mod api;
 mod arango;
@@ -235,7 +234,7 @@ async fn main() {
 
     bootstrap_admin(store.as_ref()).await;
     // the settings graph (§7): placeholders, iter_data:self, providers,
-    // workitem types, and the one-time iter4 -> iter5 edge migration
+    // workitem types
     if let Err(e) = settings::bootstrap(store.as_ref()).await {
         eprintln!("[iter_data] settings graph bootstrap failed: {e}");
     }

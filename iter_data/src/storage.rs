@@ -1,6 +1,6 @@
 //! Storage interface (decided 2026-09-01): one trait between the API and the
-//! persistence layer. iter4/iter5 serve from ArangoDB only (2026-09-29); the
-//! iter3 DynamoDB migration source was removed in iter5.
+//! persistence layer. iter serves from ArangoDB only (2026-09-29); the
+//! DynamoDB source was removed.
 //!
 //! Data model: every logical table is (pk, sk) -> body(JSON). Three operations
 //! need backend-native atomicity and get dedicated methods instead of generic

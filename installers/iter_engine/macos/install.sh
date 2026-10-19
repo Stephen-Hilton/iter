@@ -422,7 +422,7 @@ mv_into() { # SRC DEST REL
   run mkdir -p "$(dirname "$dest")"
   run mv "$1" "$dest"
 }
-# one older home folder (~/.iter, ~/.iter5) into the new layout
+# the older home folder (~/.iter) into the new layout
 move_old_home() { # DIR
   local s="$1" f g n m
   if [ $DRY = 1 ] && [ -f "$s/engine.conf" ] && [ ! -f "$CONF" ]; then CONF_READ="$s/engine.conf"; fi
@@ -450,20 +450,18 @@ move_old_home() { # DIR
   done
   if [ $DRY = 1 ]; then run rmdir "$s"; else rmdir "$s" 2>/dev/null || warn "$s is not empty: left as it is"; fi
 }
-# an install from before 2026-10-18 kept everything in ~/.iter (before
-# 2026-10-11 ~/.iter5): move it into the iter dir, once; never deletes a file
+# an install from before 2026-10-18 kept everything in ~/.iter:
+# move it into the iter dir, once; never deletes a file
 migrate_old() {
   local s found=""
-  for s in "$HOME/.iter" "$HOME/.iter5"; do
+  for s in "$HOME/.iter"; do
     if [ -d "$s" ] && [ ! -L "$s" ]; then found="$found $s"; fi
   done
   [ -n "$found" ] || return 0
   ok "moving the older install in${found} into $IHOME"
   # the agent runs the engine from there: stop it first (step 8/9 loads the new one)
-  if [ -f "$PLIST" ] && grep -q '/\.iter5\{0,1\}/bin/iter_engine' "$PLIST" && agent_loaded; then run launchctl bootout "$DOMAIN/$LABEL"; fi
+  if [ -f "$PLIST" ] && grep -q '/\.iter/bin/iter_engine' "$PLIST" && agent_loaded; then run launchctl bootout "$DOMAIN/$LABEL"; fi
   for s in $found; do move_old_home "$s"; done
-  # ~/.iter5 was left as a link to ~/.iter by the 2026-10-11 move
-  if [ -L "$HOME/.iter5" ] && [ "$(readlink "$HOME/.iter5")" = "$HOME/.iter" ]; then run rm -f "$HOME/.iter5"; fi
   [ ! -d "$IHOME/old-dot-iter" ] || ok "files the installer does not know are kept in $IHOME/old-dot-iter"
 }
 
@@ -851,7 +849,7 @@ update() {
   # where the engine is now, when not yet in $IHOME: an older ~/.iter (flat
   # files) or another iter dir; place() below moves it
   local old="" sb="$BIN" sk="$KEYF" st="$TRUSTF" sh="$ITER_HOME" d
-  for d in "$HOME/.iter" "$HOME/.iter5"; do
+  for d in "$HOME/.iter"; do
     if [ -z "$old" ] && [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/engine.conf" ]; then
       old="$d"; CONF_READ="$d/engine.conf" BIN="$d/bin/iter_engine" KEYF="$d/engine.key" TRUSTF="$d/server_trust.json" ITER_HOME="$d"
     fi

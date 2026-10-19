@@ -43,7 +43,7 @@ Everything goes in one folder, the **iter dir**: `/opt/iter` unless you give `--
 
 Only links live outside the folder: `/etc/systemd/system/iter-engine.service` and `/usr/local/bin/iter_engine`. When the iter dir is on another filesystem than `/`, the unit is copied there instead, because systemd reads units before other disks are mounted. The service sets `ITER_HOME` to the engine's folder. `iter_engine` run by hand (through the link) finds its folder from its own path. Later runs (`status`, `update`, `uninstall`) find the iter dir from the service, so `--iter-dir` is only needed the first time. A run with another `--iter-dir` moves the folder there.
 
-**An install from before 2026-10-18** (`~/.iter`, or `~/.iter5`) is moved in by the next `install` or `update`, with the service stopped meanwhile. Each file goes to its place above. Files the engine does not use go to `iter_engine/old-dot-iter/`; nothing is deleted. iter_data's files from an old install (`~/.iter/iter_data`, `data.env`) stay, for its own installer. The key, and so the webui's record of this engine, stays the same.
+**An install from before 2026-10-18** (`~/.iter`) is moved in by the next `install` or `update`, with the service stopped meanwhile. Each file goes to its place above. Files the engine does not use go to `iter_engine/old-dot-iter/`; nothing is deleted. iter_data's files from an old install (`~/.iter/iter_data`, `data.env`) stay, for its own installer. The key, and so the webui's record of this engine, stays the same.
 
 ## Options
 

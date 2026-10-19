@@ -23,7 +23,6 @@ Engine settings (defaults in brackets):
   -Name     [the hostname]
   -Distro   [Debian]   the WSL distro running the server (startup, autostart)
 The engine's key, pid and log live in ~\.iter\ (engine.key, engine.pid, engine.log, engine.err.log);
-a machine set up when that was ~\.iter5\ is moved over when no engine runs from it.
 Needs: Rust (rustup, MSVC toolchain), Git for Windows (bash, for shell steps), WSL2.
 #>
 param(
@@ -44,8 +43,7 @@ $Root = $PSScriptRoot
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
 $Bin = Join-Path $Root "bin\windows-$Arch"
 $Exe = Join-Path $Bin 'iter_engine.exe'
-$OldHome = Join-Path $HOME '.iter5'
-# the engine's own files; ~\.iter5 became ~\.iter (2026-10-11)
+# the engine's own files
 function Set-IterHome($dir) {
     $script:IterHome = $dir
     $script:PidFile = Join-Path $dir 'engine.pid'
@@ -55,20 +53,7 @@ function Set-IterHome($dir) {
     if (-not $script:EnvFileGiven) { $script:EnvFile = Join-Path $dir '.env' }
 }
 $EnvFileGiven = [bool]$EnvFile
-# Move ~\.iter5 to ~\.iter once and leave a junction at the old path. While an
-# engine runs from it its open log files block the move: this run keeps using
-# ~\.iter5, and the move happens after the next stop (Stop-Engine).
-function Move-IterHome {
-    $new = Join-Path $HOME '.iter'
-    $old = Get-Item $OldHome -Force -ErrorAction SilentlyContinue
-    if (-not $old -or ($old.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Test-Path $new)) { Set-IterHome $new; return }
-    try {
-        Move-Item $OldHome $new -ErrorAction Stop
-        New-Item -ItemType Junction -Path $OldHome -Target $new | Out-Null
-        Say 'moved ~\.iter5 to ~\.iter (~\.iter5 links to it)'
-        Set-IterHome $new
-    } catch { Set-IterHome $OldHome }
-}
+Set-IterHome (Join-Path $HOME '.iter')
 $Port = if ($env:ITER_PORT) { $env:ITER_PORT } else { '8400' }
 
 function Say($m) { Write-Host "[deploy] $m" }
@@ -145,7 +130,6 @@ function Stop-Engine {
         $p.WaitForExit(10000) | Out-Null
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
-    if ($IterHome -eq $OldHome) { Move-IterHome }
 }
 
 function Start-Engine {
@@ -317,7 +301,6 @@ function Restart-Wsl {
     if ($hadDocker) { Start-DockerDesktop }
 }
 
-Move-IterHome
 
 switch ($Mode) {
     'docker'    { Show-DockerMoved; exit 1 }

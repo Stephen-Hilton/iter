@@ -1,4 +1,4 @@
-//! GraphRAG, the engine half (iter4, 2026-09-29; server half in
+//! GraphRAG, the engine half (2026-09-29; server half in
 //! iter_data/src/rag/). The engine owns the heavy work — it has the checkout,
 //! the Claude accounts, and native hardware (decided 2026-09-29):
 //!
@@ -121,8 +121,8 @@ pub fn prepare(title: &str, text: &str) -> Result<Value, String> {
 
 pub fn sync(api: &Api, project: &str, topdir: &Path, dry_run: bool, force: bool) -> Result<SyncReport, String> {
     let g = api.get(&format!("/api/projects/{project}/graph")).map_err(|e| format!("reading the map: {e}"))?;
-    // iter5 graph: `nodes` (iter4 maps said `vertices`)
-    let vertices: Vec<Value> = g.get("nodes").or_else(|| g.get("vertices")).unwrap_or(&Value::Null)
+    // the graph's `nodes`
+    let vertices: Vec<Value> = g.get("nodes").unwrap_or(&Value::Null)
         .as_array()
         .cloned()
         .unwrap_or_default()

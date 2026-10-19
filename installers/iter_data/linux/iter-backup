@@ -83,5 +83,5 @@ done
 mkdir -p "$DEST"
 tar -C "$tmp" -cf "$DEST/.iter-$ts.tar.part" .
 mv "$DEST/.iter-$ts.tar.part" "$DEST/iter-$ts.tar"
-ls -1t "$DEST"/iter-*.tar "$DEST"/iter5-*.tar 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
-echo "iter-backup: $DEST/iter-$ts.tar ($(du -h "$DEST/iter-$ts.tar" | cut -f1)) of database $DB, $(ls "$DEST"/iter-*.tar "$DEST"/iter5-*.tar 2>/dev/null | wc -l) kept"
+ls -1t "$DEST"/iter-*.tar | tail -n +$((KEEP + 1)) | xargs -r rm -f
+echo "iter-backup: $DEST/iter-$ts.tar ($(du -h "$DEST/iter-$ts.tar" | cut -f1)) of database $DB, $(ls "$DEST"/iter-*.tar | wc -l) kept"

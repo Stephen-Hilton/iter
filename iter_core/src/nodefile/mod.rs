@@ -95,7 +95,7 @@ impl fmt::Display for NodeType {
 
 /// The type tag of a node filename (a bare name or a whole path), or `None`
 /// for a plain context doc / non-`.iter.md` file. Case-sensitive.
-/// Legacy iter4 names are recognised so the converter and conform can use
+/// Legacy names are recognised so the converter and conform can use
 /// them: `main.iter.md` → project, `*.tests.iter.md` / `*.testgroup.iter.md`
 /// → test, `*.agentmemory.iter.md` → agentmem.
 pub fn type_of(filename: &str) -> Option<NodeType> {
@@ -108,8 +108,8 @@ pub fn type_of(filename: &str) -> Option<NodeType> {
     })
 }
 
-/// True when the filename uses an iter4 type tag (`main`, `tests`,
-/// `testgroup`, `agentmemory`) that the removed iter4 → iter5 converter renamed.
+/// True when the filename uses a legacy type tag (`main`, `tests`,
+/// `testgroup`, `agentmemory`).
 pub fn is_legacy_filename(filename: &str) -> bool {
     matches!(type_tag(filename), Some("main" | "tests" | "testgroup" | "agentmemory"))
 }
@@ -128,7 +128,7 @@ pub fn is_synced(t: NodeType) -> bool {
 
 /// Valid `level:` values of a code node.
 pub const LEVELS: [&str; 4] = ["context", "container", "component", "connection"];
-/// Valid `teststate:` values (iter4 semantics).
+/// Valid `teststate:` values.
 pub const TESTSTATES: [&str; 4] = ["inherit", "include", "omit", "block"];
 /// Valid `status:` values of bizreq / techreq.
 pub const REQ_STATUSES: [&str; 3] = ["draft", "agreed", "done"];

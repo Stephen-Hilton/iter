@@ -148,7 +148,7 @@ fn scopes(req: &SearchReq, project: &str) -> Vec<String> {
 /// The vector indexes are shared by every project, and approximate: their top
 /// candidates are drawn from all chunks, then filtered to this project. That
 /// only finds this project's best chunks when it holds most of the index — a
-/// small project beside a big one lost recall (measured 2026-09-30: iter4's
+/// small project beside a big one lost recall (measured 2026-09-30: the earlier
 /// hit@5 fell 0.88 → 0.79 beside pdy-dev's 47k chunks). Small projects keep
 /// exact cosine, which is fast at their size anyway.
 async fn index_pays_off(a: &ArangoBackend, ps: &[String]) -> bool {

@@ -64,8 +64,7 @@ RUN chmod +x /usr/local/bin/iter-entrypoint.sh /usr/local/bin/arango-entrypoint.
  && ln -s /var/lib/iter_data/arango/apps /var/lib/arangodb3-apps \
  && ln -s /var/lib/iter_data/state /var/lib/iter
 
-# ARANGO_DB is left unset: iter_data's default is iter_db, and the entrypoint keeps
-# an older install on its database iter5. ARANGO_URL elsewhere = no arangod here.
+# ARANGO_DB is left unset: iter_data's default is iter_db. ARANGO_URL elsewhere = no arangod here.
 ENV ARANGO_VERSION=3.12.12 \
     GLIBCXX_FORCE_NEW=1 \
     ARANGO_URL=http://127.0.0.1:8529 \

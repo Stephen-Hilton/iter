@@ -891,7 +891,7 @@ do_status() {
   else fp="$(fingerprint)"; printf '%-18s %s\n' tls "$TLS_MODE, certificate fingerprint ${fp:-unknown (not started yet?)}"; fi
   systemctl list-timers iter-backup.timer --no-pager 2>/dev/null | sed -n 2p || true
   local dir; dir="$(rootenvval ITER_BACKUP_DIR "$BACKUP_ENV")"
-  $SUDO sh -c "ls -1t '${dir:-$D/backups}'/iter-*.tar '${dir:-$D/backups}'/iter5-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
+  $SUDO sh -c "ls -1t '${dir:-$D/backups}'/iter-*.tar 2>/dev/null | head -3" | grep . || echo "no backups yet"
 }
 
 # load a backup's database back into iter's database (only that one), with

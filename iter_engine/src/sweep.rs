@@ -3,7 +3,7 @@
 //!
 //! The graph (`GET /api/projects/{p}/graph` → `{nodes, edges}`) says which
 //! test nodes exist and which node owns each (`tests` edges). Teststate is
-//! evaluated per chain, as in iter4: chains start at the project node and at
+//! evaluated per chain, as before: chains start at the project node and at
 //! every use case / actor, and run down `codenodes` and `uses` edges; a test
 //! node runs when its own teststate is not `omit`/`block` and at least one
 //! chain reaching an owner says include. Each run's aggregated standard result

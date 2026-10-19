@@ -1,16 +1,16 @@
 ---
 id: dd366398-147d-450e-a792-59ef7ae020bc
-projectname: "iter4"
+projectname: "iter"
 projectdescription: "The iter harness, version 4: one ArangoDB-backed data server, local engines that run headless Claude agents, and a map of the program built from its own *.iter.md files."
 globalscandirs: ["{topdir}/"]
 globalinterfacedir: "{topdir}/interfaces/"
 globalusecasedir: "{topdir}/usecases/"
-globalcontextfiles: ["{topdir}/reqs/iter4.bizreq.iter.md", "{topdir}/reqs/iter4.techreq.iter.md"]
+globalcontextfiles: ["{topdir}/reqs/iter.bizreq.iter.md", "{topdir}/reqs/iter.techreq.iter.md"]
 actorsfile: "{topdir}/map/actors.yaml"
 children:
   codenodes: ["{topdir}/map/orchestration/orchestration.code.iter.md", "{topdir}/map/engine/engine.code.iter.md", "{topdir}/map/shared/shared.code.iter.md", "{topdir}/map/delivery/delivery.code.iter.md"]
 ---
-# iter4
+# iter
 
 iter keeps AI coding agents working on a real software project without letting
 them trip over each other. A person, or an agent, files a **work item**: "make
@@ -53,7 +53,7 @@ a schedule, filing one work item for each group that goes red.
 
 ## Why this file exists
 
-This repository is iter4's own checkout, and iter4 maps itself. This file is
+This repository is iter's own checkout, and iter maps itself. This file is
 the root of the map: its `children` list the four areas, each area file lists
 its containers, and each container lists its components. `iter sync` pushes the
 whole description to the data server, and the Project graph tab draws it.

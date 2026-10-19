@@ -76,9 +76,7 @@ installers remove `ITER_ADMIN_PASSWORD` from where they put it: linux / linux_aw
 
 iter_data signs in to ArangoDB as its own user (`iter_user`), which holds `rw` on its own database
 (`iter_db`) and nothing else. On the first start, when either is missing, iter_data uses
-`ARANGO_ROOT_PASSWORD` once to create them and grant `rw`. iter's user never gets root's password. An
-install made before 2026-10-17 (root, database `iter5`) moves to `iter_user` on its next run and keeps
-`iter`; the docker container detects `iter` on its own.
+`ARANGO_ROOT_PASSWORD` once to create them and grant `rw`. iter's user never gets root's password.
 
 By default every iter_data installer runs ArangoDB beside iter_data. To use an ArangoDB you already run
 (shared with other apps, or on another machine), give it `--arango-url`:

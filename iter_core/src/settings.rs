@@ -368,7 +368,7 @@ pub struct HeldAccount {
 }
 
 impl BilledAccount {
-    /// The iter4 `Account` shape `pick_account` takes.
+    /// The `Account` shape `pick_account` takes.
     pub fn to_account(&self) -> crate::Account {
         crate::Account { name: self.name.clone(), token_envar: self.token_envar.clone(), order: self.order, switch: self.switch, stop: self.stop }
     }

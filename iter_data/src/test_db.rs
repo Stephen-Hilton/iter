@@ -1,32 +1,25 @@
 //! Test databases (ArangoDB-only): every test that needs a store gets its own
 //! throwaway database on the dev ArangoDB (`./deploy.sh local` starts it on
 //! :8529). ITER_TEST_ARANGO_URL and ITER_TEST_ARANGO_PASSWORD override the
-//! defaults (the older ITER5_ and ITER4_ names are still read as a fallback).
+//! defaults.
 //!
 //! Databases are named `iter_test_<unix-seconds>_<uuid>`. The first test of a
 //! run drops only `iter_test_*` databases created more than two hours ago, so
 //! a concurrently running test run (another team, another checkout) is never
-//! touched. Leftover `iter5_test_*` databases from before the rename are swept
-//! the same way.
+//! touched.
 
 use crate::arango::ArangoBackend;
 use tokio::sync::OnceCell;
 
 const PREFIX: &str = "iter_test_";
-/// the earlier prefix: leftovers of runs before the rename are still swept
-const OLD_PREFIX: &str = "iter5_test_";
 const STALE_SECS: u64 = 2 * 60 * 60;
 
-fn env2(a: &str, b: &str, c: &str) -> Option<String> {
-    [a, b, c].iter().find_map(|k| std::env::var(k).ok())
-}
-
 pub fn url() -> String {
-    env2("ITER_TEST_ARANGO_URL", "ITER5_TEST_ARANGO_URL", "ITER4_TEST_ARANGO_URL").unwrap_or_else(|| "http://127.0.0.1:8529".into())
+    std::env::var("ITER_TEST_ARANGO_URL").ok().unwrap_or_else(|| "http://127.0.0.1:8529".into())
 }
 
 pub fn password() -> String {
-    env2("ITER_TEST_ARANGO_PASSWORD", "ITER5_TEST_ARANGO_PASSWORD", "ITER4_TEST_ARANGO_PASSWORD").unwrap_or_else(|| "iterdev".into())
+    std::env::var("ITER_TEST_ARANGO_PASSWORD").ok().unwrap_or_else(|| "iterdev".into())
 }
 
 fn now_secs() -> u64 {
@@ -72,7 +65,7 @@ pub async fn drop(db: &str) {
 
 /// The creation time encoded in a test database name, if it is one of ours.
 fn created_at(name: &str) -> Option<u64> {
-    name.strip_prefix(PREFIX).or_else(|| name.strip_prefix(OLD_PREFIX))?.split('_').next()?.parse().ok()
+    name.strip_prefix(PREFIX)?.split('_').next()?.parse().ok()
 }
 
 /// Databases a previous test run left behind (a panicking test never drops
@@ -102,7 +95,7 @@ mod tests {
     #[test]
     fn only_old_iter_names_are_stale_candidates() {
         assert_eq!(super::created_at("iter_test_1700000000_abc"), Some(1700000000));
-        assert_eq!(super::created_at("iter4_test_abc"), None);
+        assert_eq!(super::created_at("other_test_abc"), None);
         assert_eq!(super::created_at("iter_test_abcdef"), None);
     }
 }

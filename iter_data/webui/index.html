@@ -495,10 +495,10 @@ function nameOf(type,id){
   const r=list.find(x=>rid(x)===id);
   return r?rname(r):String(id);
 }
-/* the projects an engine serves: active serves edges in the settings graph; iter4-shaped engine records as a fallback */
+/* the projects an engine serves: active serves edges in the settings graph */
 function servesOf(e){
   if(sgCache&&Array.isArray(sgCache.edges))return sgCache.edges.filter(x=>x.type==="serves"&&x.from==="iter_engine:"+rid(e)&&x.active!==false).map(x=>String(x.to).replace(/^project:/,""));
-  return Object.keys(e.projects||{});
+  return [];
 }
 async function openSettingsGraph(id){await setTab("settings");if(id&&window.IterSettings)setTimeout(()=>IterSettings.focus(id),60);}
 let token=null,me=null,myRole="",project=null,itemsCache=[],agentsCache=[],projectsCache=[],enginesCache=[],dlgDirty=false;
@@ -908,7 +908,7 @@ const MAP_ICON={project:"◆",code:"▣",context:"▣",container:"▢",component
 async function renderMapStats(p){
   const st=await api("/api/projects/"+encodeURIComponent(p)+"/graph/stats");
   const by=st.by_nodetype||st.nodetypes||{};
-  const total=st.nodes??st.vertices??Object.values(by).reduce((a,b)=>a+(+b||0),0);
+  const total=st.nodes??Object.values(by).reduce((a,b)=>a+(+b||0),0);
   if(!total){$("#mapstats").innerHTML="<div class='eng kv'>no nodes yet — design one in the Project graph tab</div>";return;}
   const order=["project","context","container","component","connection","code","test","bizreq","techreq","philosophy","usecase","actor"];
   const types=Object.entries(by).map(([t,n])=>[t.replace(/^code\//,""),n]).filter(([t])=>MAP_ICON[t]).sort((a,b)=>order.indexOf(a[0])-order.indexOf(b[0])).map(([t,n])=>`<span><i>${MAP_ICON[t]}</i>${esc(t)}<b>${esc(n)}</b></span>`).join("");
@@ -2235,7 +2235,7 @@ document.addEventListener("keydown",e=>{
 let introMounted=false;
 function introCtx(){return {api,project,isAdmin:isAdmin(),
   // the slides point at iter's own map: show that project (when this server has it), then the node
-  openGraph:async(q,p)=>{const own=p||["iter5","iter"].find(n=>projectsCache.some(x=>rid(x)===n));if(own&&projectsCache.some(x=>rid(x)===own)&&project!==own)await loadItems(own);
+  openGraph:async(q,p)=>{const own=p||"iter";if(own&&projectsCache.some(x=>rid(x)===own)&&project!==own)await loadItems(own);
     await setTab("graph");setTimeout(()=>{if(q&&window.IterGraph&&IterGraph.focus)IterGraph.focus(q);},700);},
   openSettings:id=>openSettingsGraph(id||""),openKeys:()=>openSettings("keys"),
   openQueue:()=>setTab("queue"),reloadProjects:()=>load(),

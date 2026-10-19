@@ -1,4 +1,4 @@
-//! Storage contract (iter4): the behaviour every caller relies on, checked
+//! Storage contract: the behaviour every caller relies on, checked
 //! on ArangoDB — each test on its own throwaway database (test_db.rs).
 
 use crate::storage::{Storage, StorageError};

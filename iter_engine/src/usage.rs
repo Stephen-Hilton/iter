@@ -13,7 +13,7 @@
 //!     numbers, on a 429 rejection too.  ~9 tokens per call, no `claude`
 //!     process.  `ITER_USAGE_PROBE_URL` overrides the endpoint (e2e fake).
 //!
-//! Snapshot files: `$ITER_USAGE_DIR/iter3-usage-<account>.json` (default dir
+//! Snapshot files: `$ITER_USAGE_DIR/iter-usage-<account>.json` (default dir
 //! `~/.claude`; account "" -> "default", and the machine-wide
 //! `usage-snapshot.json` a statusline collector writes is read as a fallback
 //! for "default").
@@ -49,7 +49,7 @@ fn account_key(account: &str) -> String {
 }
 
 pub fn snapshot_path(account: &str) -> PathBuf {
-    usage_dir().join(format!("iter3-usage-{}.json", account_key(account)))
+    usage_dir().join(format!("iter-usage-{}.json", account_key(account)))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,7 +158,7 @@ pub fn write_snapshot(account: &str, u: &Usage) -> Result<(), String> {
     let path = snapshot_path(account);
     let dir = path.parent().ok_or("snapshot path has no parent")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let tmp = dir.join(format!(".iter3-usage-{}.{}.tmp", account_key(account), std::process::id()));
+    let tmp = dir.join(format!(".iter-usage-{}.{}.tmp", account_key(account), std::process::id()));
     std::fs::write(&tmp, u.to_snapshot().to_string()).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
@@ -214,7 +214,7 @@ pub fn probe(token: &str) -> Result<Usage, String> {
         .header("Authorization", format!("Bearer {}", token.trim()))
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("anthropic-version", "2023-06-01")
-        .header("User-Agent", "claude-code/2.1.260 iter3-usage-probe")
+        .header("User-Agent", "claude-code/2.1.260 iter-usage-probe")
         .header("Content-Type", "application/json")
         .body(r#"{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"."}]}"#)
         .send()

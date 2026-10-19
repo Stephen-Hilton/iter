@@ -8,15 +8,15 @@ const ID: &str = "3f0c1d2e-4a5b-4c6d-8e7f-0123456789ab";
 
 /* ------------------------------------------------------------- fixtures */
 
-/// (path, text) — real iter4 files copied from the iter5 tree plus hand-made
+/// (path, text) — real legacy-format files copied from this tree plus hand-made
 /// messy ones. Every one must conform idempotently.
 fn fixtures() -> Vec<(&'static str, String)> {
     vec![
         ("{topdir}/iter_local/src/ids.code.iter.md", include_str!("fixtures/ids.code.iter.md.fixture").to_string()),
         ("{topdir}/map/engine/engine.code.iter.md", include_str!("fixtures/engine.code.iter.md.fixture").to_string()),
         ("{topdir}/iter_data/src/mcp.code.iter.md", include_str!("fixtures/mcp.code.iter.md.fixture").to_string()),
-        ("{topdir}/reqs/iter4.bizreq.iter.md", include_str!("fixtures/iter4.bizreq.iter.md.fixture").to_string()),
-        ("{topdir}/reqs/iter4.techreq.iter.md", include_str!("fixtures/iter4.techreq.iter.md.fixture").to_string()),
+        ("{topdir}/reqs/iter.bizreq.iter.md", include_str!("fixtures/iter.bizreq.iter.md.fixture").to_string()),
+        ("{topdir}/reqs/iter.techreq.iter.md", include_str!("fixtures/iter.techreq.iter.md.fixture").to_string()),
         (
             "{topdir}/usecases/map-the-repo/map-the-repo.usecase.iter.md",
             include_str!("fixtures/map-the-repo.usecase.iter.md.fixture").to_string(),
@@ -325,7 +325,7 @@ fn legacy_main_file_migrates() {
     let text = include_str!("fixtures/main.iter.md.fixture");
     let d = parse("{topdir}/main.iter.md", text).unwrap();
     assert_eq!(d.nodetype, NodeType::Project);
-    assert_eq!(d.name, "iter4");
+    assert_eq!(d.name, "iter");
     assert!(d.desc.starts_with("The iter harness"));
     assert_eq!(d.front.get("scandirs"), Some(&json!(["{topdir}/"])));
     assert!(!d.front.contains_key("globalinterfacedir"));
@@ -335,7 +335,7 @@ fn legacy_main_file_migrates() {
 
 #[test]
 fn legacy_reqpaths_and_testpaths() {
-    let d = parse("{topdir}/reqs/iter4.bizreq.iter.md", include_str!("fixtures/iter4.bizreq.iter.md.fixture")).unwrap();
+    let d = parse("{topdir}/reqs/iter.bizreq.iter.md", include_str!("fixtures/iter.bizreq.iter.md.fixture")).unwrap();
     assert_eq!(d.children.reqs, vec!["{topdir}/requirements.md"]);
     let d = parse("{topdir}/t/iter_core.tests.iter.md", include_str!("fixtures/iter_core.tests.iter.md.fixture")).unwrap();
     assert_eq!(d.nodetype, NodeType::Test);
@@ -406,7 +406,7 @@ fn conform_idempotent_over_fixtures() {
 
 #[test]
 fn conform_idempotent_over_repo_tree() {
-    // every *.iter.md in the iter5 checkout (iter4-era files) conforms to a
+    // every *.iter.md in this checkout (legacy-format files) conforms to a
     // fixed point — the property the engine's filescan relies on
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
     let mut stack = vec![root.clone()];
@@ -742,7 +742,7 @@ fn plan_path_in_follows_the_project_head_files_folder() {
     let none = HashSet::new();
     let n = Naming::Sequence;
     let pd = "{topdir}/docs/iter_project_docs";
-    let project = doc(NodeType::Project, "{topdir}/docs/iter_project_docs/iter5.project.iter.md", "iter5");
+    let project = doc(NodeType::Project, "{topdir}/docs/iter_project_docs/iter.project.iter.md", "iter");
     let uc = doc(NodeType::Usecase, "", "Environ");
     assert_eq!(plan_path_in(&uc, None, Attach::Root, &none, n, pd), "{topdir}/docs/iter_project_docs/usecases/environ.usecase.iter.md");
     let actor = doc(NodeType::Actor, "", "Employer");
@@ -750,7 +750,7 @@ fn plan_path_in_follows_the_project_head_files_folder() {
     let req = doc(NodeType::Techreq, "", "Global");
     assert_eq!(
         plan_path_in(&req, Some(&project), Attach::Under(EdgeKind::Reqs), &none, n, pd),
-        "{topdir}/docs/iter_project_docs/requirements/iter5.techreq.iter.md"
+        "{topdir}/docs/iter_project_docs/requirements/iter.techreq.iter.md"
     );
     let mut conn = doc(NodeType::Code, "", "API call");
     conn.level = Some("connection".into());

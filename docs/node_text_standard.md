@@ -1,4 +1,4 @@
-# Node-text standard (iter4, 2026-09-29)
+# Node-text standard (2026-09-29)
 
 Every `*.iter.md` node is read by people who have never seen the code, in the Project graph and in agent prompts. Its text must say what the part **does** and why anyone should care. `iter validate` checks the mechanical parts of this standard. The test sweep turns each failing node into one `ingest` work item.
 

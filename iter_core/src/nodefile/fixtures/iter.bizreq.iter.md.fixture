@@ -1,15 +1,15 @@
 ---
 id: f9c45d29-ee79-4a50-883f-90e07a62115b
-name: "iter4 business requirements"
-description: "What iter4 must do for the people who run it, project-wide."
+name: "iter business requirements"
+description: "What iter must do for the people who run it, project-wide."
 children:
   reqpaths: ["{topdir}/requirements.md"]
 ---
 
-# iter4 — business requirements
+# iter — business requirements
 
 - **B1.** One person can stand up the whole data side with one command, on a laptop (Docker Desktop) or a small cloud VM, and point any engine at it.
-- **B2.** Nothing already recorded is lost in the move: every iter3 work item, detail row, agent, tooling row, project, engine, user, lock, spend row and change counter arrives in iter4 unchanged.
+- **B2.** Nothing already recorded is lost in the move: every earlier work item, detail row, agent, tooling row, project, engine, user, lock, spend row and change counter arrives unchanged.
 - **B3.** The map of the program is built from the files already in the repository; nobody hand-enters it, and it keeps up with the files on its own.
 - **B4.** A test group that goes red becomes exactly one work item, not one per sweep.
 - **B5.** A node file keeps its identity through renames and moves.

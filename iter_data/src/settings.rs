@@ -9,8 +9,7 @@
 //! never stored, always present, never deletable. An edge with an endpoint on
 //! a placeholder keeps its settings but is inactive.
 //!
-//! Startup (`bootstrap`) seeds providers + workitem types and, once, turns
-//! iter4-shaped records into edges (`migrate_iter4`).
+//! Startup (`bootstrap`) seeds providers + workitem types.
 
 use crate::api::{ApiError, AppState, AuthUser, GLOBAL, NOSK, bad, forbidden, notfound};
 use crate::storage::{Storage, StorageError, body_str};
@@ -31,7 +30,6 @@ use std::sync::Arc;
 pub const EDGE_TABLE: &str = "sys_edge";
 const EDGE_PK: &str = "edge";
 pub(crate) const META_PK: &str = "meta";
-const MIGRATED_SK: &str = "iter4_migrated";
 
 type Ctx = State<Arc<AppState>>;
 
@@ -271,115 +269,7 @@ pub async fn bootstrap(store: &dyn Storage) -> Result<(), StorageError> {
             store.put("workitem_type", s, NOSK, &json!({"name": s, "desc": workitem_type_desc(s)})).await?;
         }
     }
-    if store.get(EDGE_TABLE, META_PK, MIGRATED_SK).await?.is_none() {
-        let report = migrate_iter4(store).await?;
-        store.put(EDGE_TABLE, META_PK, MIGRATED_SK, &json!({"at": now_utc(), "report": report})).await?;
-        println!("[iter_data] settings graph: older records migrated to edges {report}");
-    }
     Ok(())
-}
-
-/// One-time: iter4-shaped records → settings-graph nodes and edges.
-/// Idempotent (ensure_edge), so a rerun adds nothing.
-pub async fn migrate_iter4(store: &dyn Storage) -> Result<Value, StorageError> {
-    let mut n: BTreeMap<&str, u64> = BTreeMap::new();
-    let mut count = |k: &'static str, wrote: bool| {
-        if wrote {
-            *n.entry(k).or_insert(0) += 1;
-        }
-    };
-    let projects = store.scan("project").await?;
-    let engines = store.scan("engine").await?;
-    let agents = store.scan("agent").await?;
-    let tooling = store.scan("agent_tooling").await?;
-    let project_names: HashSet<String> = projects.iter().map(|p| cs::record_id(p)).filter(|s| !s.is_empty()).collect();
-
-    // Engine.projects -> serves (topdir, read_only); hosts
-    let mut serving: BTreeMap<String, Vec<String>> = BTreeMap::new(); // project -> engines
-    for e in &engines {
-        let en = cs::record_id(e);
-        if en.is_empty() {
-            continue;
-        }
-        let eid = node_id("iter_engine", &en);
-        count("hosts", ensure_edge(store, "hosts", ITER_DATA_SELF, &eid, json!({})).await?);
-        let user = body_str(e, "user");
-        if !user.is_empty() {
-            count("owns", ensure_edge(store, "owns", &node_id("user", &user), &eid, json!({})).await?);
-        }
-        if let Some(map) = e.get("projects").and_then(|p| p.as_object()) {
-            for (pn, dirs) in map {
-                if !project_names.contains(pn) {
-                    continue;
-                }
-                let topdir = dirs.get("dirs").and_then(|d| d.get("topdir")).and_then(|t| t.as_str()).unwrap_or("");
-                let ro = dirs.get("read_only").and_then(|r| r.as_bool()).unwrap_or(false);
-                let s = json!({"topdir": topdir, "read_only": ro});
-                count("serves", ensure_edge(store, "serves", &eid, &node_id("project", pn), s).await?);
-                serving.entry(pn.clone()).or_default().push(en.clone());
-            }
-        }
-    }
-
-    for p in &projects {
-        let pn = cs::record_id(p);
-        if pn.is_empty() {
-            continue;
-        }
-        let pid = node_id("project", &pn);
-        // Project.accounts -> account nodes + of + bills; every engine
-        // serving the project held the tokens in iter4 -> holds
-        for a in p.get("accounts").and_then(|a| a.as_array()).cloned().unwrap_or_default() {
-            let an = body_str(&a, "name");
-            if an.is_empty() {
-                continue;
-            }
-            if store.get("account", &an, NOSK).await?.is_none() {
-                let row = json!({"name": an, "token_envar": body_str(&a, "token_envar"), "provider": "claude", "desc": ""});
-                store.put("account", &an, NOSK, &row).await?;
-                count("account", true);
-            }
-            let aid = node_id("account", &an);
-            count("of", ensure_edge(store, "of", &aid, &node_id("provider", "claude"), json!({})).await?);
-            let s = json!({
-                "order": a.get("order").and_then(|v| v.as_i64()).unwrap_or(0),
-                "switch": a.get("switch").and_then(|v| v.as_u64()).unwrap_or(0),
-                "stop": a.get("stop").and_then(|v| v.as_u64()).unwrap_or(0),
-                "model": "",
-            });
-            count("bills", ensure_edge(store, "bills", &aid, &pid, s).await?);
-            for en in serving.get(&pn).cloned().unwrap_or_default() {
-                count("holds", ensure_edge(store, "holds", &node_id("iter_engine", &en), &aid, json!({})).await?);
-            }
-        }
-        // allows -> every workitem type (failed carries the failure policy)
-        for s in iter_core::STATES {
-            count("allows", ensure_edge(store, "allows", &pid, &node_id("workitem_type", s), allows_settings(s, Some(p))).await?);
-        }
-        // runs: every agent on every project; Project.agents overrides ride on the edge
-        let overrides = p.get("agents").cloned().unwrap_or(json!({}));
-        for a in &agents {
-            let an = cs::record_id(a);
-            if an.is_empty() {
-                continue;
-            }
-            let ovr = overrides.get(&an).filter(|o| o.is_object()).cloned().unwrap_or(json!({}));
-            count("runs", ensure_edge(store, "runs", &node_id("agent", &an), &pid, ovr).await?);
-        }
-        count("hosts", ensure_edge(store, "hosts", ITER_DATA_SELF, &pid, json!({})).await?);
-    }
-    for a in &agents {
-        let an = cs::record_id(a);
-        if an.is_empty() {
-            continue;
-        }
-        let aid = node_id("agent", &an);
-        count("handles", ensure_edge(store, "handles", &aid, &node_id("workitem_type", "queued"), json!({})).await?);
-        for t in tooling.iter().filter(|t| is_shared_tooling(t)) {
-            count("uses", ensure_edge(store, "uses", &node_id("agent_tools", &cs::record_id(t)), &aid, json!({})).await?);
-        }
-    }
-    Ok(json!(n))
 }
 
 // ---------- queries used by authz, assignments, get_next ----------

@@ -7,7 +7,7 @@
 #            ITER_LIVE_CLAUDE_TOKEN in the environment; skipped otherwise)
 #   --keep   keep the scratch directory (the e2e database is always dropped)
 #
-# Uses the dev ArangoDB on :8529 and a throwaway database iter5_e2e_<random>,
+# Uses the dev ArangoDB on :8529 and a throwaway database iter_e2e_<random>,
 # dropped on success and failure. Every check prints PASS/FAIL; a section that
 # cannot continue says so and the run goes on with the next one. The tally at
 # the end lists every failure; the exit code is non-zero on any.
@@ -115,7 +115,7 @@ wi()       { api GET "/api/projects/$1/workitems/$2"; }
 wi_state() { wi "$1" "$2" | jq -r .state; }
 wi_set()   { local J; J=$(wi "$1" "$2"); echo "$J" | jq "$3" | curl -sf -X PUT -H "authorization: Bearer $TOKEN" -H content-type:application/json "$BASE/api/projects/$1/workitems/$2?expect_version=$(echo "$J" | jq -r .version)" -d @- >/dev/null; }
 details()  { api GET "/api/projects/$1/workitems/$2/details"; }
-# project record edits (iter4 shape: maxagents, failure, state, maxdailycost)
+# project record edits (maxagents, failure, state, maxdailycost)
 proj_set() { api GET "/api/projects/$1" | jq "$2" | curl -sf -X PUT -H "authorization: Bearer $TOKEN" -H content-type:application/json "$BASE/api/projects/$1" -d @- >/dev/null; }
 # graph
 graph()    { api GET "/api/projects/$1/graph"; }
@@ -146,7 +146,7 @@ log_since() { tail -n +"$(( $1 + 1 ))" "$ENGINE_LOG"; }
 export ITER_USAGE_DIR="$SCRATCH/usage"; mkdir -p "$ITER_USAGE_DIR"
 FUT=$(( $(date +%s) + 86400 ))
 snap() { printf '{"ts":"%s","rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$FUT" "$3" "$FUT" > "$ITER_USAGE_DIR/iter3-usage-$1.json"; }
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$FUT" "$3" "$FUT" > "$ITER_USAGE_DIR/iter-usage-$1.json"; }
 
 # =====================================================================
 section "setup"
@@ -226,7 +226,7 @@ mkrepo() { # mkrepo <dir>
   find "$1" -name '*.iter.md.fixture' | while read -r f; do mv "$f" "${f%.fixture}"; done
   git -C "$1" init -q && git -C "$1" config user.email e2e@iter && git -C "$1" config user.name e2e
   git -C "$1" add -A && git -C "$1" commit -qm seed
-  # an agent session runs in its item's first lockdir when that exists (iter4
+  # an agent session runs in its item's first lockdir when that exists (
   # behaviour), so the lock scopes used below exist up front and every mock
   # path is relative to its lockdir
   (cd "$1" && mkdir -p out stop gate ask g1 g2 g3)
@@ -319,7 +319,7 @@ expect "engine token reading an unserved project's queue: 403" 403 "$(code "$ENG
 proj_set $PN '.state="Stopped"'
 R=$(NX); expect "next on a Stopped project" "project-stopped" "$(echo "$R" | jq -r .reason)"
 
-# ---- iter4 work-item API behaviours kept ----
+# ---- work-item API behaviours kept ----
 W1=$(wi_new $PN '{"name":"api checks","agent":"exec","exec_shell":"true","state":"paused","request":"please do x"}')
 expect "request in the create body becomes detail row 0" "request please do x" "$(details $PN "$W1" | jq -r '.[0]|"\(.key) \(.value)"')"
 expect "malformed question widget bounced (400)" 400 "$(code "$TOKEN" PUT "/api/projects/$PN/workitems/$W1/details/5" '{"key":"question","valuetype":"json","value":{"title":"","fields":[{"key":"x","type":"nope"}]}}')"

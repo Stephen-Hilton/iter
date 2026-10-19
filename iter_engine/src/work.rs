@@ -19,9 +19,9 @@ pub type RunOut = crate::provider::DispatchOut;
 /// briefing there helps nobody.
 pub const AGENTMEMORY_AGENTS: &[&str] = &["code", "refactor", "test", "testwriter", "deploy"];
 
-/// Legacy process-wide git lock (iter4).  Engine code uses [`git_lock`] —
+/// Legacy process-wide git lock.  Engine code uses [`git_lock`] —
 /// one mutex per checkout, so two projects never serialize each other; this
-/// static is kept only so iter4-era modules that still name it compile.
+/// static is kept only so older modules that still name it compile.
 #[allow(dead_code)]
 pub static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -703,7 +703,7 @@ pub(crate) fn commit_scoped(topdir: &str, item: &WorkItem, extra_paths: &[String
         } else {
             static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let list = std::env::temp_dir().join(format!(
-                "iter3-commit-{}-{}-{}.paths", short(&item.id), std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                "iter-commit-{}-{}-{}.paths", short(&item.id), std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             ));
             std::fs::write(&list, staged.as_bytes()).map_err(|e| format!("cannot write the commit path list: {e}"))?;
             let r = git_shell(
@@ -825,7 +825,7 @@ pub(crate) fn agent_timeout(project: &Project, item: &WorkItem, agent_def: &Valu
         .unwrap_or(3600)
 }
 
-/// Named pre/postwork beyond the enforced git set, from iter3_project_prepostwork.
+/// Named pre/postwork beyond the enforced git set, from the project_prepostwork table.
 fn run_named_ppw(
     api: &Api,
     project: &Project,
@@ -1980,7 +1980,7 @@ mod tests {
 
     /// A throwaway git repo with one seed commit; returns its path.
     fn temp_repo(tag: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("iter3-scoped-commit-{}-{}", std::process::id(), tag));
+        let dir = std::env::temp_dir().join(format!("iter-scoped-commit-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
@@ -2177,7 +2177,7 @@ mod tests {
 
     #[test]
     fn ensure_cwd_recreates_a_removed_code_path() {
-        let d = std::env::temp_dir().join(format!("iter4_cwd_{}", uuid::Uuid::new_v4())).join("lockdir");
+        let d = std::env::temp_dir().join(format!("iter_cwd_{}", uuid::Uuid::new_v4())).join("lockdir");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::remove_dir_all(&d).unwrap();
         assert!(ensure_cwd(&d.to_string_lossy()));
@@ -2325,7 +2325,7 @@ mod tests {
     }
 
     fn tmpdir(tag: &str) -> String {
-        let d = std::env::temp_dir().join(format!("iter4-f3-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("iter-f3-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.to_string_lossy().into_owned()

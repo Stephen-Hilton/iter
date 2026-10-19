@@ -1,4 +1,4 @@
-//! Node file → [`NodeDoc`], tolerant of iter4 legacy keys (§2.6 migration
+//! Node file → [`NodeDoc`], tolerant of legacy keys (§2.6 migration
 //! happens here, so `parse` and `conform` always agree on what a file says).
 
 use super::yaml;
@@ -29,7 +29,7 @@ pub(crate) struct Loose {
     pub migrated: bool,
 }
 
-/// Parse a node file. Legacy iter4 keys are migrated in the returned doc.
+/// Parse a node file. Legacy keys are migrated in the returned doc.
 /// Errors: not a node filename, or (synced types) a missing / malformed `id`
 /// — run [`super::conform`] first.
 pub fn parse(path: &str, text: &str) -> Result<NodeDoc, NodeErr> {
@@ -111,7 +111,7 @@ pub(crate) fn parse_loose(path: &str, text: &str) -> Result<Loose, NodeErr> {
     let id = m.remove("id").map(|v| str_of(&v).trim().to_string());
     seen.id = id.as_ref().is_some_and(|s| !s.is_empty());
 
-    // name / desc (+ iter4 projectname / projectdescription / description)
+    // name / desc (+ legacy projectname / projectdescription / description)
     let mut name = m.remove("name").map(|v| str_of(&v));
     seen.name = name.is_some();
     if let Some(pn) = m.remove("projectname") {
@@ -151,7 +151,7 @@ pub(crate) fn parse_loose(path: &str, text: &str) -> Result<Loose, NodeErr> {
         .map(|v| str_of(&v).trim().to_string())
         .filter(|s| !s.is_empty());
 
-    // body folding of the iter4 description variants
+    // body folding of the legacy description variants
     let simple = m.remove("simple_description").map(|v| str_of(&v));
     let long = m.remove("long_description").map(|v| str_of(&v));
     if simple.is_some() || long.is_some() {
@@ -201,7 +201,7 @@ pub(crate) fn parse_loose(path: &str, text: &str) -> Result<Loose, NodeErr> {
         }
         None => {}
     }
-    // top-level V1/iter4 list keys
+    // top-level legacy list keys
     for (old, to) in [
         ("bizreqs", "reqs"),
         ("techreqs", "reqs"),

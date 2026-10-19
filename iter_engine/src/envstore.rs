@@ -557,7 +557,7 @@ mod tests {
     }
 
     fn tmp(name: &str, content: &str) -> String {
-        let p = std::env::temp_dir().join(format!("iter3-envstore-{}-{}-{}.env", std::process::id(), name, rand_suffix()));
+        let p = std::env::temp_dir().join(format!("iter-envstore-{}-{}-{}.env", std::process::id(), name, rand_suffix()));
         std::fs::write(&p, content).unwrap();
         age(&p.to_string_lossy(), 10);
         p.to_string_lossy().into_owned()

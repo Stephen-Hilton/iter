@@ -286,7 +286,7 @@ move_to() {
   run mv "$1" "$to"
 }
 
-# an older engine folder (~/.iter, ~/.iter5) into the new layout, the service stopped first
+# an older engine folder (~/.iter) into the new layout, the service stopped first
 move_old_home() {  # move_old_home DIR
   local o="$1" e n
   [ -d "$o" ] && [ ! -L "$o" ] || return 0
@@ -331,9 +331,6 @@ place() {
     run $(maysudo "$OLD_ROOT") rmdir "$OLD_ROOT" 2>/dev/null || true
   fi
   make_dirs
-  # ~/.iter5 became ~/.iter on 2026-10-11; both now move into the iter dir
-  [ ! -L "$HOME/.iter5" ] || [ "$(readlink "$HOME/.iter5")" != "$OLDH" ] || run rm -f "$HOME/.iter5"
-  move_old_home "$HOME/.iter5"
   move_old_home "$OLDH"
   ok "$IHOME"
 }

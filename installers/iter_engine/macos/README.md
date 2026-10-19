@@ -28,7 +28,7 @@ Only two things live outside it: the launchd plist `~/Library/LaunchAgents/com.i
 
 `status`, `update`, `uninstall` and the other verbs find the folder from the plist, so they need no `--iter-dir`. Given another `--iter-dir`, `install` or `update` stops the agent, moves the whole `iter_engine/` folder there and loads the agent again.
 
-**From an older install.** Before 2026-10-18 the engine kept its files in `~/.iter` (before 2026-10-11 `~/.iter5`). `install` or `update` moves them into the new folder once, with the agent stopped: `engine.conf` and `server_trust.json` to `config/`, `engine.key*` and `.env` to `secrets/`, `bin/`, `models/` and `logs/` to their folders. Nothing is deleted or overwritten: a file the script does not know, or one whose new place is taken, goes to `iter_engine/old-dot-iter/`. `~/.iter` is removed once it is empty.
+**From an older install.** Before 2026-10-18 the engine kept its files in `~/.iter`. `install` or `update` moves them into the new folder once, with the agent stopped: `engine.conf` and `server_trust.json` to `config/`, `engine.key*` and `.env` to `secrets/`, `bin/`, `models/` and `logs/` to their folders. Nothing is deleted or overwritten: a file the script does not know, or one whose new place is taken, goes to `iter_engine/old-dot-iter/`. `~/.iter` is removed once it is empty.
 
 The steps:
 

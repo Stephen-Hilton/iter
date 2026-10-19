@@ -94,7 +94,7 @@ iter_data does not sign in to ArangoDB as root. It uses a user of its own, `iter
 
 On a start where `iter_user` cannot sign in (it does not exist yet, the database is missing, or it has too little access), iter_data uses `ARANGO_ROOT_PASSWORD` once: root creates the user (with `ARANGO_PASSWORD`) and the database, and grants `rw`. Then iter_data signs in as the user again. A user that already exists keeps its password; when `ARANGO_PASSWORD` is wrong for it, iter_data stops and says so. `ARANGO_PASSWORD` is never root's password, and the script refuses one that is.
 
-- **The container's own ArangoDB** (the default): the script keeps the root password and the user's password in `config/data.env`, and iter_data sets everything up on its first start. An install from before 2026-10-17 kept its data in a database named `iter5`. When `ARANGO_DB` is not set, `iter5` exists and `iter_db` does not, the container keeps using `iter5` and logs one line saying so.
+- **The container's own ArangoDB** (the default): the script keeps the root password and the user's password in `config/data.env`, and iter_data sets everything up on its first start.
 - **An existing ArangoDB**: either give `ARANGO_ROOT_PASSWORD` for the first start, or have that server's admin create the user and the database and grant `rw` beforehand. Then `ARANGO_PASSWORD` alone is enough.
 
 ## Using an existing ArangoDB
@@ -139,7 +139,7 @@ docker exec iter bash -c 'arangorestore --server.endpoint tcp://127.0.0.1:8529 \
 docker restart iter
 ```
 
-An install still on the older `iter` database (see above) has no `ARANGO_DB` set: name `iter` in place of `${ARANGO_DB:-iter_db}`. For an external ArangoDB, run the same commands with that server's endpoint (`ssl://host:8529` for HTTPS) from any machine with the Arango client tools. Leave the system collections out: `iter_user` may not restore Arango's own (`_queues` and the like), and iter does not need them, because iter_data recreates its named graph (`_graphs`) at every start. To restore into a database that does not exist yet, create it first (start iter_data once, or as root with `--create-database true`).
+For an external ArangoDB, run the same commands with that server's endpoint (`ssl://host:8529` for HTTPS) from any machine with the Arango client tools. Leave the system collections out: `iter_user` may not restore Arango's own (`_queues` and the like), and iter does not need them, because iter_data recreates its named graph (`_graphs`) at every start. To restore into a database that does not exist yet, create it first (start iter_data once, or as root with `--create-database true`).
 
 ## Status
 

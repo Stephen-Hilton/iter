@@ -78,7 +78,7 @@ fn candidates() -> Vec<PathBuf> {
     let rel = Path::new("models").join(MODEL_NAME);
     v.push(rel.clone());
     if let Ok(exe) = std::env::current_exe() {
-        // target/release/iter_data or bin/iter_engine → iter4/models/…
+        // target/release/iter_data or bin/iter_engine → models/…
         for anc in exe.ancestors().skip(1).take(4) {
             v.push(anc.join(&rel));
         }

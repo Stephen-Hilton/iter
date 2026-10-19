@@ -1,4 +1,4 @@
-//! GraphRAG's shared text and embedding code (iter4, 2026-09-29): file → text
+//! GraphRAG's shared text and embedding code (2026-09-29): file → text
 //! (`extract`), text → chapters + chunks sized for the model (`chunk`), and
 //! the all-MiniLM-L6-v2 embedder (`embed`). The engine runs all three for
 //! bulk work; iter_data runs only the embedder, for search questions.

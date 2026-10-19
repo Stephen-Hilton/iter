@@ -1,5 +1,5 @@
 //! Cluster-restart block (built 2026-09-09; plan:
-//! `iter3/plans/cluster_restart_block.buildplan.md`).
+//! `plans/cluster_restart_block.buildplan.md`).
 //!
 //! The statement this module makes true: *if you require the cluster for
 //! your work and it is between 02:00 and 06:00 PT, tag yourself as "blocked

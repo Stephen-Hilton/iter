@@ -1,19 +1,16 @@
 # iter — spec and build contract
 
 Source brief: `docs/requirements.md` + `docs/requirements.png` (the architecture diagram).
-iter5 is a fork of iter4 (the repo root is its cargo workspace). Everything iter4 does keeps working
-unless this document says it changes. Decisions taken with Stephen on 2026-10-02:
+The repo root is the cargo workspace. Decisions taken with Stephen on 2026-10-02:
 
-- Fork iter4, then rework (not greenfield).
 - **Node files are `*.code.iter.md` only** for all four C4 levels; the level is the `level:` key
   (`context | container | component | connection`). Filenames like `data.context.iter.md` in the
   brief's mockup are typos. `actor` is its own node type (behaves like `usecase`).
-- Build an iter4 → iter5 file converter (`iter migrate5`), test it on a *copy* of pdy-dev, never run it on live checkouts.
 - Automated tests dispatch to a deterministic **`mock` provider**; one opt-in live Claude smoke test.
 - Deviations from the diagram are allowed but every one is listed in §12 so the diagram stays single-source.
 
-Names / ports (so iter4 keeps running beside it): container `iter5`, API + webui **:8400**,
-Arango console **127.0.0.1:8630**, database `iter5`, dev/test Arango = the existing dev container on
+Names / ports: container `iter`, API + webui **:8400**,
+Arango console **127.0.0.1:8630**, database `iter_db`, dev/test Arango = the existing dev container on
 **:8529** with databases `iter_test_*` / `iter_e2e_*`, env overrides `ITER_TEST_ARANGO_URL`,
 `ITER_TEST_ARANGO_PASSWORD`. Browser storage keys `iter.*`.
 
@@ -26,10 +23,8 @@ Arango console **127.0.0.1:8630**, database `iter5`, dev/test Arango = the exist
 | `iter_core` | shared types + **the node-file library** (`nodefile`): parse / render / conform / name / resolve-children. Used identically by iter_data (node side) and iter_engine (file side) so both sides agree byte-for-byte. Also settings-graph types, test-result type. |
 | `iter_data` | the server: work items, locks, **server-side get_next**, the **project graph store (nodes = files)**, the **settings graph**, auth/authz, MCP, GraphRAG, webui. Never touches a repo. |
 | `iter_engine` | **one per machine**, serves every project it is connected to. Services: agent (get_next → load_context → dispatch → get_usage → workitem_report → test), filescan → conform → sync, schedule, test, build (designer push). |
-| `iter_engine::local` | checkout-side helpers (was the iter_local crate, folded into iter_engine 2026-10-16): file walking (git-ignore aware), test runner, validate. Its iter4 marker scan/graph snapshot is replaced by `iter_core::nodefile`. |
+| `iter_engine::local` | checkout-side helpers (was the iter_local crate, folded into iter_engine 2026-10-16): file walking (git-ignore aware), test runner, validate. The marker scan/graph snapshot of earlier versions is replaced by `iter_core::nodefile`. |
 | `iter_core::rag` | GraphRAG text extraction, chunking, embedding (was the iter_rag crate, folded into iter_core 2026-10-16). |
-
-iter3 DynamoDB migration code (`migrate_ddb.rs`, `ddb.rs`, aws deps) is **removed**.
 
 ---
 
@@ -61,7 +56,7 @@ id: 3f0c...uuid-v4
 name: "A short, readable name"
 desc: "~100 words: enough for an agent to decide whether to read the whole file."
 creator: "stephen"            # user name, or agent.<name> e.g. agent.code, or engine.<name>
-teststate: inherit            # inherit | include | omit | block   (iter4 semantics)
+teststate: inherit            # inherit | include | omit | block
 children:
   codedirs:  ["{thisfiledir}/**"]   # code dirs read/modified/locked; recursive
   codenodes: []                     # child code.iter.md files (cascade testing / ownership)
@@ -85,7 +80,7 @@ Only `*.iter.md` matches become graph edges; other matches are kept as plain ref
 | project | `scandirs: ["{topdir}/"]` (where marker files are looked for), `file_naming: sequence\|uuid12` (default sequence), `gitrepo: ""` (optional remote). `children.codenodes` = the root context nodes; `children.reqs` = **global** requirements (always given to every agent). |
 | code | `level` (required), `owner: bespoke\|oss\|3rdparty` (optional). **level=connection** also has `connects: {from: [paths], to: [paths]}` — the code nodes that *supply* this connection type and the ones it *connects to* (directional: from → connection → to). Any other code node may list `calls: [paths]`, `pulls: [paths]`, `pushes: [paths]`: other code nodes it calls the API of, pulls data from, or pushes data to, drawn as direct edges without a connection node (added 2026-10-10). |
 | test | `children.tests` = the scripts (`["{thisfiledir}/tests/{thisfilestem}*.sh"]`). `last_result:` the last standardized result JSON (§5). |
-| usecase | `children.codenodes` = the parts it uses (required, may be empty), `actors: [paths to actor files]`, `flowmap: {summary, sequence, process_flow, data_flow}` (iter4 shape). |
+| usecase | `children.codenodes` = the parts it uses (required, may be empty), `actors: [paths to actor files]`, `flowmap: {summary, sequence, process_flow, data_flow}`. |
 | actor | `drives: [usecase paths]`, `touches: [code node paths]` (where people interact). |
 | bizreq / techreq | file-level `status: draft\|agreed\|done` (default draft; kept for compatibility — each requirement's own status is on its marker line, §2.8). Body = optional preamble + one `## ` section per requirement (§2.8). |
 | philosophy | none. |
@@ -275,7 +270,7 @@ Engine service per served project, every tick (≤ few seconds):
   paths outside topdir), `git add` + commit (`iter: graph edit — <summary>`; only the touched files),
   push if a remote exists, then `POST …/files/ack {engine, acks: [{id, node_version, path, hash, commit}]}`
   → `file_state=synced`, `file_version=node_version`.
-- Lock-aware: if a pending path is inside a live work-item lock, the engine waits (iter4 behaviour).
+- Lock-aware: if a pending path is inside a live work-item lock, the engine waits.
 
 ### 3.4 Designer → build
 - A project can be created with no engine (`POST /api/projects` via settings graph or the wizard).
@@ -301,7 +296,7 @@ Engine service per served project, every tick (≤ few seconds):
 last line is still accepted (mapped to `normal`). Results: `POST /api/projects/{p}/graph/nodes/{id}/testresult {result}`
 → stored on the test node (`test`, `front.last_result`, `timestamps.last_tested` → pending_write) and the test log
 (`test_log` rows, diagram's `iter_data::test_logs`), `GET …/testlogs?node=&limit=`. A failed run files a work item
-(iter4 sweep behaviour, `new_workitem` on fail in the diagram).
+(sweep behaviour, `new_workitem` on fail in the diagram).
 
 ---
 
@@ -374,17 +369,17 @@ Live smoke: `test/e2e.sh --live` queues one tiny item to a real `claude` account
 
 ---
 
-## 6. iter_data API changes (summary; iter4 routes not mentioned stay)
+## 6. iter_data API changes (summary; routes not mentioned stay)
 
 ### 6.1 Removed
-`/graph` PUT snapshot sync, `/graph/edits` op list, `/datasync*`, interface everything, iter3 migration.
+`/graph` PUT snapshot sync, `/graph/edits` op list, `/datasync*`, interface everything.
 
 ### 6.2 Project graph (under `/api/projects/{p}`)
 | method | path | body / result |
 |---|---|---|
 | GET | `graph` | `{nodes:[Node], edges:[Edge], stats}` (deleted nodes excluded) |
 | GET | `graph/view` | webui shape: nodes with `level` (code level or nodetype), `parent` (owner chain), `usecases`, file_state; edges; usecases with flowmaps; summary |
-| GET | `graph/nodes/{id}` / `graph/nodes/{id}/neighbors?depth&direction` / `graph/lookup?path=|name=&nodetype=` / `graph/stats` | as iter4 |
+| GET | `graph/nodes/{id}` / `graph/nodes/{id}/neighbors?depth&direction` / `graph/lookup?path=|name=&nodetype=` / `graph/stats` | as before |
 | POST | `graph/nodes` | `{nodetype, level?, name, desc?, body?, attach_to?: id, attach_kind?: codenodes|tests|reqs|uses|drives|touches|supplies|connects, front?, children?}` → creates (path via §2.5), adds the attaching edge on the parent node, returns `{node, touched:[ids]}` |
 | PATCH | `graph/nodes/{id}` | `{expect_version?, name?, rename_path?, desc?, body?, teststate?, level?, front?, children?}` → node (with `rename_path: true`, a rename also moves the folder named after the old name: `moved`, `nodes`) |
 | DELETE | `graph/nodes/{id}` | `{reason}` → pending_delete (also removes it from every parent's children lists) |
@@ -399,7 +394,7 @@ Live smoke: `test/e2e.sh --live` queues one tiny item to a real `claude` account
 | GET | `testlogs?node=&limit=` | test log rows |
 | POST | `files/sync`, GET `files/pending`, POST `files/ack` | §3 |
 | POST | `build`, POST `build/done`, GET `build` | §3.4 |
-| POST | `graph/run_tests` | `{node}` → test work item (iter4 run_tests) |
+| POST | `graph/run_tests` | `{node}` → test work item (run_tests) |
 
 ### 6.3 get_next — §4.3. Engines — `GET /api/engines/{name}/assignments`; heartbeat reply adds `files_waiting`, `build_waiting` (and keeps `rag_waiting`).
 
@@ -413,7 +408,7 @@ through the same authz.
 ---
 
 ## 7. Settings graph
-Every setting lives on a node or an edge. Stored in Arango: node records stay in their iter4 tables
+Every setting lives on a node or an edge. Stored in Arango: node records stay in their tables
 (`project`, `engine`, `agent`, `agent_tooling`, `webui_user`) plus new tables `account`, `provider`,
 `workitem_type`; edges in a new collection `sys_edge`
 `{id, type, from, to, tag, settings, active, created, updated}`; node id = `<type>:<id>`.
@@ -444,7 +439,7 @@ placeholder keeps the edge (and its settings) but makes it inactive.
 | `of` | account → provider | — | provider for dispatch |
 | `member` | user → project | `role: user\|viewer` | visibility / write |
 | `owns` | user → iter_engine | — | whose token the engine uses |
-| `runs` | agent → project | iter4 per-project agent override (model, flags, lockshape, closegate, timeout…) | agent enabled on project; absent edge = agent disabled |
+| `runs` | agent → project | per-project agent override (model, flags, lockshape, closegate, timeout…) | agent enabled on project; absent edge = agent disabled |
 | `handles` | agent → workitem_type | — | default: every agent → `queued` |
 | `allows` | project → workitem_type | per-state policy: `failed` holds the failure/retry policy; `scheduled` holds schedules on/off; `question` holds notify settings | created for every new project |
 | `uses` | agent_tools → agent | — | tooling the agent can look up; `_shared` → all agents (suffixed at startup) |
@@ -456,8 +451,7 @@ API:
 - `POST /api/settings/edges {type?, from, to, tag?, settings?}` (type inferred from endpoint types); `PATCH /api/settings/edges/{id} {from?, to?, tag?, settings?, active?}`; `DELETE …/{id}`; `POST …/{id}/copy {from?, to?}` (copy/paste)
 - Edge type validation: endpoints must match the table (placeholder of the right type counts).
 - Admin only for writes; users read the parts touching their projects.
-- On startup the server seeds placeholders, `iter_data:self`, providers, workitem_types, and migrates iter4-shaped
-  records (Engine.projects → serves, Project.accounts → account nodes + bills, Project.agents overrides → runs edges) once.
+- On startup the server seeds placeholders, `iter_data:self`, providers and workitem_types.
 
 ---
 
@@ -502,32 +496,18 @@ also reachable from the graph view's picker as "Settings graph").
 
 ---
 
-## 10. Converter `iter migrate5`
-_Removed 2026-10-16 once every checkout was on iter; the code is at tag `pre-cleanup-2026-10-16`._
-
-`iter migrate5 --from <iter4 checkout> --to <dir> [--dry-run]` (never in place):
-copies the tree, then: `main.iter.md` → `global/<slug>.project.iter.md`; `*.tests.iter.md`/`*.testgroup.iter.md` →
-`*.test.iter.md` (registry testlist → `children.tests` script paths); bizreq/techreq → the §2.8 one-file-per-attachment-point layout: one `## ` section per requirement (multi-bullet
-files: one per top-level bullet, `**ID**` → key, ids minted, status agreed), file placed at
-`<nodedir>/reqs/<nodeslug>.<type>.iter.md` (code node beside it or above its `reqs/` folder), else
-`global/requirements/<projectslug>.<type>.iter.md` (named by `main.iter.md`'s globalcontextfiles), else
-`<folder>/reqs/<folderslug>.<type>.iter.md`; several files landing on one path are merged (first by path keeps its id);
-originals removed, references rewritten to the new file, owners' `children.reqs` name their files; description/simple/long →
-desc + body; interfaces: files removed, one `connection` node per interface **kind** (request-reply → "API call",
-event → "Event", stream → "Stream", dataset → "Shared dataset") with `connects.from/to` = old producers/consumers;
-`actors.yaml` → `global/usecases/<slug>.actor.iter.md`; `*.agentmemory.iter.md` → `*.agentmem.iter.md`; then
-conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
+## 10. Reserved
 
 ---
 
 ## 11. Tests (definition of done)
 - `cargo test` green in every crate (iter_data tests on Arango :8529, db `iter_test_*`).
-- `iter_core::nodefile` property-ish tests: parse/render round trip, conform idempotent, legacy migration, glob resolution, path planning collisions, edge derivation.
+- `iter_core::nodefile` property-ish tests: parse/render round trip, conform idempotent, legacy-key handling, glob resolution, path planning collisions, edge derivation.
 - iter_data API tests: node CRUD + edges + pending/ack, files/sync conflict cases, settings graph CRUD/validation/placeholders, get_next ordering/locks/deps/authz, engine token authz, MCP tools.
 - `test/e2e.sh` (rewritten, mock provider, one engine, **two projects**): engine serves both; work item round trips in each;
   file edit → node within seconds; node edit → file + commit; create node in graph → file; delete both ways; conflict;
   designer project → build → repo created + files + plan item; tests standard JSON → test node + log; account switch/stop
-  via bills edge; deactivate serves edge → project stops; MCP tool calls; `iter migrate5` on a fixture.
+  via bills edge; deactivate serves edge → project stops; MCP tool calls.
 - Playwright (`test/e2e/playwright/`): login, queue, project graph renders, type filters, configure lightbox node + edge,
   create node via graph, drag edge endpoint, copy/paste edge, settings graph, designer build flow, screenshots
   reviewed for polish (light/dark not required — the app is dark), no console errors.
@@ -545,7 +525,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 2. **`::sync` is two-way and the engine is the only repo writer**: iter_data never pushes files; it marks nodes
    pending and the engine pulls them (`files/pending` → write → `files/ack`). The diagram's server→engine sync arrow is a pull.
 3. **`::conform` runs before sync on the engine only**; iter_data conforms its node side with the same library (no separate service).
-4. **`::schedule`** feeds the work queue (scheduled templates clone into queued items) as in iter4, not `iter_engine::test` directly;
+4. **`::schedule`** feeds the work queue (scheduled templates clone into queued items) as before, not `iter_engine::test` directly;
    the engine-owned test sweep is one such schedule.
 5. **`iter_data::test` (webui "run tests")** creates a test work item (the engine runs it) — it doesn't run tests server-side.
 6. **`workitem_type` nodes are work-item states** with per-state policy on the `allows` edge; agents connect to *projects*
@@ -569,8 +549,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
     tracking caps. Three claims still happen on the engine as a versioned PUT, not through `next`: session-chain neighbours
     (`work.rs`), test-sweep runs (outside the cap, `claim_direct`) and close-gate "accept" closes (`close_accepted`).
 15. **An engine's assignments list, per project, only the billing accounts the engine also holds** (`holds` edge); an
-    account that bills the project but is not held is left out. The iter4 → iter5 settings migration creates the `holds`
-    edges (engine that served a project → each of its accounts) alongside `serves` / `bills`.
+    account that bills the project but is not held is left out.
 16. **A hand edit is stamped with the file's mtime**, not the scan time, so conflict resolution compares real edit times.
 17. **Mock provider failure messages never start with `mock:`** ("mock run failed …"): a retry's prompt quotes the previous
     response, and a `mock:` line there would be parsed as a directive and run again.
@@ -579,7 +558,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 - **Auth/authz**: login/JWT, engine tokens bound to an owning user, project membership — every request is authorized for its project.
 - **Heartbeat** (engine → iter_data) and its reply (`files_waiting`, `build_waiting`, `rag_waiting`, stop requests).
 - **Close gate** (verifier between `::workitem_report` and complete) and **session chaining**.
-- **Dedup triage**, **explain (ELI5)**, **question widget / answers**, **approval signatures** — all existing iter4 flows.
+- **Dedup triage**, **explain (ELI5)**, **question widget / answers**, **approval signatures** — all existing flows.
 - **Spend/usage reporting** to iter_data (per project, per account) and the account `switch/stop` decision before get_next.
 - **Git commit/push** after work and after file sync (scoped commit).
 - **GraphRAG engine work** (embedding, OCR, summaries) — the engine side of `::add_doc`.
@@ -593,7 +572,7 @@ conform every file. Prints a report. Tested on a scratch copy of pdy-dev.
 Phase 1: `iter_core` nodefile + settings types (team CORE). In parallel: settings graph + authz + get_next (DATA-SYS),
 engine multi-project + provider/mock (ENG-RUN), webui scaffolding (UI).
 Phase 2 (after CORE): project graph store + file sync API + designer + MCP (DATA-GRAPH); filescan/conform/sync service,
-pending writer, build, test JSON runner, migrate5, interface removal in iter_local (ENG-FILES).
+pending writer, build, test JSON runner, interface removal in iter_local (ENG-FILES).
 Phase 3: test/e2e.sh + Playwright + fixes until green (TEST), docs/README.
 Status (2026-10-02): all three phases built; final pass green — `cargo test --workspace` 375, `test/e2e.sh` 184/184,
 `test/e2e/playwright/run.sh` 31/31.

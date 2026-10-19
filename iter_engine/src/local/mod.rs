@@ -1,9 +1,8 @@
 //! local — the checkout-side helpers the iter engine and the `iter`
 //! CLI use, with no server involved: node-file walking (`walk`, git-ignore
 //! aware), the deterministic test runner (`runtests`, standard result JSON),
-//! and `validate` (a wrapper over `iter_core::nodefile::conform`). iter4's
-//! marker scan, graph snapshot, node ids, graph edits and the iter4 → iter5
-//! converter are gone: `iter_core::nodefile` is the one node-file library.
+//! and `validate` (a wrapper over `iter_core::nodefile::conform`). The earlier
+//! marker scan, graph snapshot, node ids, graph edits and converter are gone: `iter_core::nodefile` is the one node-file library.
 
 pub mod runtests;
 pub mod validate;

@@ -1,4 +1,4 @@
-# Agent memory: iter4/iter_core/src — the shared Rust library (work item model, schedules, dedup keys, wait graph, cluster, widgets) used by iter_data, iter_engine and iter_local.
+# Agent memory: iter/iter_core/src — the shared Rust library (work item model, schedules, dedup keys, wait graph, cluster, widgets) used by iter_data, iter_engine and iter_local.
 
 ## Where things live
 - lib.rs — the work item model and shared types (node file: model.code.iter.md).
@@ -10,7 +10,7 @@
 - ../test/ — iter_core.tests.iter.md + cargo_test.sh (tests belong to the testwriter; do not edit).
 
 ## Build and test
-- Build: from iter4/, `cargo build --release -p iter_core` (a workspace with iter_data, iter_engine, iter_local, iter_rag).
+- Build: from the repo root, `cargo build --release -p iter_core` (a workspace with iter_data, iter_engine, iter_local, iter_rag).
 - Test: `"$ITER_BIN" runtests --project "$ITER_PROJECT" --group "iter_core-unit"` (cargo test -p iter_core; 53/53 green on 2026-09-29; under a minute when cached).
 
 ## Gotchas

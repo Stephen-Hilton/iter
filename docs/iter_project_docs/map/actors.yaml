@@ -1,4 +1,4 @@
-# The people and programs at the edge of iter4's map. Each `uses` pattern
+# The people and programs at the edge of iter's map. Each `uses` pattern
 # names interfaces (by id) the actor calls; the map draws an edge from the
 # actor to the part that provides each.
 actors:

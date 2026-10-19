@@ -63,7 +63,7 @@ pub struct StoredNode {
     pub doc: NodeDoc,
     #[serde(default)]
     pub project: String,
-    /// +1 on every change (server edit or file sync); 0 = an iter4 snapshot row
+    /// +1 on every change (server edit or file sync); 0 = a row without a node version
     #[serde(default)]
     pub node_version: u64,
     /// the node_version last written to / read from the file (0 = never on disk)
@@ -170,7 +170,7 @@ pub struct Graph {
     pub nodes: Vec<StoredNode>,
     idx: HashMap<String, usize>,
     dirty: BTreeSet<String>,
-    /// node documents to remove physically (designed nodes deleted, iter4 rows)
+    /// node documents to remove physically (designed nodes deleted, unreadable rows)
     gone: BTreeSet<String>,
     old_links: HashSet<(String, String, String)>,
     /// the project has an active serves edge (edits become pending writes)
@@ -208,7 +208,7 @@ impl Graph {
             let key = r.get("_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
             match serde_json::from_value::<StoredNode>(r) {
                 Ok(n) if n.node_version > 0 && !n.doc.id.is_empty() => nodes.push(n),
-                // an iter4 snapshot vertex (or anything unreadable): dropped on the next save
+                // anything unreadable: dropped on the next save
                 _ => {
                     gone.insert(key);
                 }

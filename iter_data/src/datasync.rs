@@ -1,4 +1,4 @@
-//! Datasync (iter4, decided 2026-09-29; iter5: GraphRAG file operations
+//! Datasync (decided 2026-09-29; GraphRAG file operations
 //! only — node edits go through the project graph store, nodes.rs /
 //! filesync.rs): repo file operations that are not node files (storing an
 //! uploaded document, removing it, a `.gitignore` line) are accepted at once

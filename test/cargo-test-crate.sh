@@ -35,8 +35,8 @@ if [ ! -x "$cargo" ]; then
   echo "no cargo at $cargo"; result 0 0 false; exit 2
 fi
 if [ "$crate" = iter_data ]; then
-  aurl="${ITER_TEST_ARANGO_URL:-${ITER5_TEST_ARANGO_URL:-${ITER4_TEST_ARANGO_URL:-http://127.0.0.1:8529}}}"
-  apw="${ITER_TEST_ARANGO_PASSWORD:-${ITER5_TEST_ARANGO_PASSWORD:-${ITER4_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}}}"
+  aurl="${ITER_TEST_ARANGO_URL:-http://127.0.0.1:8529}"
+  apw="${ITER_TEST_ARANGO_PASSWORD:-${ARANGO_ROOT_PASSWORD:-iterdev}}"
   if ! curl -sf -o /dev/null -u "root:$apw" "$aurl/_api/version"; then
     echo "no ArangoDB at $aurl — iter_data's tests need it (./deploy.sh local starts the dev container)"
     result 0 0 false; exit 2

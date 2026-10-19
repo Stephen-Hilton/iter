@@ -1,4 +1,4 @@
-/* iter5 webui — the Intro tab (from iter4, rebuilt 2026-09-30; designer wizard 2026-10-02).
+/* iter webui — the Intro tab (rebuilt 2026-09-30; designer wizard 2026-10-02).
  *
  * One story, told at three levels of detail. A 3-stop slider (Summary ·
  * Business · Technical) never changes the slide or its picture: stop 1 is the

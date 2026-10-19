@@ -628,7 +628,7 @@ pub fn node_context_section(ctx: &NodeContext) -> String {
 }
 
 /// The item's own context patterns (`item.context`), resolved to files.
-/// The iter4 placeholders (`{marker}`, `{ancestor_markers}`, `{interfaces}`)
+/// The legacy placeholders (`{marker}`, `{ancestor_markers}`, `{interfaces}`)
 /// are retired: the node context replaces them.
 pub fn resolve_context(item: &WorkItem, codepath: &Path, topdir: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let mut files = Vec::new();
@@ -1041,7 +1041,7 @@ mod tests {
 
     /// load_context prefers iter_data's graph and falls back to the files;
     /// the spin-up carries the node, its children, both requirement lists and
-    /// the philosophy sentence — and no iter4 main.iter.md section.
+    /// the philosophy sentence — and no legacy main.iter.md section.
     #[test]
     fn load_context_reads_the_graph_then_the_files_and_the_spinup_shows_it() {
         let (top, docs) = fixture("graph");

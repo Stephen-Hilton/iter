@@ -224,73 +224,50 @@ async fn placeholders_moves_and_copy() {
     t.done().await;
 }
 
-// ---------- migration ----------
+// ---------- a sample world ----------
 
-async fn iter4_world(store: &dyn Storage) {
-    store.put("project", "pdy", NOSK, &json!({"name": "pdy", "state": "Running", "engines": ["mbp"],
-        "accounts": [{"name": "Dev1", "token_envar": "DEV1_TOKEN", "order": 1, "switch": 80, "stop": 95},
-                     {"name": "Dev2", "token_envar": "DEV2_TOKEN", "order": 2, "switch": 90, "stop": 98}],
-        "agents": {"code": {"model": "opus", "max": 2}},
-        "failure": {"maxattempts": 3, "first_retry_second": 30, "retry_backoff_exponent": 2}})).await.unwrap();
-    store.put("project", "side", NOSK, &json!({"name": "side", "state": "Stopped"})).await.unwrap();
-    store.put("engine", "mbp", NOSK, &json!({"name": "mbp", "state": "Running",
-        "projects": {"pdy": {"dirs": {"topdir": "~/dev/pdy"}, "read_only": false},
-                     "side": {"dirs": {"topdir": "~/dev/side"}, "read_only": true},
-                     "gone": {"dirs": {"topdir": "~/dev/gone"}}}})).await.unwrap();
+/// Records and the edges that join them: engine mbp serves projects pdy (read-write) and
+/// side (read-only), two accounts bill pdy and are held by mbp, every agent runs on every
+/// project, every project allows every state.
+async fn sample_world(store: &dyn Storage) {
+    bootstrap(store).await.unwrap();
+    let pdy = json!({"name": "pdy", "state": "Running",
+        "failure": {"maxattempts": 3, "first_retry_second": 30, "retry_backoff_exponent": 2}});
+    let side = json!({"name": "side", "state": "Stopped"});
+    store.put("project", "pdy", NOSK, &pdy).await.unwrap();
+    store.put("project", "side", NOSK, &side).await.unwrap();
+    store.put("engine", "mbp", NOSK, &json!({"name": "mbp", "host": "mbp.local", "state": "Running"})).await.unwrap();
     for a in ["code", "plan", "test"] {
         store.put("agent", a, NOSK, &json!({"name": a, "promptbody": ""})).await.unwrap();
     }
     store.put("agent_tooling", "_shared", NOSK, &json!({"name": "_shared", "kind": "shared", "body": "rules"})).await.unwrap();
     store.put("agent_tooling", "aws", NOSK, &json!({"name": "aws", "kind": "capability", "body": "x"})).await.unwrap();
-}
-
-#[tokio::test]
-async fn iter4_records_migrate_once_into_edges() {
-    let (a, db) = crate::test_db::store().await;
-    let store: &dyn Storage = &a;
-    iter4_world(store).await;
-    bootstrap(store).await.unwrap();
-    let edges = load_edges(store).await.unwrap();
-    let find = |t: &str, f: &str, to: &str| edges.iter().find(|e| e.edge_type == t && e.from == f && e.to == to).cloned();
-    // Engine.projects -> serves (topdir, read_only); unknown projects skipped
-    let s = find("serves", "iter_engine:mbp", "project:pdy").unwrap();
-    assert_eq!((s.setting_str("topdir").as_str(), s.settings["read_only"].as_bool()), ("~/dev/pdy", Some(false)));
-    assert_eq!(find("serves", "iter_engine:mbp", "project:side").unwrap().settings["read_only"], true);
-    assert!(edges.iter().all(|e| e.to != "project:gone"));
-    // Project.accounts -> account nodes + of + bills (switch/stop on the edge) + holds
-    let acct = store.get("account", "Dev1", NOSK).await.unwrap().unwrap();
-    assert_eq!((acct["token_envar"].as_str(), acct["provider"].as_str()), (Some("DEV1_TOKEN"), Some("claude")));
-    let b = find("bills", "account:Dev2", "project:pdy").unwrap();
-    assert_eq!((b.settings["order"].as_i64(), b.settings["switch"].as_u64(), b.settings["stop"].as_u64()), (Some(2), Some(90), Some(98)));
-    assert!(find("of", "account:Dev1", "provider:claude").is_some());
-    assert!(find("holds", "iter_engine:mbp", "account:Dev1").is_some());
-    // runs: every agent on every project, overrides on the edge
-    assert_eq!(find("runs", "agent:code", "project:pdy").unwrap().settings, json!({"model": "opus", "max": 2}));
-    assert_eq!(find("runs", "agent:plan", "project:pdy").unwrap().settings, json!({}));
-    assert!(find("runs", "agent:test", "project:side").is_some());
-    // allows (failed carries the project's failure policy), handles, uses, hosts
-    assert_eq!(find("allows", "project:pdy", "workitem_type:failed").unwrap().settings["maxattempts"], 3);
-    assert_eq!(edges.iter().filter(|e| e.edge_type == "allows" && e.from == "project:side").count(), iter_core::STATES.len());
-    assert!(find("handles", "agent:plan", "workitem_type:queued").is_some());
-    assert!(find("uses", "agent_tools:_shared", "agent:test").is_some());
-    assert!(edges.iter().all(|e| e.from != "agent_tools:aws"), "only shared tooling is wired to every agent");
-    assert!(find("hosts", ITER_DATA_SELF, "iter_engine:mbp").is_some() && find("hosts", ITER_DATA_SELF, "project:pdy").is_some());
-    // every migrated edge is valid against the table
-    for e in &edges {
-        validate_endpoints(&e.edge_type, &e.from, &e.to).unwrap();
+    let eid = node_id("iter_engine", "mbp");
+    ensure_edge(store, "hosts", ITER_DATA_SELF, &eid, json!({})).await.unwrap();
+    for (p, row, ro) in [("pdy", &pdy, false), ("side", &side, true)] {
+        let pid = node_id("project", p);
+        ensure_edge(store, "hosts", ITER_DATA_SELF, &pid, json!({})).await.unwrap();
+        ensure_edge(store, "serves", &eid, &pid, json!({"topdir": format!("~/dev/{p}"), "read_only": ro})).await.unwrap();
+        for s in iter_core::STATES {
+            ensure_edge(store, "allows", &pid, &node_id("workitem_type", s), allows_settings(s, Some(row))).await.unwrap();
+        }
+        for a in ["code", "plan", "test"] {
+            let ovr = if p == "pdy" && a == "code" { json!({"model": "opus", "max": 2}) } else { json!({}) };
+            ensure_edge(store, "runs", &node_id("agent", a), &pid, ovr).await.unwrap();
+        }
     }
-    // once: a second startup changes nothing, and a forced rerun is idempotent
-    let before = edges.len();
-    bootstrap(store).await.unwrap();
-    assert_eq!(load_edges(store).await.unwrap().len(), before);
-    migrate_iter4(store).await.unwrap();
-    assert_eq!(load_edges(store).await.unwrap().len(), before);
-    // the iter4 rows still parse (deprecated fields kept)
-    let p: iter_core::Project = serde_json::from_value(store.get("project", "pdy", NOSK).await.unwrap().unwrap()).unwrap();
-    assert_eq!(p.accounts.len(), 2);
-    let e: iter_core::Engine = serde_json::from_value(store.get("engine", "mbp", NOSK).await.unwrap().unwrap()).unwrap();
-    assert_eq!(e.projects.len(), 3);
-    crate::test_db::drop(&db).await;
+    for (name, envar, order, switch, stop) in [("Dev1", "DEV1_TOKEN", 1, 80, 95), ("Dev2", "DEV2_TOKEN", 2, 90, 98)] {
+        store.put("account", name, NOSK, &json!({"name": name, "token_envar": envar, "provider": "claude", "desc": ""})).await.unwrap();
+        let aid = node_id("account", name);
+        ensure_edge(store, "of", &aid, &node_id("provider", "claude"), json!({})).await.unwrap();
+        ensure_edge(store, "bills", &aid, &node_id("project", "pdy"), json!({"order": order, "switch": switch, "stop": stop, "model": ""})).await.unwrap();
+        ensure_edge(store, "holds", &eid, &aid, json!({})).await.unwrap();
+    }
+    for a in ["code", "plan", "test"] {
+        let aid = node_id("agent", a);
+        ensure_edge(store, "handles", &aid, &node_id("workitem_type", "queued"), json!({})).await.unwrap();
+        ensure_edge(store, "uses", &node_id("agent_tools", "_shared"), &aid, json!({})).await.unwrap();
+    }
 }
 
 // ---------- assignments ----------
@@ -299,8 +276,7 @@ async fn iter4_records_migrate_once_into_edges() {
 async fn assignments_follow_active_edges() {
     let (a, db) = crate::test_db::store().await;
     let store: &dyn Storage = &a;
-    iter4_world(store).await;
-    bootstrap(store).await.unwrap();
+    sample_world(store).await;
     let asg = assignments(store, "mbp").await.unwrap();
     assert_eq!(asg.engine, "mbp");
     let names: Vec<&str> = asg.projects.iter().map(|p| p.project.as_str()).collect();

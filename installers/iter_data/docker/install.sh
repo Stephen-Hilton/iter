@@ -146,8 +146,6 @@ case "$TLS_MODE" in ""|auto|off) ;; *) die "--tls is auto or off (a certificate 
 [ -z "$A_CA_SRC" ] || [ -f "$A_CA_SRC" ] || die "--arango-ca-cert $A_CA_SRC does not exist"
 
 case "$NAME" in ""|*[!A-Za-z0-9_.-]*) die "--name $NAME: letters, digits, - _ . only" ;; esac
-# an install made when the default container was called iter5 keeps that name (and its folders)
-if [ "$NAME" = iter ] && command -v docker >/dev/null 2>&1 && ! docker inspect iter >/dev/null 2>&1 && docker inspect iter5 >/dev/null 2>&1; then NAME=iter5; fi
 
 # --iter-dir: the folder that holds everything, always ending in /iter
 # (/my/dir/iter/, /my/dir/iter and /my/dir all give /my/dir/iter)
@@ -160,7 +158,7 @@ iter_dir_of() {
   [ "${d##*/}" = iter ] || d="${d%/}/iter"
   printf '%s' "$d"
 }
-PROG=iter_data; [ "$NAME" = iter ] || [ "$NAME" = iter5 ] || PROG="iter_data_$NAME"
+PROG=iter_data; [ "$NAME" = iter ] || PROG="iter_data_$NAME"
 TLS_CUSTOM=""
 # set_paths: everything below <iter dir>/<PROG>
 set_paths() {
@@ -336,9 +334,9 @@ discover() {
   elif [ -n "$CUR_D" ]; then ITER_DIR="$(dirname "$CUR_D")"
   else ITER_DIR="$(default_iter_dir)"; fi
   set_paths
-  # an install from before 2026-10-18: ~/.iter (or ~/.iter5, before that)
+  # an install from before 2026-10-18: ~/.iter
   local h
-  for h in "$IHOME" "$HOME/.iter5"; do
+  for h in "$IHOME"; do
     [ -n "$OLD_DATA" ] || [ ! -d "$h/iter_data" ] || OLD_DATA="$h/iter_data"
     [ -n "$OLD_ENV" ] || [ ! -f "$h/$NAME.docker.env" ] || OLD_ENV="$h/$NAME.docker.env"
     [ -n "$OLD_BUILD" ] || [ ! -d "$h/$NAME-docker" ] || OLD_BUILD="$h/$NAME-docker"
@@ -587,7 +585,7 @@ apick() {  # apick KEY -> --env-file, else the environment, else the env file (s
 }
 A_USER="$A_USER_OPT"; [ -n "$A_USER" ] || A_USER="$(apick ARANGO_USER)"; [ -n "$A_USER" ] || A_USER=iter_user
 [ "$A_USER" != root ] || die "ARANGO_USER root: iter_data signs in as a user of its own (rw on its database only); pick another name"
-# empty = iter_data's default iter_db, or (container ArangoDB) the database iter5 an older install made
+# empty = iter_data's default iter_db
 A_DB="$A_DB_OPT"; [ -n "$A_DB" ] || A_DB="$(apick ARANGO_DB)"
 A_ROOT="$(apick ARANGO_ROOT_PASSWORD)"
 A_PW="$(apick ARANGO_PASSWORD)"
@@ -723,8 +721,6 @@ compose=(docker compose -p "$NAME" -f "$BUILD/compose.yml")
 say "building image $NAME:latest and starting container $NAME (:$PORT$([ "$ARANGO_PORT" = 0 ] || echo ", console 127.0.0.1:$ARANGO_PORT"))"
 export ITER_NAME="$NAME" ITER_PORT="$PORT" ARANGO_HOST_PORT="$ARANGO_PORT" ITER_DATA_DIR="$D" \
   ITER_ENV_PATH="$ENV_PATH" ITER_MEM_LIMIT="$MEM" ITER_ARANGO_MEMORY="$AMEM"
-# the compose service was called iter5 before it was called iter: drop that container (its data is in the host folder) so the renamed service takes its place
-if [ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$NAME" 2>/dev/null)" = iter5 ]; then run docker rm -f "$NAME"; fi
 run "${compose[@]}" up -d --build
 
 # ---- 7. health

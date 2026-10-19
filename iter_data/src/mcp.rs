@@ -1,4 +1,4 @@
-//! Stateless MCP (iter4 2026-09-29, iter5): every agent-facing call of the iter_data
+//! Stateless MCP (2026-09-29): every agent-facing call of the iter_data
 //! API as an MCP tool, served at `POST /mcp` (Streamable HTTP, JSON responses,
 //! no sessions — each request stands alone, so any iter_data replica can
 //! answer it and nothing is held between calls).

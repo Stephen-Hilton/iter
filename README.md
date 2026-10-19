@@ -1,6 +1,6 @@
 # iter
 
-A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter5_spec.md`](docs/iter5_spec.md), and §12 lists where iter5 departs from [`docs/requirements.png`](docs/requirements.png).
+A project lives in two places that stay in step: the repo's node files (`*.iter.md`) and the project graph stored in iter_data. One engine per machine serves every project the **Settings graph** assigns to it. Every setting is a node or an edge in that graph. Every model call goes through a provider (`claude`, or the deterministic `mock` that drives the tests). The spec and build contract is [`docs/iter_spec.md`](docs/iter_spec.md), and §12 lists where iter departs from [`docs/requirements.png`](docs/requirements.png).
 
 | dir | what it is |
 |---|---|
@@ -50,8 +50,7 @@ iter_data keeps everything in ArangoDB, signed in as **its own user** (`iter_use
 database** (`iter_db`) and nothing else, so one ArangoDB server can also hold other apps' databases. On the
 first start, when that user or database is missing (or the user lacks `rw`), iter_data signs in once as
 root with `ARANGO_ROOT_PASSWORD`, creates them and grants `rw`. iter's user never gets root's password, and
-iter_data creates its own collections and indexes as projects grow. Installs from before 2026-10-17 keep
-their database `iter5` and move from root to `iter_user`.
+iter_data creates its own collections and indexes as projects grow.
 
 Every iter_data installer installs ArangoDB beside iter_data unless you point it at one you already run:
 
@@ -161,7 +160,7 @@ The full format is in spec §2. In short:
 
 - The filename is `<name>.<type>.iter.md`. Types: `project`, `code` (with `level: context|container|component|connection`), `test`, `bizreq`, `techreq` (one file per code node holding many `## KEY — title` requirement sections, §2.8), `philosophy`, `usecase`, `actor`, and `agentmem` (agent memory, never synced). Any other `*.iter.md` is a plain doc. One `global/<slug>.project.iter.md` replaces `main.iter.md`.
 - Common frontmatter: `id`, `name`, `desc`, `creator`, `teststate`, `children` (`codedirs`, `codenodes`, `tests`, `reqs`; paths or globs with `{topdir}` / `{thisfiledir}` / …), `timestamps`. Then the markdown body.
-- Graph edges are derived from the files: `codenodes`, `tests`, `reqs`, `supplies` / `connects` (connection nodes replace iter4's interfaces), `drives`, `touches`, `uses`.
+- Graph edges are derived from the files: `codenodes`, `tests`, `reqs`, `supplies` / `connects` (connection nodes replace the earlier interfaces), `drives`, `touches`, `uses`.
 - `iter_core::nodefile::conform` repairs and canonicalises a file (missing keys, legacy keys, key order). It is idempotent, and the server renders every node through the same code.
 
 ## File sync

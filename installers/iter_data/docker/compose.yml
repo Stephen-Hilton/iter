@@ -13,7 +13,6 @@
 # :8400 serves HTTPS by default: https://127.0.0.1:8400/ (self-signed; browsers warn).
 # compose.console.yml adds the Arango web console on 127.0.0.1 (leave it out to
 # publish only :8400).
-# (install.sh replaces the container of an older install, whose service was called iter5)
 services:
   iter:
     build:

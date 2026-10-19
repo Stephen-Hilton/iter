@@ -375,13 +375,12 @@ check_share() {
   docker run --rm -v "$E:/x" debian:bookworm-slim true 2>&1 | tail -3 >&2 || true
   die "docker cannot mount $E. Docker Desktop: add $ITER_DIR in Settings -> Resources -> File sharing (and Apply), or rerun with --iter-dir under your home (e.g. --iter-dir ~/iter)"
 }
-# an install from before 2026-10-18 kept everything in ~/.iter (~/.iter5 before
-# that): its container stops, and each file moves to its place here. Anything
+# an install from before 2026-10-18 kept everything in ~/.iter:
+# its container stops, and each file moves to its place here. Anything
 # else of the engine's goes to old-dot-iter/ (moved, never deleted); iter_data's
 # files there (iter_data/, *.docker.env, *-docker/) are left for its installer.
 migrate() {
   local old="$IHOME" f n
-  [ -d "$old" ] || { [ -d "$HOME/.iter5" ] && [ ! -L "$HOME/.iter5" ] && old="$HOME/.iter5"; } || return 0
   [ -d "$old" ] || return 0
   [ -f "$old/engine.conf" ] || [ -f "$old/engine.key" ] || [ -d "$old/docker" ] || return 0
   if [ -f "$CONF" ] || [ -f "$KEYF" ]; then
@@ -419,8 +418,6 @@ migrate() {
   done
   if run rmdir "$old" 2>/dev/null; then
     ok "moved $old into $E (and removed the empty $old)"
-    # ~/.iter5 was a link to ~/.iter: kept beside the rest
-    if [ -L "$HOME/.iter5" ]; then run mv "$HOME/.iter5" "$E/old-dot-iter/iter5-link"; fi
   else
     local left=""; for f in "$old"/* "$old"/.[!.]*; do [ ! -e "$f" ] || left="$left ${f##*/}"; done
     ok "moved the engine's files from $old into $E; $old keeps what is not the engine's:$left"

@@ -2121,7 +2121,7 @@ mod tests {
         rt.items.insert("p".into(), vec![mk("ghost-0001", "E1", &old), mk("fresh-0002", "E1", &fresh), mk("other-0003", "E2", &old)]);
         let mut project = Project { name: "p".into(), ..Default::default() };
         project.failure.maxattempts = 5;
-        let top = std::env::temp_dir().join(format!("iter4-ghost-{}", std::process::id()));
+        let top = std::env::temp_dir().join(format!("iter-ghost-{}", std::process::id()));
         rt.repair_ghosts(&project, &top.to_string_lossy());
         let puts = srv.calls_to("PUT", "/workitems/");
         assert_eq!(puts.len(), 1, "{puts:?}");

@@ -45,9 +45,9 @@ pub fn is_open(state: &str) -> bool {
 /// Does this lock row count?  Only an unexpired `lock` row whose holder
 /// exists, is not queued, and carries the row's lease.  A queued holder never
 /// counts: it has outgoing waits of its own, and counting its rows is exactly
-/// the 2026-09-25 cycle.  Always enforced in iter4 (decided 2026-09-28: the
-/// rollout switch `lock_lease_enforce` is gone — only iter4 engines talk to
-/// an iter4 server, so every row an engine writes carries a lease).
+/// the 2026-09-25 cycle.  Always enforced (decided 2026-09-28: the
+/// rollout switch `lock_lease_enforce` is gone — only current engines talk to
+/// the server, so every row an engine writes carries a lease).
 pub fn lock_row_is_live(row: &LockRow, holder: Option<&WorkItem>, now_iso: &str) -> bool {
     if row.kind != "lock" || !(row.expires.is_empty() || row.expires.as_str() >= now_iso) {
         return false;
@@ -480,7 +480,7 @@ mod tests {
             row("{topdir}/a", "h", "L1"),       // live
             row("{topdir}/b", "h", "L0"),       // an older run's lease
             row("{topdir}/c", "q", ""),         // queued holder
-            row("{topdir}/d", "g", ""),         // no lease (a migrated iter3 row), holder running
+            row("{topdir}/d", "g", ""),         // no lease (a row from before leases), holder running
             row("{topdir}/e", "ghost", "L1"),   // holder deleted
             LockRow { expires: "2026-09-25T17:00:00Z".into(), ..row("{topdir}/f", "h", "L1") }, // expired
             LockRow { kind: "reserve".into(), ..row("{topdir}/g", "q", "") },

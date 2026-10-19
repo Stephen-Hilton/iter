@@ -1,4 +1,4 @@
-//! ArangoDB backend (iter4+, decided 2026-09-28): one document collection per
+//! ArangoDB backend (decided 2026-09-28): one document collection per
 //! logical table in database `--arango-db` (default "iter_db"), reached over
 //! ArangoDB's HTTP API — no driver. Rows are `{_key, pk, sk, version, expires,
 //! workid, body}`; `_key` is pk:sk with forbidden characters %-escaped, so a
@@ -285,9 +285,6 @@ impl ArangoBackend {
         let dbs = self.raw("GET", "/_api/database", None).await.map_err(root_err)?;
         let have = |n: &str| dbs["result"].as_array().is_some_and(|a| a.iter().any(|d| d == n));
         if !have(db) {
-            if db == DEFAULT_DB && have("iter5") {
-                eprintln!("[iter_data] arango: NOTE database 'iter5' from an earlier iter exists; '{db}' starts empty. To keep iter5's data, set ARANGO_DB=iter5");
-            }
             match self.raw("POST", "/_api/database", Some(&json!({"name": db}))).await {
                 Ok(_) => println!("[iter_data] arango: root created database '{db}'"),
                 Err(e) if e.num == ERR_DUPLICATE_NAME => {}

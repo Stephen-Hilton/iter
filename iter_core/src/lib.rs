@@ -39,7 +39,7 @@ pub const TABLES: &[&str] = &[
     "project_structure",
     "agent_tooling",
     "spend",
-    // iter4: graph edits waiting for an engine to apply them (datasync)
+    // graph edits waiting for an engine to apply them (datasync)
     "datasync",
     // iter settings graph (spec §7): new node tables + the edge rows
     "account",
@@ -395,14 +395,13 @@ pub struct Project {
     pub agents: BTreeMap<String, serde_json::Value>,
     #[serde(default, deserialize_with = "null_is_default")]
     pub failure: FailurePolicy,
-    /// DEPRECATED (iter): replaced by active `serves` edges in the settings
-    /// graph (iter_core::settings). Still read so iter4-shaped rows parse and
-    /// the one-time migration can turn them into edges.
+    /// DEPRECATED: replaced by active `serves` edges in the settings graph
+    /// (iter_core::settings). Still parsed so older rows load.
     #[serde(default, deserialize_with = "null_is_default")]
     pub engines: Vec<String>,
-    /// DEPRECATED (iter): replaced by `account` nodes + `bills` edges (the
-    /// switch/stop percents moved onto the edge); read by the migration and
-    /// by engines that have not switched to `/assignments` yet.
+    /// DEPRECATED: replaced by `account` nodes + `bills` edges (the
+    /// switch/stop percents are on the edge). The engine fills this in memory
+    /// from `/assignments`.
     #[serde(default, deserialize_with = "null_is_default")]
     pub accounts: Vec<Account>,
     /// the project head file: its frontmatter names the global requirements
@@ -489,17 +488,6 @@ pub const TOOLING_KINDS: &[&str] = &["shared", "capability", "source", "prepost"
 fn default_running() -> String { "Running".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EngineProjectDirs {
-    #[serde(default)]
-    pub dirs: BTreeMap<String, String>,
-    /// the engine only READS this checkout (2026-09-30): the map is pushed
-    /// with derived ids, GraphRAG indexes and summarises it — but no ids are
-    /// written, no graph edit is applied, no work item or schedule runs
-    #[serde(default)]
-    pub read_only: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Engine {
     /// stable settings-graph id (the storage key); fixed at creation —
     /// `name` is only the display name and may be renamed. Empty on a
@@ -524,14 +512,9 @@ pub struct Engine {
     pub account: String,
     #[serde(default)]
     pub queuelock: BTreeMap<String, u64>,
-    /// DEPRECATED (iter): replaced by active `serves` edges (settings
-    /// topdir, read_only) — `GET /api/engines/{name}/assignments`. Kept
-    /// readable for iter4-shaped records and the one-time migration.
-    #[serde(default)]
-    pub projects: BTreeMap<String, EngineProjectDirs>,
     /// iter authz (spec §4.4): the token `sub` that owns this engine record,
     /// set by iter_data from the caller's token on register; "" = unowned
-    /// (an iter4 record — the first engine-token heartbeat claims it)
+    /// (an older record — the first engine-token heartbeat claims it)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
     /// engine-owned: latest usage snapshot for the active account
@@ -779,7 +762,7 @@ impl WorkItem {
         self.is_test_sweep_run() || (self.is_shell() && (cmd == "iter rag sync" || cmd.starts_with("iter rag sync ")))
     }
 
-    /// Runs a shell command, not an LLM session (iter4, decided 2026-09-28):
+    /// Runs a shell command, not an LLM session (decided 2026-09-28):
     /// an `exec` item, or a `test` item that carries an `exec_shell` — the
     /// deterministic test runs, the 95% case of the `test` agent (formerly
     /// `testwriter`, still accepted as an alias).
@@ -788,7 +771,7 @@ impl WorkItem {
     }
 }
 
-/// `test` (iter4) and its old name `testwriter`.
+/// `test` and its old name `testwriter`.
 pub fn is_test_agent(agent: &str) -> bool {
     agent == "test" || agent == "testwriter"
 }

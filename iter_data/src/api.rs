@@ -1,6 +1,6 @@
 //! REST API. Principle (decided 2026-09-01): the state machine lives HERE —
 //! webui, engine, and the future MCP layer all call these same rules.
-//! Every write bumps the iter3_versions seq for its (project, table).
+//! Every write bumps the versions seq for its (project, table).
 
 use rand::seq::SliceRandom;
 use crate::auth::{self, Claims};
@@ -757,10 +757,9 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
     let mut not_honoring = Vec::new();
     let edges = crate::settings::load_edges(st.store.as_ref()).await?;
     for e in st.store.scan("engine").await? {
-        // only engines that serve this project (an active serves edge, or the
-        // deprecated iter4 `projects` map)
+        // only engines that serve this project (an active serves edge)
         let served = crate::settings::serves_edge(&edges, &body_str(&e, "id"), &name).is_some();
-        if !served && e.get("projects").and_then(|p| p.get(&name)).is_none() {
+        if !served {
             continue;
         }
         let ename = body_str(&e, "id");
@@ -952,7 +951,7 @@ async fn engine_put(
 
 /// Who may write this engine record, and who owns it afterwards (spec §4.4):
 /// a new record belongs to the caller (an admin registering one leaves it
-/// unowned); an unowned (iter4) record is claimed by the first engine-token
+/// unowned); an unowned record is claimed by the first engine-token
 /// write; an owned record only by its owner or an admin.
 fn own_engine(user: &AuthUser, name: &str, existing: Option<&Value>) -> Result<String, ApiError> {
     let owner = existing.map(|e| body_str(e, "user")).unwrap_or_default();
@@ -1140,15 +1139,9 @@ async fn engine_heartbeat(
     if claimed {
         crate::settings::on_engine_registered(st.store.as_ref(), &name, &owner).await?;
     }
-    // the projects this engine serves: active serves edges (iter), plus the
-    // deprecated iter4 `projects` map while engines switch over
+    // the projects this engine serves: active serves edges
     let edges = crate::settings::load_edges(st.store.as_ref()).await?;
     let mut projects: Vec<String> = crate::settings::served_projects(&edges, &name);
-    for p in row.get("projects").and_then(|p| p.as_object()).map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
-        if !projects.contains(&p) {
-            projects.push(p);
-        }
-    }
     projects.sort();
     // datasync (2026-09-29): graph edits waiting for an engine, per project
     // this engine serves — the engine applies them on this tick
@@ -2126,7 +2119,6 @@ async fn live_engines_for(st: &Arc<AppState>, project: &str) -> Result<Vec<Strin
         .iter()
         .filter(|e| {
             crate::settings::serves_edge(&edges, &body_str(e, "id"), project).is_some()
-                || e.get("projects").and_then(|p| p.get(project)).is_some()
         })
         .filter(|e| body_str(e, "state") == "Running")
         .filter(|e| {
@@ -2700,7 +2692,7 @@ mod tests {
         assert!(check_pinned_tags(&["blocked by: cluster restart".into()]).is_err());
     }
 
-    // ---------- dedup (iter3/plans/!iter_dedup_spec.md, 2026-09-10) ----------
+    // ---------- dedup (plans/!iter_dedup_spec.md, 2026-09-10) ----------
     // Handlers called directly on a throwaway ArangoDB database: no server, no model.
 
     async fn mem() -> Arc<AppState> {
@@ -3077,7 +3069,7 @@ mod tests {
 
     /// Lease-bound locks are always enforced (2026-09-28, no switch): a lock
     /// for an item that is not running is refused even with no lease anywhere;
-    /// a leftover lease-less row (an iter3 row carried over by the migration)
+    /// a leftover lease-less row (a row from before leases)
     /// blocks nobody, is listed as stale, and the sweep deletes it.
     #[tokio::test]
     async fn leases_always_enforced_and_leftover_rows_swept() {
@@ -3087,7 +3079,7 @@ mod tests {
         let hid = h["id"].as_str().unwrap().to_string();
         let err = acquire(&st, json!({"path": "{topdir}/a", "workid": hid})).await.expect_err("refused: not running");
         assert_eq!(err.1["refused"], "not running", "{:?}", err.1);
-        // a leftover row, as the iter3 migration copies them: no lease
+        // a leftover row, from before leases: no lease
         let leftover = json!({"project": "p", "path": "{topdir}/a", "kind": "lock", "engine": "Engine01", "workid": hid,
             "acquired": "2026-09-20T00:00:00Z", "expires": "2099-01-01T00:00:00Z", "lease": ""});
         st.store.put("lock", "p", "{topdir}/a", &leftover).await.unwrap();

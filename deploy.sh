@@ -11,7 +11,7 @@
 # The container keeps everything that persists (database, Arango apps,
 # iter_data's files) in one host folder, <iter dir>/iter_data, with the iter dir
 # ITER_DIR [~/iter: Docker Desktop shares the home folder, not /opt]. An older
-# data folder (ITER_DATA_DIR, or ~/.iter/iter_data / ~/.iter5/iter_data) is moved in.
+# data folder (ITER_DATA_DIR, or ~/.iter/iter_data) is moved in.
 # Secrets (ITER_ADMIN_PASSWORD, ITER_JWT_SECRET) come from ITER_ENV_FILE,
 # default the repo root .env.
 # Release binaries land in bin/<os>-<arch>/ (rm+cp, never cp-over: macOS kills
@@ -34,7 +34,7 @@ ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iterdev}"
 ITER_DIR="${ITER_DIR:-$HOME/iter}"
 # an older data folder to move into the iter dir, when there is one
 OLD_DATA="${ITER_DATA_DIR:-}"
-for d in "$HOME/.iter/iter_data" "$HOME/.iter5/iter_data"; do [ -n "$OLD_DATA" ] || [ ! -d "$d" ] || OLD_DATA="$d"; done
+for d in "$HOME/.iter/iter_data"; do [ -n "$OLD_DATA" ] || [ ! -d "$d" ] || OLD_DATA="$d"; done
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 mkdir -p "$BIN" "$RUN"
 

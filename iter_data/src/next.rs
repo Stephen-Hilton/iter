@@ -1,6 +1,6 @@
 //! Server-side get_next (iter spec §4.3): `POST /api/projects/{p}/next`.
 //!
-//! The selection rules are the iter4 engine's `dispatch` pick, moved here so
+//! The selection rules are the engine's earlier `dispatch` pick, moved here so
 //! every engine of a multi-project machine asks the server for one specific
 //! project:
 //! - only `queued` items, not `needs_approval`, past `retry_after`, not held
@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// How long a scope reservation lives (engine iter4: 600 s).
+/// How long a scope reservation lives (600 s).
 const RESERVE_TTL_SEC: i64 = 600;
 
 #[derive(serde::Deserialize, Default)]
@@ -238,7 +238,7 @@ pub async fn get_next(user: AuthUser, State(st): State<Arc<AppState>>, Path(name
     Ok(Json(json!({"item": null, "reason": reason})))
 }
 
-/// The scope reservation the iter4 engine wrote: best scope-blocked item
+/// The scope reservation the engine wrote: best scope-blocked item
 /// reserves its paths. A refusal (already reserved by someone) is fine.
 async fn reserve(st: &Arc<AppState>, project: &str, engine: &str, r: &WorkItem) -> Result<(), StorageError> {
     let now = now_utc();

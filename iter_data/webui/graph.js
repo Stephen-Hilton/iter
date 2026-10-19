@@ -7,7 +7,7 @@
  * frontmatter (§2.4): codenodes, tests, reqs, supplies, connects, drives,
  * touches, uses.
  *
- * Ported from iter4's viewer (itself from pdy-dev's usecase_map): the layout
+ * Ported from an earlier viewer (itself from pdy-dev's usecase_map): the layout
  * maths ("tiered", "rings", "sequence" are position maths; "cluster" is fcose
  * over compound nodes — a code node sits inside the code node that lists it
  * in children.codenodes; "flow" is dagre, left to right), the search, the
@@ -87,11 +87,11 @@
     { key: 'tests', label: 'Tests', tip: 'Code and its test nodes', show: ['project', 'context', 'container', 'component', 'connection', 'test'] },
   ];
 
-  /** The server's graph → the shape this page draws. Tolerates iter4's {vertices} and missing fields. */
+  /** The server's graph → the shape this page draws. Tolerates missing fields. */
   function normalize(raw) {
     raw = raw || {};
     const nodes = []; const seen = new Set();
-    for (const n of (raw.nodes || raw.vertices || [])) {
+    for (const n of (raw.nodes || [])) {
       if (!n || !n.id || n.deleted || seen.has(n.id)) continue;
       let nt = String(n.nodetype || '').toLowerCase();
       if (nt === 'main') nt = 'project';
@@ -136,7 +136,7 @@
       const id = `${n.file}|contains|${n.id}`;
       if (!eseen.has(id)) { eseen.add(id); edges.push({ id, from: n.file, kind: 'contains', to: n.id }); }
     }
-    return { project: raw.project || '', nodes, edges, stats: raw.stats || null, legacy: !raw.nodes && !!raw.vertices, syncPaused: !!raw.sync_paused };
+    return { project: raw.project || '', nodes, edges, stats: raw.stats || null, syncPaused: !!raw.sync_paused };
   }
 
   /** A req node as the server sends it (spec §2.8): {id, key, title, status, text, order, file, file_type, path, file_state}. */
@@ -524,7 +524,7 @@
     }
 
     const LABEL_CHAR_PX = 10; const LABEL_PAD_PX = 14; const MIN_GAP = 40;
-    /** Use-case steps between the same two parts each get their own curve (see iter4's notes). */
+    /** Use-case steps between the same two parts each get their own curve (see the earlier notes). */
     function spreadParallel(list, bow) {
       const out = list.map((m, i) => (bow[i] ? bow[i] : null));
       const groups = new Map();
@@ -569,7 +569,7 @@
       return { color, line, width, arrow, label, cls: cls.join(' ') };
     }
 
-    // ------------------------------------------------------------------ layout maths (iter4)
+    // ------------------------------------------------------------------ layout maths
     function groupBands(ids, bandOf, orderKey) {
       const by = new Map(); const key = orderKey || (() => 0);
       for (const id of [...ids].sort((a, b) => key(a) - key(b) || (a < b ? -1 : a > b ? 1 : 0))) { const b = bandOf(id); if (!by.has(b)) by.set(b, []); by.get(b).push(id); }

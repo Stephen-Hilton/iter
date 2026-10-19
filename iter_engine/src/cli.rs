@@ -1274,7 +1274,7 @@ fn reject(e: &Env, reason: &str) {
 }
 
 /// `iter block --cluster-restart [--reason …]` (built 2026-09-09; plan:
-/// iter3/plans/cluster_restart_block.buildplan.md §1).  One versioned PUT —
+/// plans/cluster_restart_block.buildplan.md §1).  One versioned PUT —
 /// `set_state` is not reused because it leaves `attempt` alone, and giving
 /// the attempt back is the whole point.
 fn block(e: &Env, cluster_restart: bool, reason: Option<String>) {

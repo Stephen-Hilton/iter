@@ -78,7 +78,6 @@
       const g = window.IterGraph && IterGraph.api;
       if (!g) return;
       S.data = g.model.G;
-      if (S.data && S.data.legacy) S.canEdit = false; // an old-format server: nothing here would land
       renderBar();
       wireCy(g.cy);
       if (!keyWired) { keyWired = true; document.addEventListener('keydown', onKey); }
@@ -188,7 +187,7 @@
     const bar = S.root.querySelector('#g-editbar'); if (!bar) return;
     if (!selOnly) {
       if (!S.canEdit) {
-        bar.innerHTML = `<span id="g-buildstate" class="g-buildstate hidden"></span><button type="button" id="g-conflicts" class="g-conflictsbtn hidden"></button><span class="g-sync" id="g-sync"></span><span class="g-ro">${S.data && S.data.iter4 ? 'read only — this server returns the iter4 graph shape' : 'read only (viewer)'}</span>`;
+        bar.innerHTML = `<span id="g-buildstate" class="g-buildstate hidden"></span><button type="button" id="g-conflicts" class="g-conflictsbtn hidden"></button><span class="g-sync" id="g-sync"></span><span class="g-ro">read only (viewer)</span>`;
         const s = bar.querySelector('#g-sync'); if (s) s.onclick = showPendingList;
         bar.querySelector('#g-conflicts').onclick = showConflicts;
         renderConflictBadge(); renderBuildState();

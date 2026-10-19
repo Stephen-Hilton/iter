@@ -83,7 +83,7 @@ iter_data signs in to ArangoDB as **its own user** (`ARANGO_USER`, default `iter
 
 On its first start iter_data signs in as that user. When it can't (the user or the database doesn't exist yet, or the user has too little access), it signs in as `root` with `ARANGO_ROOT_PASSWORD`. As root it creates the user (with `ARANGO_PASSWORD`, never root's own password) and the database, and grants the user `rw` on it. Then it tries the user again. An existing user keeps its password: a wrong `ARANGO_PASSWORD` is reported, never reset. With the local ArangoDB the script generates both passwords and keeps them in `D/config/data.env`.
 
-An install made before this change signed in as `root` and used the database `iter5`. A rerun moves it to `iter_user` and **keeps `iter5`**, so no data moves. Use `--arango-db` to choose another database.
+Use `--arango-db` to choose another database.
 
 **An ArangoDB you already run.** Give `--arango-url` (or `ARANGO_URL` in the environment or in `--env-file`). The script then installs neither arangod nor its service, only the Arango client tools for the backups, and `iter-data` no longer waits for a local `arangodb3`. A local ArangoDB from an earlier install is stopped and its data is kept; `--arango-url local` goes back to it. Give either:
 

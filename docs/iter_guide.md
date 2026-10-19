@@ -19,7 +19,7 @@ iter keeps a team of AI coding agents working on a real software project without
 
 ### What database does iter use?
 
-ArangoDB Community Edition 3.12, and only ArangoDB. It stores documents (work items and every other record), counters, the architecture map as a graph (collections `node` and `link`, named graph `iter_map`), and the GraphRAG chunks and vectors. SQLite and DynamoDB serving were removed on 2026-09-29; DynamoDB is only read once, as the source of the iter3 migration.
+ArangoDB Community Edition 3.12, and only ArangoDB. It stores documents (work items and every other record), counters, the architecture map as a graph (collections `node` and `link`, named graph `iter_map`), and the GraphRAG chunks and vectors. SQLite and DynamoDB are not supported.
 
 ## Standing up the server
 
@@ -37,7 +37,7 @@ From the root of the repository:
 ### Which ports does iter use?
 
 - **8400** — the API and the web page (`ITER_PORT` changes the host port).
-- **127.0.0.1:8630** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; iter's database is `iter_db` (`iter5` on installs from before 2026-10-17).
+- **127.0.0.1:8630** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; iter's database is `iter_db`.
 - **127.0.0.1:8529** — the dev ArangoDB used by `./deploy.sh local`, the unit tests and the end-to-end tests.
 
 ### What is the admin password, and how do I log in the first time?
@@ -58,7 +58,7 @@ The `.env` loader reads plain `KEY=VALUE` lines, never runs them through a shell
 
 ### Where is my data stored?
 
-In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter5/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
+In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
 
 ### Does the container run the agents?
 

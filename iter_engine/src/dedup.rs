@@ -1,5 +1,5 @@
 //! Stage 2 of repeat detection (built 2026-09-10, spec:
-//! iter3/plans/!iter_dedup_spec.md; rules in `iter_core::dedup`).
+//! plans/!iter_dedup_spec.md; rules in `iter_core::dedup`).
 //!
 //! Stage 1 (iter_data, at create) sees only an exact `check:` + `container:`
 //! twin.  What it cannot see — the same fault under a different rule label,

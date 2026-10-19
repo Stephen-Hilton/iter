@@ -1,4 +1,4 @@
-/* iter5 webui — the GraphRAG tab (from iter4, 2026-09-29).
+/* iter webui — the GraphRAG tab (2026-09-29).
  *
  * Manage a project's GraphRAG index: upload documents (pdf, docx, html, md,
  * txt…), see the *.iter.md node files the change sweep indexed, watch the
@@ -353,7 +353,7 @@
   async function fillNodeList(dl) {
     if (!S.nodes || S.nodesFor !== ctx.project) {
       const g = await ctx.api(P() + "/graph").catch(() => ({ nodes: [] }));
-      S.nodes = (g.nodes || g.vertices || []).filter(v => v.path && !v.deleted && !["test", "tests", "testgroup", "agentmem"].includes(v.nodetype))
+      S.nodes = (g.nodes || []).filter(v => v.path && !v.deleted && !["test", "tests", "testgroup", "agentmem"].includes(v.nodetype))
         .map(v => ({ path: v.path, label: `${v.name || v.path} (${v.nodetype})` }));
       S.nodesFor = ctx.project;
     }

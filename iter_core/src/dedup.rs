@@ -1,4 +1,4 @@
-//! Repeat detection (built 2026-09-10, spec: iter3/plans/!iter_dedup_spec.md).
+//! Repeat detection (built 2026-09-10, spec: plans/!iter_dedup_spec.md).
 //!
 //! Between 05:57Z and 07:23Z on 2026-09-10 one unchanged condition in pdy-dev
 //! filed thirteen priority-1 items, nine of them word-for-word twins, because

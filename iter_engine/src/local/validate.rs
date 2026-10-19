@@ -82,7 +82,7 @@ pub fn run(topdir: &Path, single: Option<&Path>, fix: bool) -> std::io::Result<R
 }
 
 /// The node-text checks the test sweep files `ingest` items from (adapted
-/// from iter4's docs/node_text_standard.md rules to v5 `desc` + body).
+/// from the docs/node_text_standard.md rules to v5 `desc` + body).
 pub fn node_text_findings(desc: &str, body: &str) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     let d = desc.trim().trim_matches('"');

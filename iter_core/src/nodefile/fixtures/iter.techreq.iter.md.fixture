@@ -1,12 +1,12 @@
 ---
 id: 0cfd3caf-cb31-4512-ada2-915b3bdfde4f
-name: "iter4 technical requirements"
-description: "Engineering rules every iter4 part follows."
+name: "iter technical requirements"
+description: "Engineering rules every iter part follows."
 children:
-  reqpaths: ["{topdir}/docs/iter4_spec.md"]
+  reqpaths: ["{topdir}/docs/iter_spec.md"]
 ---
 
-# iter4 — technical requirements
+# iter — technical requirements
 
 - **T1.** iter_data is the only component that talks to the database; engines and the web page use its HTTP API.
 - **T2.** Every storage backend passes the same contract (`iter_data/src/contract_tests.rs`): versioned writes with exactly one winner, atomic lock acquire, atomic seq bumps.
