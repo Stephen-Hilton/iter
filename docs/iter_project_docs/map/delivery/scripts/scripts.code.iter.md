@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/test/test.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:12Z", last_tested: ""}
 ---
 # scripts — deploy, engine setup, e2e and test tools
 
@@ -30,7 +30,7 @@ The commands that switch iter on and prove the whole thing works.
   kills a binary copied over a running one), starts or reuses the dev
   ArangoDB container on :8529 and runs iter_data natively. Every mode waits
   for `/health`. `ITER_PORT` changes the port (default 8400).
-- **`test/e2e.sh [--live] [--keep]`.** Has iter_data create database `iter5_e2e_<random>`
+- **`test/e2e.sh [--live] [--keep]`.** Has iter_data create database `iter_e2e_<random>`
   and a user of the same name on the dev ArangoDB (root's password, as on a fresh install), starts iter_data and ONE engine, copies `test/e2e/sample5` twice
   into scratch git repos (two projects, both served by that engine), and
   checks, section by section: work-item round trips on the `mock` provider,
