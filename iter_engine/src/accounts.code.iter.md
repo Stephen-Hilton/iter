@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-02 23:15:33Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
 ---
 
 # Account usage tracker
@@ -23,7 +23,7 @@ Keeps track of how much of each AI account's allowance is used and where its key
 ## How it works
 
 **Usage** (`iter_engine/src/usage.rs`): each account has a snapshot file
-(`$ITER_USAGE_DIR/iter3-usage-<account>.json`, default dir `~/.claude`) with the 5h and 7d used
+(`$ITER_USAGE_DIR/iter-usage-<account>.json`, default dir `~/.claude`) with the 5h and 7d used
 percentages and reset times. After a dispatch the provider's `get_usage` supplies the numbers (claude:
 the stream's `rate_limit_event`; mock: `ITER_MOCK_USAGE`); with nothing running, stale accounts are
 probed with a 1-output-token request whose rate-limit headers carry the same numbers

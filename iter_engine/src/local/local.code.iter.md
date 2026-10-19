@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/iter_engine/src/local/walk.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_engine/src/local/validate.code.iter.md"]
   tests:     []
   reqs:      ["{topdir}/docs/iter_spec.md"]
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:52Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
 ---
 
 # iter_engine::local — checkout tools
@@ -24,7 +24,7 @@ The toolkit the engine and the `iter` command use on the files of a checkout: fi
 
 `iter_engine::local` (`iter_engine/src/local/`, the former iter_local crate) is a module with no network and no queue: give it a project folder and it answers from
 the files. Parsing, rendering and conforming a node file is not done here — `iter_core::nodefile` is the
-one node-file library, shared byte-for-byte with iter_data. iter4's marker scan, graph snapshot, id
+one node-file library, shared byte-for-byte with iter_data. the earlier marker scan, graph snapshot, id
 stamper and graph-edit writer were removed in iter.
 
 ## How it works

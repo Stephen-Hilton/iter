@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:15:00Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
 ---
 
 # Settings-graph types (`iter_core::settings`)
@@ -29,11 +29,11 @@ The vocabulary of iter's settings: every setting is a node or an edge, and this 
 
 ## What goes in and out
 
-iter_data's settings store and API (`iter_data/src/settings.rs`: seeding, the iter4 → iter5 migration, `/api/settings/*`, assignments) and authz (`authz.rs`: a project-scoped engine token is accepted only with an active serves edge) build on it. iter_engine reads `Assignments` (`iter_engine/src/assign.rs`). The webui's Settings tab mirrors `EDGE_TYPES` in `settings.js`.
+iter_data's settings store and API (`iter_data/src/settings.rs`: seeding, `/api/settings/*`, assignments) and authz (`authz.rs`: a project-scoped engine token is accepted only with an active serves edge) build on it. iter_engine reads `Assignments` (`iter_engine/src/assign.rs`). The webui's Settings tab mirrors `EDGE_TYPES` in `settings.js`.
 
 ## Why it matters
 
-iter4 kept who-runs-what in lists on project and engine records that drifted apart. One edge table, validated the same way on every write, makes "engine E runs project P from folder F, billed to account A" a single fact.
+The earlier design kept who-runs-what in lists on project and engine records that drifted apart. One edge table, validated the same way on every write, makes "engine E runs project P from folder F, billed to account A" a single fact.
 
 ## Example
 

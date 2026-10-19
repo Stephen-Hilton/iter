@@ -11,7 +11,7 @@ children:
   codenodes: ["{topdir}/iter_data/iter_data.code.iter.md", "{topdir}/iter_data/webui/webui.code.iter.md"]
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 21:56:51Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
 ---
 # Orchestration and data
 
@@ -31,7 +31,7 @@ use a long-lived engine token bound to an owning user) and authorized per
 project (`authz.rs`): an engine may act on a project only through an active
 `serves` edge, a user only through admin rights or a `member` edge.
 
-- **Work queue.** Work items, details, locks, schedules and spend, as in iter4,
+- **Work queue.** Work items, details, locks, schedules and spend, as before,
   plus server-side **get_next** (`next.rs`): `POST /api/projects/{p}/next` picks
   by priority and receive time, honours dependencies, waits, cluster holds and
   lock availability, and claims the item and its locks in one versioned write.

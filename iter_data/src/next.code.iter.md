@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-02 23:10:16Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-19 23:02:43Z", last_tested: ""}
 ---
 
 # Long Description
@@ -20,7 +20,7 @@ timestamps: {create: "2026-10-02 23:10:16Z", last_modified: "2026-10-02 23:10:16
 
 Hands each engine the most urgent piece of work it may start, and makes sure no two engines get the same one.
 
-Server-side get_next (`iter_data/src/next.rs: get_next`) is the iter4 engine's dispatch pick moved onto the server, so one engine serving several projects asks the server for one project at a time and the choice is made where every engine's view agrees.
+Server-side get_next (`iter_data/src/next.rs: get_next`) is the engine's earlier dispatch pick moved onto the server, so one engine serving several projects asks the server for one project at a time and the choice is made where every engine's view agrees.
 
 How it works: the request (`NextReq`: `engine`, `lease_ttl_sec`, optional `agents_allowed`) is refused unless the engine serves the project. The selection takes only `queued` items that do not need approval, are past `retry_after`, are not held by the cluster-restart tag while the cluster is unavailable, are not waiting for their stage-two dedup triage (`needs_triage`) and have `dependency_status == Satisfied`; the agent must be enabled on the project (an active `runs` edge) and in `agents_allowed` (shell items are exempt). Order: test-sweep runs, then `run_now` items, then (priority, receive time). An item whose lockdirs overlap a live lock is skipped; the first such item reserves its paths (`reserve` rows, 600 s) so lower-priority overlapping work is not admitted. The winner is claimed with one versioned write (in-progress, engine, attempt+1, new lease, start time, claim tags) and a lock row per lockdir is taken under that lease; if a lock is refused, the claim is rolled back and the next candidate tried. The reply is `{item, reason}` with reason `none-queued`, `blocked`, `locked`, `project-stopped` or `not-served`.
 
