@@ -274,7 +274,7 @@ pub async fn bootstrap(store: &dyn Storage) -> Result<(), StorageError> {
     if store.get(EDGE_TABLE, META_PK, MIGRATED_SK).await?.is_none() {
         let report = migrate_iter4(store).await?;
         store.put(EDGE_TABLE, META_PK, MIGRATED_SK, &json!({"at": now_utc(), "report": report})).await?;
-        println!("[iter_data] settings graph: iter4 records migrated to edges {report}");
+        println!("[iter_data] settings graph: older records migrated to edges {report}");
     }
     Ok(())
 }

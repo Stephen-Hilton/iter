@@ -1,52 +1,48 @@
-# iter4 guide
+# iter guide
 
-This guide explains what iter4 is, how to stand it up, how to create and run a project, and how every part works: work items, agents, engines, the architecture map, tests, GraphRAG search and the MCP server. It ships inside the iter_data server and is searchable from the GraphRAG tab of every project, so asking a question in plain words ("how do I create a new project?") finds the right section.
+This guide explains what iter is, how to stand it up, how to create and run a project, and how every part works: work items, agents, engines, the architecture map, tests, GraphRAG search and the MCP server. It ships inside the iter_data server and is searchable from the GraphRAG tab of every project, so asking a question in plain words ("how do I create a new project?") finds the right section.
 
 Each section starts with a question. Commands assume you are in the project's checkout unless it says otherwise.
 
-## What is iter4?
+## What is iter?
 
-### What does iter4 do?
+### What does iter do?
 
-iter4 keeps a team of AI coding agents working on a real software project without letting them trip over each other. A person, or an agent, files a **work item**: "make this change, in this part of the code". An **engine** — a program running next to a copy of the code — picks the most urgent item it can start, locks the folders the item will touch, starts a headless Claude Code session (or a plain shell command) to do the work, has a second model check the result against the request (the **close gate**), commits just those files, and moves on.
+iter keeps a team of AI coding agents working on a real software project without letting them trip over each other. A person, or an agent, files a **work item**: "make this change, in this part of the code". An **engine** — a program running next to a copy of the code — picks the most urgent item it can start, locks the folders the item will touch, starts a headless Claude Code session (or a plain shell command) to do the work, has a second model check the result against the request (the **close gate**), commits just those files, and moves on.
 
-### What are the parts of iter4?
+### What are the parts of iter?
 
 - **iter_data** — the central server. It holds every work item, lock, agent definition, schedule, user, cost record and the architecture map in ArangoDB, answers one HTTP API, serves the web page, and serves the MCP server for agents.
 - **iter_engine** — the engine. Run it next to a checkout of your project; it claims work, runs agents, commits and pushes. The same binary is also the `iter` command line (`iter_engine cli <verb>`).
 - **iter_core** — the library compiled into both programs (the shared rules, the node-file library and GraphRAG's text and embedding code). The engine's checkout tools live in iter_engine itself.
 - **The web page** — four tabs: Intro, Work queue, Project graph, GraphRAG.
 
-### What database does iter4 use?
+### What database does iter use?
 
 ArangoDB Community Edition 3.12, and only ArangoDB. It stores documents (work items and every other record), counters, the architecture map as a graph (collections `node` and `link`, named graph `iter_map`), and the GraphRAG chunks and vectors. SQLite and DynamoDB serving were removed on 2026-09-29; DynamoDB is only read once, as the source of the iter3 migration.
 
-### How is iter4 different from iter3?
-
-iter4 keeps iter3's work queue and engine, and adds: ArangoDB in one container with the server, a map of the program (the architecture graph) built from `*.iter.md` files, editing the map from the web page, use cases drawn as hierarchies, a test sweep that turns red tests into work, GraphRAG semantic search, and an MCP server for agents.
-
 ## Standing up the server
 
-### How do I install and start iter4?
+### How do I install and start iter?
 
-From the `iter4/` directory of the repository:
+From the root of the repository:
 
 ```bash
-./deploy.sh docker   # the all-in-one container: ArangoDB CE + iter_data on http://127.0.0.1:8300
+./deploy.sh docker   # the all-in-one container: ArangoDB CE + iter_data on http://127.0.0.1:8400
 ./deploy.sh local    # native iter_data (release build) against a dev ArangoDB container on :8529
 ```
 
 `docker` is the normal way. It builds the Linux iter_data binary, downloads the embedding model (`installers/fetch_model.sh`) and runs `installers/iter_data/docker/install.sh`, which writes `~/.iter/iter.docker.env` with the admin password and token secret from your `.env`, builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
 
-### Which ports does iter4 use?
+### Which ports does iter use?
 
-- **8300** — the API and the web page (`ITER_PORT` changes the host port).
-- **127.0.0.1:8530** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; iter's database is `iter_db` (`iter5` on installs from before 2026-10-17).
+- **8400** — the API and the web page (`ITER_PORT` changes the host port).
+- **127.0.0.1:8630** — the ArangoDB web console of the container, localhost only (`ARANGO_HOST_PORT` changes it). Log in as `root` with `ARANGO_ROOT_PASSWORD`; iter's database is `iter_db` (`iter5` on installs from before 2026-10-17).
 - **127.0.0.1:8529** — the dev ArangoDB used by `./deploy.sh local`, the unit tests and the end-to-end tests.
 
 ### What is the admin password, and how do I log in the first time?
 
-On first start, when there are no users, iter_data creates the user `admin` with role `admin`. The password is `ITER_ADMIN_PASSWORD` from the environment or `.env`; if that is unset, a random 20-character password is generated and printed once in the server log (`docker logs iter4`). Open http://127.0.0.1:8300/ and log in as `admin`.
+On first start, when there are no users, iter_data creates the user `admin` with role `admin`. The password is `ITER_ADMIN_PASSWORD` from the environment or `.env`; if that is unset, a random 20-character password is generated and printed once in the server log (`docker logs iter`). Open http://127.0.0.1:8400/ and log in as `admin`.
 
 ### Which environment variables does the server read?
 
@@ -68,7 +64,7 @@ In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DI
 
 No. The container runs ArangoDB and iter_data only. Engines — and the Claude Code sessions they start — run on the machines that hold checkouts of your projects.
 
-### Can I run iter4 on a server or in the cloud?
+### Can I run iter on a server or in the cloud?
 
 Yes. The installers in `installers/iter_data/` (docker, linux, or linux_aws for EC2 Amazon Linux 2023) run on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; `installers/iter_engine/` installs one on a Linux host.
 
@@ -81,7 +77,7 @@ Yes. The installers in `installers/iter_data/` (docker, linux, or linux_aws for 
 3. **Scaffold the checkout.** In the checkout, run the `init` command the wizard shows:
 
    ```bash
-   iter_engine cli init --name my-project --data-url http://127.0.0.1:8300 --engine Engine01 --desc "What the project is"
+   iter_engine cli init --name my-project --data-url http://127.0.0.1:8400 --engine Engine01 --desc "What the project is"
    ```
 
    It writes `main.iter.md`, `.iter/config.json`, `.iter/.gitignore`, `reqs/<slug>.bizreq.iter.md`, `reqs/<slug>.techreq.iter.md`, and the folders `interfaces/` and `usecases/`. Existing files are kept unless you add `--force`. Commit these files.
@@ -107,7 +103,7 @@ Name, description, state (Running, Draining or Stopped), git repository, the age
 
 ```json
 {
-  "data_url": "http://127.0.0.1:8300",
+  "data_url": "http://127.0.0.1:8400",
   "token_envar": "ITER_ENGINE_TOKEN",
   "engine_name": "Engine01",
   "env_file": "./.env"
@@ -379,7 +375,7 @@ Right-click a node → **Define tests**: list what passing means, simplest first
 
 ## GraphRAG search
 
-### What is GraphRAG in iter4?
+### What is GraphRAG in iter?
 
 Semantic search over a project's knowledge, in the fourth web tab. It indexes two kinds of document per project: files you upload (pdf — scanned PDFs are read with OCR — docx, pptx, html, markdown, text and more, up to 25 MB) and the map's `*.iter.md` node files. This guide is indexed too, product-wide, so its answers appear in every project's search.
 
@@ -409,7 +405,7 @@ Engines re-index node files after every map push. The **Create a scheduled RAG c
 
 ## MCP for agents
 
-### Does iter4 have an MCP server?
+### Does iter have an MCP server?
 
 Yes: a stateless MCP server (Streamable HTTP, JSON responses) at `POST /mcp` on iter_data. Send `Authorization: Bearer <token>`, and optionally `X-Iter-Project` and `X-Iter-Workid` to set the default project and calling item. Every tool call goes through the same API rules as HTTP.
 
@@ -426,7 +422,7 @@ The checkout verbs (validate, runtests, teststate, usecase, markers, critreview)
 Every agent session an engine starts gets it automatically. For your own Claude Code session, add to `.mcp.json`:
 
 ```json
-{"mcpServers": {"iter": {"type": "http", "url": "http://127.0.0.1:8300/mcp",
+{"mcpServers": {"iter": {"type": "http", "url": "http://127.0.0.1:8400/mcp",
   "headers": {"Authorization": "Bearer ${ITER_ENGINE_TOKEN}", "X-Iter-Project": "${ITER_PROJECT}"}}}}
 ```
 
@@ -461,18 +457,6 @@ Shared prompt pieces an admin edits under **Agent Tooling**: `shared` (added to 
 
 The agent's `promptbody`, then the shared tooling, the capability index, the project's context files, the close-gate paragraph, the source instructions, the work item (title, id, folders, priority), any previous attempt's error, the agent's memory and the item's context files; then the main work turn, any pre/post turns, a memory turn and a self-check.
 
-## Migrating from iter3
-
-### How do I move iter3's data into iter4?
-
-Run iter_data once in migration mode against the iter3 DynamoDB tables:
-
-```bash
-iter_data --env-file ../.env --migrate-from dynamodb --migrate-prefix iter3_ [--migrate-dry-run] [--migrate-overwrite]
-```
-
-It reads every `iter3_*` table (it cannot create or change them), copies rows with their keys and versions, copies change counters without moving them backwards, skips rows already present unless `--migrate-overwrite`, prints source and target counts per table, and exits. This is also how iter3's agent records arrive.
-
 ## Troubleshooting
 
 ### The engine says "no engine token". What do I do?
@@ -493,11 +477,11 @@ Run `installers/fetch_model.sh` (or `./deploy.sh docker`, which runs it), or poi
 
 ### Where are the logs?
 
-The container: `docker logs iter4`. Native iter_data: `run/iter_data.log`. Engines log to their console (or journal under systemd). Each work item's history in the Work queue holds its runs, questions, verdicts and costs.
+The container: `docker logs iter`. Native iter_data: `run/iter_data.log`. Engines log to their console (or journal under systemd). Each work item's history in the Work queue holds its runs, questions, verdicts and costs.
 
 ## Words you will meet
 
-### What do the iter4 terms mean?
+### What do the iter terms mean?
 
 - **Work item** — one piece of work for an agent or a shell command.
 - **Agent** — a named role (a prompt plus settings) that does a type of work.

@@ -78,7 +78,7 @@
       const g = window.IterGraph && IterGraph.api;
       if (!g) return;
       S.data = g.model.G;
-      if (S.data && S.data.iter4) S.canEdit = false; // an iter4-shaped server: nothing here would land
+      if (S.data && S.data.legacy) S.canEdit = false; // an old-format server: nothing here would land
       renderBar();
       wireCy(g.cy);
       if (!keyWired) { keyWired = true; document.addEventListener('keydown', onKey); }

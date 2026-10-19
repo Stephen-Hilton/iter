@@ -4,4 +4,4 @@ run
 docs/*
 **/*.db
 **/*.db-*
-!docs/iter4_guide.md
+!docs/iter_guide.md

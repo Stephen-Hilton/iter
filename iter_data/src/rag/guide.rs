@@ -1,4 +1,4 @@
-//! The iter4 user guide as a GraphRAG document (2026-09-29): `docs/iter4_guide.md`
+//! The iter user guide as a GraphRAG document (2026-09-29): `docs/iter_guide.md`
 //! is compiled into iter_data (build.rs; empty when the file is absent) and
 //! ingested at startup as one product-wide document — kind `guide`, scope
 //! (project) `_iter` — re-ingested only when its text or the index version
@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/guide.rs"));
 pub const SCOPE: &str = "_iter";
 pub const DOC_ID: &str = "iter-guide";
 pub const TITLE: &str = "iter guide";
-pub const PATH: &str = "iter4/docs/iter4_guide.md";
+pub const PATH: &str = "iter/docs/iter_guide.md";
 /// Part of the guide's hash, like the engine's INDEX_VERSION for node files.
 const GUIDE_INDEX_VERSION: &str = "v2";
 
@@ -39,7 +39,7 @@ async fn ingest(a: &ArangoBackend) -> Result<String, String> {
     let text = GUIDE.trim();
     if text.is_empty() {
         remove_docs(a, SCOPE, &[DOC_ID.to_string()]).await.map_err(|_| "could not remove the old guide".to_string())?;
-        return Ok("no docs/iter4_guide.md compiled in — nothing to index".into());
+        return Ok("no docs/iter_guide.md compiled in — nothing to index".into());
     }
     let hash = sha(&format!("{GUIDE_INDEX_VERSION}\n{text}"));
     let stored = a
@@ -60,7 +60,7 @@ async fn ingest(a: &ArangoBackend) -> Result<String, String> {
     p.format = "markdown".into();
     let meta = pipeline::DocMeta {
         project: SCOPE, id: DOC_ID.to_string(), kind: "guide", title: TITLE.to_string(), path: PATH.to_string(),
-        hash, extra: json!({"description": "How to use iter4: projects, engines, work items, agents, the map, GraphRAG and MCP."}), by: "iter_data",
+        hash, extra: json!({"description": "How to use iter: projects, engines, work items, agents, the map, GraphRAG and MCP."}), by: "iter_data",
     };
     let n = p.chunks.len();
     pipeline::store_prepared(a, meta, &p).await.map_err(|e| match e {

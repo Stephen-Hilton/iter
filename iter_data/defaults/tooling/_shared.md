@@ -670,7 +670,7 @@ after the LAST dot before `.iter.md` (`billing_api.code.iter.md` is a code node;
 - `*.code.iter.md` — a code node: one C4 object; `level: context | container | component
   | connection`. A **connection** (`level: connection`, under `global/connections/`) is one
   kind of link between parts — "API call", "Event", "Shared dataset" — with
-  `connects: {from: [suppliers], to: [parts reached]}`; connections replace iter4's
+  `connects: {from: [suppliers], to: [parts reached]}`; connections replace the old
   interface files (capability `_connections`)
 - `*.bizreq.iter.md` / `*.techreq.iter.md` — requirement files, MANY requirements each
   (see "Requirements" below); `*.philosophy.iter.md` — the highest-level guide

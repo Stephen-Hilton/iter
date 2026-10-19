@@ -136,7 +136,7 @@
       const id = `${n.file}|contains|${n.id}`;
       if (!eseen.has(id)) { eseen.add(id); edges.push({ id, from: n.file, kind: 'contains', to: n.id }); }
     }
-    return { project: raw.project || '', nodes, edges, stats: raw.stats || null, iter4: !raw.nodes && !!raw.vertices, syncPaused: !!raw.sync_paused };
+    return { project: raw.project || '', nodes, edges, stats: raw.stats || null, legacy: !raw.nodes && !!raw.vertices, syncPaused: !!raw.sync_paused };
   }
 
   /** A req node as the server sends it (spec §2.8): {id, key, title, status, text, order, file, file_type, path, file_state}. */

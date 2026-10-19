@@ -747,7 +747,7 @@ mod tests {
         let l = locations(&c, "{topdir}/docs/a.pdf");
         assert_eq!(l[0]["path"], "/Users/s/dev/p/docs/a.pdf");
         assert_eq!((l[1]["engine"].as_str(), l[1]["path"].as_str(), l[1]["live"].as_bool()), (Some("srv"), Some("~/p/docs/a.pdf"), Some(false)));
-        assert_eq!(locations(&c, "iter4/docs/iter4_guide.md"), json!([]));
+        assert_eq!(locations(&c, "iter/docs/iter_guide.md"), json!([]));
     }
 
     #[test]

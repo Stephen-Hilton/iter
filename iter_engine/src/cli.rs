@@ -526,7 +526,7 @@ fn retired(rest: &[String]) -> ! {
     die(format!(
         "`iter {verb}` is not an iter verb. Checkout verbs: runtests, validate, sync, sweep, rag, init, markers, teststate, usecase. \
          Retired: ids and graph-apply (iter node files carry their own ids; graph edits reach the checkout through the engine's file sync), \
-         the iter4 → iter5 converter migrate5, and the V2-only verbs (testsweep, orphans, resolve)."
+         the old-format converter migrate5, and the V2-only verbs (testsweep, orphans, resolve)."
     ))
 }
 

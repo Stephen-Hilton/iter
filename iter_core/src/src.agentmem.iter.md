@@ -2,7 +2,7 @@
 
 ## Where things live
 - lib.rs — the work item model and shared types (node file: model.code.iter.md).
-- nodefile/ — the v5 node-file library: parse / conform / render / edges / paths (nodefile/nodefile.code.iter.md). nodefile/fixtures/ holds iter4-era test fixtures: never edit them.
+- nodefile/ — the v5 node-file library: parse / conform / render / edges / paths (nodefile/nodefile.code.iter.md). nodefile/fixtures/ holds iter-era test fixtures: never edit them.
 - settings.rs — settings-graph node/edge types, validation, Assignments (settings.code.iter.md).
 - testresult.rs — the standard test result JSON and pass/fail/could-not-run verdict (testresult.code.iter.md).
 - sched.rs — decides when a scheduled template is due (every/stale/daily/weekly); skips missed times instead of catching up (sched.code.iter.md).
