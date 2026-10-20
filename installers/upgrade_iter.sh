@@ -233,7 +233,10 @@ fi
 if [ $DO_ENGINE = 1 ]; then
   if [ $FULL = 1 ]; then
     say "6. iter_engine -> $VERSION (its whole install, --yes)"
-    bash "$ENGINE_SH" install --version "$VERSION" --yes </dev/null \
+    # its prompts read /dev/tty, not stdin (--yes does not silence the URL and name ones), so a stray
+    # keypress would become the URL: give it the values it would only ask for
+    bash "$ENGINE_SH" install --version "$VERSION" --yes \
+      ${DATA_URL:+--data-url "$DATA_URL"} ${ENGINE:+--name "$ENGINE"} </dev/null \
       || die "the engine's install failed (above)$([ $DO_DATA = 0 ] || echo '; iter_data is already upgraded'). Rerun this script: it skips what is done"
   else
     say "6. iter_engine -> $VERSION"
