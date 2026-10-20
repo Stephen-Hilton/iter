@@ -26,7 +26,7 @@ Tells the engine which projects it works on, where their files are and which AI 
 `Assignments { engine, projects: [Assignment], accounts: [AssignedAccount] }`. An `Assignment` is one
 active `serves` edge (engine → project) with its `topdir`, `read_only`, project `state` and `edge_tag`,
 plus the accounts that bill the project (`bills` edge: `order`, `switch`, `stop`, `model`) and that this
-engine holds (`holds` edge: `token_envar` override); an account that bills the project but is not held is
+engine holds (`holds` edge; each account's `token_envar` is its own, named once on the account); an account that bills the project but is not held is
 left out by the server. An account's `provider` comes from its `of` edge and defaults to `claude`.
 
 - `Assignments::parse` reads the reply; `get(project)` finds one assignment; `accounts_of` merges the

@@ -134,7 +134,7 @@ To give the engine work, connect it in the **Settings** tab (the settings graph)
 | edge | from → to | settings |
 |---|---|---|
 | `serves` | engine → project | `topdir` (the checkout), `read_only` |
-| `holds` | engine → account | optional `token_envar` override (the engine has this credential locally) |
+| `holds` | engine → account | the engine has this credential locally (the token variable is named once, on the account) |
 | `bills` | account → project | `order` (the account's priority: P0 is used first, no negatives; a tie goes to the account whose 7-day window resets soonest), `switch` / `stop` (usage %), optional `model` (the default model: used when the agent names none, or one the account's provider cannot run) |
 
 An account bills a project through this engine only when the engine also holds that account. The engine reads all of this from `GET /api/engines/{name}/assignments`. To stop a project on one engine, deactivate its `serves` edge: drag the endpoint onto the `_deactivated` placeholder.
