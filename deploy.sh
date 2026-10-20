@@ -34,7 +34,7 @@ ARANGO_PW="${ARANGO_ROOT_PASSWORD:-iterdev}"
 ITER_DIR="${ITER_DIR:-$HOME/iter}"
 # an older data folder to move into the iter dir, when there is one
 OLD_DATA="${ITER_DATA_DIR:-}"
-for d in "$HOME/.iter/iter_data"; do [ -n "$OLD_DATA" ] || [ ! -d "$d" ] || OLD_DATA="$d"; done
+[ -n "$OLD_DATA" ] || [ ! -d "$HOME/.iter/iter_data" ] || OLD_DATA="$HOME/.iter/iter_data"
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 mkdir -p "$BIN" "$RUN"
 

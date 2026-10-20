@@ -145,7 +145,7 @@ The flags go on the `iter-data` unit's `ExecStart`. The choice is kept in `D/con
 
 ## Upgrade
 
-Rerun `install.sh`, with `--version` for a specific release. The script is idempotent: it replaces the binary (written to a temp name, then moved over), re-renders the units and restarts `iter-data`. Secrets, data and the TLS certificate are kept, so the fingerprint engines pinned stays the same.
+Rerun `install.sh`, with `--version` for a specific release, or run `installers/upgrade_iter.sh`, which also backs up first and upgrades an engine on the same machine. The script is idempotent: it replaces the binary (written to a temp name, then moved over), re-renders the units and restarts `iter-data`. Secrets, data and the TLS certificate are kept, so the fingerprint engines pinned stays the same. The port and a `--memory` given earlier are kept too (`D/config/install.env`).
 
 ## Uninstall
 

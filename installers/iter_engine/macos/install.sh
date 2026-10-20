@@ -454,9 +454,8 @@ move_old_home() { # DIR
 # move it into the iter dir, once; never deletes a file
 migrate_old() {
   local s found=""
-  for s in "$HOME/.iter"; do
-    if [ -d "$s" ] && [ ! -L "$s" ]; then found="$found $s"; fi
-  done
+  s="$HOME/.iter"
+  if [ -d "$s" ] && [ ! -L "$s" ]; then found=" $s"; fi
   [ -n "$found" ] || return 0
   ok "moving the older install in${found} into $IHOME"
   # the agent runs the engine from there: stop it first (step 8/9 loads the new one)
@@ -848,12 +847,10 @@ status() {
 update() {
   # where the engine is now, when not yet in $IHOME: an older ~/.iter (flat
   # files) or another iter dir; place() below moves it
-  local old="" sb="$BIN" sk="$KEYF" st="$TRUSTF" sh="$ITER_HOME" d
-  for d in "$HOME/.iter"; do
-    if [ -z "$old" ] && [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/engine.conf" ]; then
-      old="$d"; CONF_READ="$d/engine.conf" BIN="$d/bin/iter_engine" KEYF="$d/engine.key" TRUSTF="$d/server_trust.json" ITER_HOME="$d"
-    fi
-  done
+  local old="" sb="$BIN" sk="$KEYF" st="$TRUSTF" sh="$ITER_HOME" d="$HOME/.iter"
+  if [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/engine.conf" ]; then
+    old="$d"; CONF_READ="$d/engine.conf" BIN="$d/bin/iter_engine" KEYF="$d/engine.key" TRUSTF="$d/server_trust.json" ITER_HOME="$d"
+  fi
   if [ -z "$old" ] && [ -n "$INSTALLED_DIR" ] && [ "$INSTALLED_DIR" != "$ITER_DIR" ]; then
     old="$INSTALLED_DIR/iter_engine"; CONF_READ="$old/config/engine.conf" BIN="$old/bin/iter_engine" KEYF="$old/secrets/engine.key" TRUSTF="$old/config/server_trust.json" ITER_HOME="$old"
   fi

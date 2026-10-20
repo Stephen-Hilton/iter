@@ -20,10 +20,11 @@
 #   --version TAG          release to download iter_data (and, when piped, this folder) from [latest]
 #   --binary PATH          use this iter_data binary instead of the one beside the script / the release
 #   --env-file PATH        take ITER_ADMIN_PASSWORD, ITER_JWT_SECRET, ARANGO_ROOT_PASSWORD from it
-#   --port N               iter_data port [8400]
+#   --port N               iter_data port [8400; a rerun keeps the one it was installed with]
 #   --db-dir DIR           ArangoDB data directory, e.g. on a data disk [<iter dir>/iter_data/arango/data]
 #   --backup-dir DIR       where backups go, e.g. on another disk [<iter dir>/iter_data/backups]
-#   --memory MiB           memory cap for ArangoDB + iter_data together [min(6144, 85% of RAM)]
+#   --memory MiB           memory cap for ArangoDB + iter_data together [min(6144, 85% of RAM);
+#                          a rerun keeps one given earlier]
 #   --arango-version V     ArangoDB CE version, from the official arangodb image [3.12.12]
 #   --arango-url URL       use this ArangoDB (https:// to another machine) instead of installing one;
 #                          also ARANGO_URL in the environment or --env-file; `local` = install here
@@ -84,7 +85,7 @@ CMD=install
 VERSION="${ITER_VERSION:-}"
 BINARY=""
 ENV_SRC=""
-PORT="${ITER_PORT:-8400}"
+PORT="${ITER_PORT:-}"
 DB_DIR=""
 BACKUP_DIR=""
 ITER_DIR_OPT="${ITER_DIR:-}"
@@ -190,6 +191,12 @@ D="$ROOT/iter_data"
 BIN_DIR="$D/bin" CONF_DIR="$D/config" STATE="$D/state" UNIT_DIR="$D/systemd"
 MODEL_DIR="$D/models/all-MiniLM-L6-v2"
 DATA_ENV="$CONF_DIR/data.env" TLS_ENV="$CONF_DIR/tls.env" BACKUP_ENV="$CONF_DIR/backup.env" INSTALL_ENV="$CONF_DIR/install.env"
+# a rerun (an upgrade) keeps the port and memory cap this install was made with
+[ -n "$PORT" ] || PORT="$(rootenvval ITER_PORT "$INSTALL_ENV")"
+[ -n "$PORT" ] || PORT="$(sed -n 's/.*--listen 0.0.0.0:\([0-9]*\).*/\1/p' "$SYSD/iter-data.service" 2>/dev/null | head -1 || true)"
+PORT="${PORT:-8400}"
+[ -n "$MEM_MIB" ] || MEM_MIB="$(rootenvval ITER_MEMORY_MIB "$INSTALL_ENV")"
+MEM_KEEP="$MEM_MIB"
 AR="$D/arango"
 AR_BIN="$AR/bin" AR_SHARE="$AR/share/arangodb3" AR_CONF="$AR/config" APPS_DIR="$AR/apps"
 # iter_data writes this once the first admin has chosen their own password
@@ -605,7 +612,7 @@ install_units() {
   keep="$(rootenvval ITER_BACKUP_KEEP "$(cfgfile backup.env)" | grep . || echo 28)"
   run install -d -o iter -g iter -m 700 "$BACKUP_DIR"
   printf 'ITER_BACKUP_DIR=%s\nITER_BACKUP_KEEP=%s\n' "$BACKUP_DIR" "$keep" | put 644 root:root "$BACKUP_ENV"
-  printf 'ITER_DB_DIR=%s\n' "$DB_DIR" | put 644 root:root "$INSTALL_ENV"
+  { printf 'ITER_DB_DIR=%s\nITER_PORT=%s\n' "$DB_DIR" "$PORT"; [ -z "$MEM_KEEP" ] || printf 'ITER_MEMORY_MIB=%s\n' "$MEM_KEEP"; } | put 644 root:root "$INSTALL_ENV"
   put 755 root:root "$BIN_DIR/iter-backup" <"$SRC/iter-backup"
   put 755 root:root "$BIN_DIR/iter-admin-cleanup" <"$SRC/iter-admin-cleanup"
   for u in "${UNITS[@]}"; do

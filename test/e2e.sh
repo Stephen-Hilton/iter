@@ -205,8 +205,8 @@ expect "a role-engine user is refused" 400 "$(code "$TOKEN" PUT /api/users/engin
 api PUT /api/users/e2euser '{"role":"user","password":"e2e-user-pw-123","email":""}' >/dev/null || fatal "create user"
 if [ "$E2E_TLS" != off ]; then
   FP=$(curl -sf -H "authorization: Bearer $TOKEN" "$BASE/api/server/tls" | jq -r .fingerprint)
-  check "TLS: the first signed sign-in pinned iter_data's certificate" bash -c "jq -e --arg u 'https://127.0.0.1:$PORT' --arg f '$FP' '.servers[\$u].pins==[\$f]' '$ITER_HOME/server_trust.json'"
-  check "TLS: the trust file is owner-only" bash -c "[ \"\$(stat -f %Lp '$ITER_HOME/server_trust.json' 2>/dev/null || stat -c %a '$ITER_HOME/server_trust.json')\" = 600 ]"
+  check "TLS: the first signed sign-in pinned iter_data's certificate" bash -c "jq -e --arg u 'https://127.0.0.1:$PORT' --arg f '$FP' '.servers[\$u].pins==[\$f]' '$ITER_HOME/config/server_trust.json'"
+  check "TLS: the trust file is owner-only" bash -c "[ \"\$(stat -f %Lp '$ITER_HOME/config/server_trust.json' 2>/dev/null || stat -c %a '$ITER_HOME/config/server_trust.json')\" = 600 ]"
   check "TLS: key trust with the right fingerprint" "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "sha256:$FP"
   check "TLS: key trust with a wrong fingerprint refuses" bash -c "! '$ENGINE_BIN' key trust --data-url '$BASE' --fingerprint $(printf 'ab%.0s' $(seq 32))"
   "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "$FP" >/dev/null
@@ -243,7 +243,7 @@ ok "projects $PA $PB $PN $PU created"
 # engine records: the real one (ticks every second) and the probe engine that
 # never runs; each signs in as itself
 for e in $ENGINE Probe; do
-  api PUT "/api/engines/$e" "{\"host\":\"e2e\",\"state\":\"Stopped\",\"ticksec\":1,\"full_refresh_minutes\":360,\"probe_stale_min\":0,\"queuelock\":{\"retryms\":50,\"breaksec\":60}}" >/dev/null || fatal "engine record $e"
+  api PUT "/api/engines/$e" "{\"host\":\"e2e-$e\",\"state\":\"Stopped\",\"ticksec\":1,\"full_refresh_minutes\":360,\"probe_stale_min\":0,\"queuelock\":{\"retryms\":50,\"breaksec\":60}}" >/dev/null || fatal "engine record $e"
 done
 edge() { api POST /api/settings/edges "$1" | jq -r .id; }
 SERVE_A=$(edge "{\"from\":\"iter_engine:$ENGINE\",\"to\":\"project:$PA\",\"tag\":\"alpha_default\",\"settings\":{\"topdir\":\"$RA\",\"read_only\":false}}")

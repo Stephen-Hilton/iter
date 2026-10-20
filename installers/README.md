@@ -26,6 +26,24 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 Every script takes `--help` and `--dry-run` (print every action, change nothing) and can be run
 again at any time. The folder READMEs above have the details for each platform.
 
+## Upgrade a machine: upgrade_iter.sh
+
+`upgrade_iter.sh` (Linux, macOS) upgrades every iter program installed natively on the machine to one
+release, latest unless `--version` says otherwise. Run it as your own user; it uses sudo where it must:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/upgrade_iter.sh | bash
+```
+
+It finds iter_data (`iter-data` systemd unit) and the engine (`iter-engine` unit, or launchd
+`com.iter.engine`), skips a program whose binary already matches the release's `SHA256SUMS`, and fetches each
+program's `install.sh` from that release's tag. Before it changes anything it runs the engine's
+`update` as a dry run, which refuses while the engine runs work (`--yes` restarts it anyway). Then it
+backs up iter_data (`install.sh backup`, `--no-backup` skips it), reruns iter_data's `install.sh` (secrets,
+database, TLS certificate, port and memory cap are kept), runs the engine's `install.sh update`, and checks
+that the binaries match and the services are active. `--only data|engine`, `--force` (reinstall even when
+current) and `--dry-run` change what it does. Docker installs are only reported: rerun their `install.sh`.
+
 ## One folder: the iter dir
 
 Every installer puts everything it makes in one folder, the **iter dir**: `/opt/iter` by default

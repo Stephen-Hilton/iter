@@ -335,12 +335,10 @@ discover() {
   else ITER_DIR="$(default_iter_dir)"; fi
   set_paths
   # an install from before 2026-10-18: ~/.iter
-  local h
-  for h in "$IHOME"; do
-    [ -n "$OLD_DATA" ] || [ ! -d "$h/iter_data" ] || OLD_DATA="$h/iter_data"
-    [ -n "$OLD_ENV" ] || [ ! -f "$h/$NAME.docker.env" ] || OLD_ENV="$h/$NAME.docker.env"
-    [ -n "$OLD_BUILD" ] || [ ! -d "$h/$NAME-docker" ] || OLD_BUILD="$h/$NAME-docker"
-  done
+  local h="$IHOME"
+  [ -n "$OLD_DATA" ] || [ ! -d "$h/iter_data" ] || OLD_DATA="$h/iter_data"
+  [ -n "$OLD_ENV" ] || [ ! -f "$h/$NAME.docker.env" ] || OLD_ENV="$h/$NAME.docker.env"
+  [ -n "$OLD_BUILD" ] || [ ! -d "$h/$NAME-docker" ] || OLD_BUILD="$h/$NAME-docker"
   if [ -n "$OLD_DATA" ]; then
     OLD_DATA="${OLD_DATA%/}"
     case "$OLD_DATA" in "$D"|"$D"/*) OLD_DATA="" ;; esac

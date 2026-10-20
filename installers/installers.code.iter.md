@@ -46,6 +46,9 @@ An install script takes its binary from `--binary`, else from beside the script,
 (`--version <tag>`, or the latest), checking the sha256 against the release's `SHA256SUMS`. Scripts are
 idempotent, support `--dry-run`, and install a binary by writing a temp file and moving it into place.
 `fetch_model.sh` downloads the all-MiniLM-L6-v2 embedding model iter_data needs for GraphRAG.
+`upgrade_iter.sh` upgrades a machine's native iter_data and engine to one release with that release's own
+install scripts: it skips binaries that already match `SHA256SUMS`, asks the engine's `update` (as a dry run)
+whether it may restart before changing anything, backs up iter_data, then upgrades iter_data and the engine.
 
 ## What goes in and out
 
