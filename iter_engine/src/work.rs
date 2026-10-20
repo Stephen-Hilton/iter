@@ -1313,6 +1313,19 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
 /// with its token (the caller resolved it, or refused to nudge); with no
 /// token the run is the ambient CLI login and its numbers are filed under
 /// the default snapshot, never under a real account's name (2026-09-11).
+/// What a failed stream-json run says went wrong: the final `result` line's
+/// text when it is an error ("Not logged in · Please run /login"), else the
+/// whole output.  The output starts with a long init line, so cut off at a
+/// few hundred characters it hid the reason.
+fn failure_reason(out: &str) -> String {
+    out.lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["type"] == "result" && v["is_error"] == true)
+        .and_then(|v| v["result"].as_str().map(str::to_string))
+        .unwrap_or_else(|| out.to_string())
+}
+
 pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut, u128), String> {
     debug_assert!(token.is_some() || account.is_empty(), "a named account must not nudge without its token");
     let usage_key = if token.is_some() { account } else { "" };
@@ -1477,7 +1490,7 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
                 if status.success() {
                     return Ok(out);
                 }
-                return Err(format!("exit {:?}: {}{}", status.code(), out, err));
+                return Err(format!("exit {:?}: {}{}", status.code(), failure_reason(&out), err));
             }
             Ok(None) => {
                 if Instant::now() > deadline {
@@ -1955,6 +1968,13 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_failed_run_reports_the_error_result_not_the_init_line() {
+        let out = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"result\",\"is_error\":true,\"result\":\"Not logged in · Please run /login\"}\n";
+        assert_eq!(failure_reason(out), "Not logged in · Please run /login");
+        assert_eq!(failure_reason("plain failure"), "plain failure");
+    }
 
     #[test]
     fn commit_scope_survives_a_double_slash_in_the_topdir() {
