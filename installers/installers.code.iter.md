@@ -48,7 +48,8 @@ idempotent, support `--dry-run`, and install a binary by writing a temp file and
 `fetch_model.sh` downloads the all-MiniLM-L6-v2 embedding model iter_data needs for GraphRAG.
 `upgrade_iter.sh` upgrades a machine's native iter_data and engine to one release with that release's own
 install scripts: it skips binaries that already match `SHA256SUMS`, asks the engine's `update` (as a dry run)
-whether it may restart before changing anything, backs up iter_data, then upgrades iter_data and the engine.
+whether it may restart before changing anything, backs up iter_data, then upgrades iter_data and the engine, and
+checks the services, the engine key, the account token names and the CA trust, listing what is left for a person.
 
 ## What goes in and out
 

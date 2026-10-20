@@ -37,12 +37,17 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 
 It finds iter_data (`iter-data` systemd unit) and the engine (`iter-engine` unit, or launchd
 `com.iter.engine`), skips a program whose binary already matches the release's `SHA256SUMS`, and fetches each
-program's `install.sh` from that release's tag. Before it changes anything it runs the engine's
-`update` as a dry run, which refuses while the engine runs work (`--yes` restarts it anyway). Then it
-backs up iter_data (`install.sh backup`, `--no-backup` skips it), reruns iter_data's `install.sh` (secrets,
-database, TLS certificate, port and memory cap are kept), runs the engine's `install.sh update`, and checks
-that the binaries match and the services are active. `--only data|engine`, `--force` (reinstall even when
-current) and `--dry-run` change what it does. Docker installs are only reported: rerun their `install.sh`.
+program's `install.sh` from that release's tag. It asks for sudo once. Before it changes anything it runs the
+engine's `update` as a dry run, which refuses while the engine runs work: on a terminal it asks, otherwise
+`--yes` restarts it anyway. Then it backs up iter_data (`install.sh backup`, `--no-backup` skips it), reruns
+iter_data's `install.sh` (secrets, database, TLS certificate, port and memory cap are kept), and runs the
+engine's `install.sh update` (`--full`: its whole `install --yes`, which also makes the browsers here trust
+iter_data's certificate authority). Last it checks the binaries, the services, that iter_data accepts the
+engine's key, that the account tokens the served projects name are set (names only), and that iter_data
+answers as a trusted https site, and lists what is left for a person. A failed iter_data step stops before the
+engine is touched; a rerun skips what is done. `--only data|engine`, `--force`, `--log FILE|none` (default
+`<iter dir>/iter_engine/logs/upgrade_iter.log`, passwords masked) and `--dry-run` change what it does. Docker
+installs are only reported: rerun their `install.sh`.
 
 ## One folder: the iter dir
 
