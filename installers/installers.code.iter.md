@@ -40,7 +40,7 @@ folders that use it: `iter_data-linux-{x86_64,aarch64}`, `iter_engine-linux-{x86
 `iter_engine-macos-{aarch64,x86_64}`, `iter_engine-windows-x86_64.exe`. Linux builds run in a
 `rust:1-bullseye` container (glibc 2.31 baseline, so they run on Debian 11+, Ubuntu 20.04+ and Amazon
 Linux 2023); Windows is cross-built with `cargo xwin` and a static C runtime. `build.sh --release` tags
-`vYYYY.MM.DD[.N]` and publishes the assets as a GitHub Release; binaries are never committed.
+`vYYYY.MM.DD<a-z>` (e.g. `v2026.10.20a`) and publishes the assets as a GitHub Release; binaries are never committed.
 
 An install script takes its binary from `--binary`, else from beside the script, else from the release
 (`--version <tag>`, or the latest), checking the sha256 against the release's `SHA256SUMS`. Scripts are

@@ -55,7 +55,7 @@ Usage: installers/build.sh [--only <asset-glob>]... [--skip-windows] [--dry-run]
                    --only 'iter_engine-macos-*' --only 'iter_data-linux-*'
   --skip-windows   do not build iter_engine-windows-x86_64.exe
   --dry-run        print every action, change nothing
-  --release        build all 7 assets, then create the next v<YYYY>.<MM>.<DD>[.N]
+  --release        build all 7 assets, then create the next v<YYYY>.<MM>.<DD><a-z>
                    tag at HEAD (UTC), push it, and `gh release create` with dist/*.
                    Refuses when the working tree is dirty or HEAD is not on origin.
   -h, --help       this text
@@ -100,7 +100,7 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 # file someone may be running)
 put() {
   local src="$1" dest="$2" tmp
-  if [ "$DRY" = 1 ]; then printf '    copy %s -> %s\n' "${src#$ROOT/}" "${dest#$ROOT/}"; return; fi
+  if [ "$DRY" = 1 ]; then printf '    copy %s -> %s\n' "${src#"$ROOT"/}" "${dest#"$ROOT"/}"; return; fi
   mkdir -p "$(dirname "$dest")"
   tmp="$(dirname "$dest")/.$(basename "$dest").tmp.$$"
   cp "$src" "$tmp"; chmod 755 "$tmp"; mv -f "$tmp" "$dest"
@@ -115,14 +115,19 @@ if [ "$RELEASE" = 1 ]; then
   [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "working tree is dirty (git status); commit or stash first"
   git -C "$ROOT" fetch --quiet --tags origin
   HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+  # not grep -q: under pipefail its early exit can fail the pipe (SIGPIPE to git)
+  # shellcheck disable=SC2143
   [ -n "$(git -C "$ROOT" branch -r --contains "$HEAD_SHA" 2>/dev/null | grep '^ *origin/')" ] \
     || die "HEAD $HEAD_SHA is not on origin; push it first"
+  # vYYYY.MM.DD plus a letter: a for the day's first release, then b, c, ...
   BASE_TAG="v$(date -u +%Y.%m.%d)"
-  TAG="$BASE_TAG" n=1
-  while git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
-     || git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; do
-    n=$((n + 1)); TAG="$BASE_TAG.$n"
+  TAG=""
+  for l in {a..z}; do
+    git -C "$ROOT" rev-parse -q --verify "refs/tags/$BASE_TAG$l" >/dev/null && continue
+    git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/$BASE_TAG$l" >/dev/null 2>&1 && continue
+    TAG="$BASE_TAG$l"; break
   done
+  [ -n "$TAG" ] || die "$BASE_TAG already has releases a to z; wait for tomorrow (UTC)"
   echo "    HEAD $HEAD_SHA is on origin; the release tag will be $TAG"
 fi
 

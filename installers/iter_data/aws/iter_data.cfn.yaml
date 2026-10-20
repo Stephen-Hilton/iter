@@ -29,7 +29,7 @@ Parameters:
   IterVersion:
     Type: String
     Default: latest
-    AllowedPattern: '^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?)$'
+    AllowedPattern: '^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}([a-z]|\.[0-9]+)?)$'
     Description: >-
       A release tag such as v2026.10.17, or "latest" to resolve the newest release at first boot.
       The install script and the iter_data binary both come from that release.

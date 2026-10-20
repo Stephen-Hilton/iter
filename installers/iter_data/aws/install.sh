@@ -95,7 +95,7 @@ done
 
 case "$ARCH" in arm64|x86_64) ;; *) die "--arch is arm64 or x86_64" ;; esac
 [ -n "$ITYPE" ] || { [ "$ARCH" = arm64 ] && ITYPE=t4g.large || ITYPE=t3.large; }
-[[ "$VERSION" =~ ^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?)$ ]] || die "--version is latest or vYYYY.MM.DD[.N]"
+[[ "$VERSION" =~ ^(latest|v[0-9]{4}\.[0-9]{2}\.[0-9]{2}([a-z]|\.[0-9]+)?)$ ]] || die "--version is latest or a tag like v2026.10.20a"
 url_re='^(local|https?://[][A-Za-z0-9._:-]+/?)$'  # host (or [IPv6]) and port
 [ -z "$A_URL" ] || [[ "$A_URL" =~ $url_re ]] || die "--arango-url is https://host:port (or local)"
 [ -z "$A_FP" ] || [[ "$A_FP" =~ ^(sha256:)?[0-9A-Fa-f:]{64,95}$ ]] || die "--arango-fingerprint is sha256:<64 hex>"

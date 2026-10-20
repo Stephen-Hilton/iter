@@ -181,8 +181,9 @@ drops a server's pin. Engines sign in only with their key; there is no engine to
 
 ## Versions
 
-A release is a git tag `v<YYYY>.<MM>.<DD>` (UTC build day); a second release the same day is
-`v<YYYY>.<MM>.<DD>.2`, then `.3`, ... Each release carries the 7 binaries plus `SHA256SUMS`:
+A release is a git tag `v<YYYY>.<MM>.<DD><letter>` (UTC build day): the day's first release is
+`v2026.10.20a`, the next `v2026.10.20b`, and so on. Releases before v2026.10.20a are
+`v<YYYY>.<MM>.<DD>[.N]` and still install. Each release carries the 7 binaries plus `SHA256SUMS`:
 
 ```
 iter_data-linux-x86_64     iter_data-linux-aarch64

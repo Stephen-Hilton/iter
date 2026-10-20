@@ -38,7 +38,7 @@ committed) and one self-contained install script per program and platform. Insta
   `installers/build.sh` (all 7 assets: Linux x86_64/aarch64 for both programs in the `rust:1-bullseye`
   docker image, macOS aarch64/x86_64 and Windows x86_64 for the engine), check its summary (every Linux
   binary at glibc ≤ 2.31), commit, push, then `installers/build.sh --release` to tag
-  `vYYYY.MM.DD[.N]` and publish the release. `--release` refuses a dirty tree or an unpushed HEAD.
+  `vYYYY.MM.DD<a-z>` (`v2026.10.20a`, then `b`, ...) and publish the release (the `/iter_release` skill does all of this). `--release` refuses a dirty tree or an unpushed HEAD.
 - **When a change alters what an installed machine needs** (a new flag or env var, a port, a file under
   the iter dir, a package, a service setting, a new platform), update every affected install script and its
   README under `installers/<program>/<platform>/`, keep each folder self-contained (no folder sources

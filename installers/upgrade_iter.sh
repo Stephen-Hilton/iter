@@ -35,7 +35,7 @@
 # within a minute. A failed iter_data step stops before the engine is touched.
 #
 # Options:
-#   --version TAG   upgrade to this release, e.g. v2026.10.20 [latest]
+#   --version TAG   upgrade to this release, e.g. v2026.10.20a [latest]
 #   --only data|engine   upgrade only this program
 #   --full          rerun the engine's whole install (--yes), not only its update
 #   --yes           do not ask: restart the engine even while it runs work (its items are retried)
@@ -141,9 +141,9 @@ say "1. the release"
 if [ -z "$VERSION" ]; then
   # github.com/<repo>/releases/latest redirects to .../releases/tag/<tag> (no API rate limit)
   VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null | sed -n 's|.*/releases/tag/||p')"
-  [ -n "$VERSION" ] || die "could not find the latest release of $REPO (pass --version vYYYY.MM.DD)"
+  [ -n "$VERSION" ] || die "could not find the latest release of $REPO (pass --version, e.g. v2026.10.20a)"
 fi
-case "$VERSION" in v[0-9]*) ;; *) die "--version $VERSION: a release tag like v2026.10.20" ;; esac
+case "$VERSION" in v[0-9]*) ;; *) die "--version $VERSION: a release tag like v2026.10.20a" ;; esac
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 curl -fsSL --retry 3 -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die "release $VERSION has no SHA256SUMS ($BASE)"
 ok "$VERSION"
