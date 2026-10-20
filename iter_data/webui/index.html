@@ -2148,8 +2148,10 @@ async function refreshUsage(manual){
   usageBusy=true;
   const btn=$("#acct-refresh");if(btn){btn.disabled=true;btn.classList.add("busy");}
   try{
+    // a fresh list, not the page's cache (empty until the first load, and an engine busy with a long agent call beats late)
     const now=Date.now();
-    const live=(enginesCache||[]).filter(e=>e.last_seen&&(now-Date.parse(e.last_seen))<3*(e.ticksec||5)*1000+5000);
+    const fresh=await api("/api/engines").catch(()=>null)||enginesCache||[];
+    const live=fresh.filter(e=>e.last_seen&&(now-Date.parse(e.last_seen))<3*Math.max(e.ticksec||5,20)*1000);
     if(!live.length){if(manual)alert("No engine is online to read the accounts' usage.");return;}
     const asked=(await Promise.all(live.map(e=>api("/api/engines/"+encodeURIComponent(rid(e))+"/probe",{method:"POST",body:"{}"})
       .then(r=>({id:rid(e),ts:r.requested})).catch(()=>null)))).filter(Boolean);

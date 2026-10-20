@@ -377,11 +377,10 @@ pub async fn assignments(store: &dyn Storage, engine: &str) -> Result<Assignment
         let an = h.to_name().to_string();
         let Some(rec) = store.get("account", &an, NOSK).await? else { continue };
         acct_on.insert(an.clone(), crate::switches::is_on(&rec));
-        let ovr = h.setting_str("token_envar");
         held.push(HeldAccount {
             name: an.clone(),
             provider: provider_of(&an),
-            token_envar: if ovr.is_empty() { body_str(&rec, "token_envar") } else { ovr },
+            token_envar: body_str(&rec, "token_envar"),
         });
     }
     held.sort_by(|a, b| a.name.cmp(&b.name));

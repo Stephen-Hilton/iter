@@ -12,8 +12,8 @@ fn default_provider() -> String {
 }
 
 /// One account as the assignments name it.  Per project (`bills` edge):
-/// order / switch / stop / model; top level (`holds` edge): the engine's
-/// `token_envar` override.
+/// order / switch / stop / model; top level (`holds` edge): the account's own
+/// `token_envar`.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct AssignedAccount {
     pub name: String,
@@ -72,18 +72,14 @@ impl Assignments {
         serde_json::from_value(v.clone()).map_err(|e| format!("bad assignments: {e}"))
     }
 
-    /// The project's accounts with the engine-level settings folded in: the
-    /// engine's `holds` edge overrides `token_envar` (and names the provider
-    /// when the project side left it empty).
+    /// The project's accounts, the provider filled in from the engine's held
+    /// account when the project side left it empty.
     pub fn accounts_of(&self, a: &Assignment) -> Vec<AssignedAccount> {
         a.accounts
             .iter()
             .map(|pa| {
                 let mut x = pa.clone();
                 if let Some(held) = self.accounts.iter().find(|h| h.name == pa.name) {
-                    if !held.token_envar.trim().is_empty() {
-                        x.token_envar = held.token_envar.clone();
-                    }
                     if x.provider.trim().is_empty() {
                         x.provider = held.provider.clone();
                     }
@@ -147,7 +143,7 @@ mod tests {
         let p = a.get("pdy").unwrap();
         assert_eq!((p.topdir.as_str(), p.state.as_str(), p.edge_tag.as_str()), ("~/dev/pdy", "Running", "pdy_default"));
         let accts = a.accounts_of(p);
-        assert_eq!(accts[0].token_envar, "MBP_MAIN_TOKEN", "the engine's holds edge wins");
+        assert_eq!(accts[0].token_envar, "CLAUDE_TOKEN_MAIN", "the account's own variable, named once");
         assert_eq!((accts[0].switch, accts[0].stop), (80, 95));
         assert_eq!((accts[1].provider.as_str(), accts[1].token_envar.as_str()), ("claude", "ALT_T"), "provider defaults to claude");
         let core = core_accounts(&accts);

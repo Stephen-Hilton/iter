@@ -35,7 +35,7 @@
   const EDGE_TYPES = [
     { edge: 'serves', from: 'iter_engine', to: 'project', desc: 'the engine runs the project', keys: { topdir: '', read_only: false } },
     { edge: 'bills', from: 'account', to: 'project', desc: 'the project may use the account (order: its priority, 0 = used first, no negatives; a tie goes to the account whose 7-day window resets soonest · model: the default model — used when the agent names none, or one this account\'s provider cannot run)', keys: { order: 1, switch: 80, stop: 95, model: '' } },
-    { edge: 'holds', from: 'iter_engine', to: 'account', desc: 'the engine has the credential locally (token_envar: blank = the account\'s own; a name here overrides it for this engine only)', keys: { token_envar: '' } },
+    { edge: 'holds', from: 'iter_engine', to: 'account', desc: 'the engine has the account\'s credential locally (the token variable\'s name is set once, on the account)', keys: {} },
     { edge: 'of', from: 'account', to: 'provider', desc: 'the provider the account dispatches to', keys: {} },
     { edge: 'member', from: 'user', to: 'project', desc: 'the user may see / act on the project', keys: { role: 'user' } },
     { edge: 'owns', from: 'user', to: 'iter_engine', desc: 'whose token the engine uses', keys: {} },

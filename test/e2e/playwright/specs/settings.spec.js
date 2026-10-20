@@ -159,7 +159,7 @@ test.describe('settings graph', () => {
     await expect(page.locator('#s-editbar [data-ed=paste]')).toBeEnabled();
     await page.keyboard.press('ControlOrMeta+v');
     if (await dialog(page).count()) await dialog(page).locator('.kit-primary').click();
-    await expect.poll(async () => { const e = edgeOf(await sg(admin), 'holds', 'iter_engine:mini', 'account:main'); return e && [e.tag, e.settings.token_envar]; }).toEqual([holds.tag, holds.settings.token_envar]);
+    await expect.poll(async () => { const e = edgeOf(await sg(admin), 'holds', 'iter_engine:mini', 'account:main'); return e && e.tag; }).toEqual(holds.tag);
     await shot(page, 'settings-after-paste');
   });
 

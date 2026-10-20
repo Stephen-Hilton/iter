@@ -291,10 +291,8 @@ async fn assignments_follow_active_edges() {
     assert_eq!(pdy.accounts[0].token_envar, "DEV1_TOKEN");
     assert_eq!(pdy.agents["code"]["model"], "opus");
     assert_eq!(asg.accounts.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Dev1", "Dev2"]);
-    // holds override of the token env var
-    let mut h = load_edges(store).await.unwrap().into_iter().find(|e| e.edge_type == "holds" && e.to == "account:Dev2").unwrap();
-    h.settings = json!({"token_envar": "MY_DEV2"});
-    put_edge(store, &h).await.unwrap();
+    // the token env var is the account's own, named once
+    store.put("account", "Dev2", NOSK, &json!({"name": "Dev2", "token_envar": "MY_DEV2", "provider": "claude", "desc": ""})).await.unwrap();
     // an account not held by the engine is not offered, even when billed
     let mut h1 = load_edges(store).await.unwrap().into_iter().find(|e| e.edge_type == "holds" && e.to == "account:Dev1").unwrap();
     h1.active = false;

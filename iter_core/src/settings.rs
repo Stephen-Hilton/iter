@@ -64,7 +64,7 @@ pub struct EdgeTypeDef {
 pub const EDGE_TYPES: &[EdgeTypeDef] = &[
     EdgeTypeDef { edge: "serves", from: "iter_engine", to: "project", desc: "engine runs the project (settings: topdir, read_only)" },
     EdgeTypeDef { edge: "bills", from: "account", to: "project", desc: "project may use the account (settings: order, switch, stop, model = the default model)" },
-    EdgeTypeDef { edge: "holds", from: "iter_engine", to: "account", desc: "engine has the credential locally (settings: token_envar override)" },
+    EdgeTypeDef { edge: "holds", from: "iter_engine", to: "account", desc: "engine has the credential locally (no settings: the token variable is named once, on the account)" },
     EdgeTypeDef { edge: "of", from: "account", to: "provider", desc: "the account's provider for dispatch" },
     EdgeTypeDef { edge: "member", from: "user", to: "project", desc: "user may see/act on the project (settings: role user|viewer)" },
     EdgeTypeDef { edge: "owns", from: "user", to: "iter_engine", desc: "whose token the engine uses" },
@@ -285,7 +285,6 @@ pub fn validate_settings(edge_type: &str, settings: &Value) -> Result<(), String
                 _ => return Err("bills.order (the account's priority, P0 first) must be a whole number 0 or more".into()),
             }
         }
-        "holds" => string("token_envar")?,
         "member" => {
             let r = settings.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             if !["user", "viewer"].contains(&r) {

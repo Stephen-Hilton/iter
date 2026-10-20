@@ -435,7 +435,7 @@ placeholder keeps the edge (and its settings) but makes it inactive.
 |---|---|---|---|
 | `serves` | iter_engine → project | `topdir`, `read_only` | engine runs the project (replaces `Engine.projects` + `Project.engines`) |
 | `bills` | account → project | `order` (priority, 0 = first, no negatives; ties: soonest 7-day reset first), `switch`, `stop` (percent), `model` default (used when the item, the project's agent override and the agent name none, or name one the provider cannot run) | project may use the account (replaces `Project.accounts`; switch/stop moved here) |
-| `holds` | iter_engine → account | `token_envar` override | engine has the credential locally |
+| `holds` | iter_engine → account | — | engine has the credential locally (`token_envar` is named once, on the account) |
 | `of` | account → provider | — | provider for dispatch |
 | `member` | user → project | `role: user\|viewer` | visibility / write |
 | `owns` | user → iter_engine | — | whose token the engine uses |
