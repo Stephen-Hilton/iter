@@ -1306,13 +1306,6 @@ pub fn explain(api: &Api, project: &Project, topdir: &str, item: &WorkItem, acco
         match &result { Ok(o) => format!("{}, ${:.3}", o.subtype, o.cost_usd), Err(_) => "failed".into() });
 }
 
-/// Connectivity nudge (spec: engine chip "test"): `claude -p "."` on haiku
-/// with no other context, billed to `account`'s token when one is configured.
-/// Proves the CLI + token work; its rate_limit_event line refreshes the
-/// account's usage snapshot as a side effect.  A named account always comes
-/// with its token (the caller resolved it, or refused to nudge); with no
-/// token the run is the ambient CLI login and its numbers are filed under
-/// the default snapshot, never under a real account's name (2026-09-11).
 /// What a failed stream-json run says went wrong: the final `result` line's
 /// text when it is an error ("Not logged in · Please run /login"), else the
 /// whole output.  The output starts with a long init line, so cut off at a
@@ -1326,6 +1319,13 @@ fn failure_reason(out: &str) -> String {
         .unwrap_or_else(|| out.to_string())
 }
 
+/// Connectivity nudge (spec: engine chip "test"): `claude -p "."` on haiku
+/// with no other context, billed to `account`'s token when one is configured.
+/// Proves the CLI + token work; its rate_limit_event line refreshes the
+/// account's usage snapshot as a side effect.  A named account always comes
+/// with its token (the caller resolved it, or refused to nudge); with no
+/// token the run is the ambient CLI login and its numbers are filed under
+/// the default snapshot, never under a real account's name (2026-09-11).
 pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut, u128), String> {
     debug_assert!(token.is_some() || account.is_empty(), "a named account must not nudge without its token");
     let usage_key = if token.is_some() { account } else { "" };

@@ -79,10 +79,10 @@ impl Assignments {
             .iter()
             .map(|pa| {
                 let mut x = pa.clone();
-                if let Some(held) = self.accounts.iter().find(|h| h.name == pa.name) {
-                    if x.provider.trim().is_empty() {
-                        x.provider = held.provider.clone();
-                    }
+                if x.provider.trim().is_empty()
+                    && let Some(held) = self.accounts.iter().find(|h| h.name == pa.name)
+                {
+                    x.provider = held.provider.clone();
                 }
                 if x.provider.trim().is_empty() {
                     x.provider = default_provider();
