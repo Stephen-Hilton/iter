@@ -327,10 +327,11 @@ fn env(args: &CliArgs) -> Env {
         eprintln!("iter: ITER_PROJECT is not set");
         std::process::exit(2);
     }
+    let workid = std::env::var("ITER_WORKID").unwrap_or_default();
     Env {
-        api: Api::new(&url, &token),
+        api: Api::new(&url, &token).with_workid(&workid),
         project,
-        workid: std::env::var("ITER_WORKID").unwrap_or_default(),
+        workid,
         agent: std::env::var("ITER_AGENT").unwrap_or_default(),
         topdir: std::env::var("ITER_TOPDIR").unwrap_or_default(),
     }
@@ -552,7 +553,8 @@ mod local {
     /// The ITER_* connection of an engine-run item: (api, project, workid).
     fn run_conn() -> Option<(Api, String, String)> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        Some((Api::new(&get("ITER_DATA_URL")?, &get("ITER_ENGINE_TOKEN")?), get("ITER_PROJECT")?, get("ITER_WORKID").unwrap_or_default()))
+        let workid = get("ITER_WORKID").unwrap_or_default();
+        Some((Api::new(&get("ITER_DATA_URL")?, &get("ITER_ENGINE_TOKEN")?).with_workid(&workid), get("ITER_PROJECT")?, workid))
     }
 
     /// Detail rows for a run (one header + one detail per test node per
@@ -1260,14 +1262,25 @@ fn ask(e: &Env, question: String) {
     println!("question recorded — this work item parks in `question` when this turn ends and queues again once a human answers. Finish your turn now.");
 }
 
+/// One server call (MG-13): the doc row names the server's principal, and the
+/// item parks with `lasterror` in the same versioned write.
 fn reject(e: &Env, reason: &str) {
-    let item = calling_item(e);
-    let _ = e.api.post(
-        &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
-        &json!({"key": "doc", "valuetype": "text", "value": format!("rejected by the {} agent: {}", e.agent, reason.trim())}),
-    );
-    set_state(e, item, "parked", Some(&format!("rejected: {}", reason.trim().chars().take(400).collect::<String>())));
+    if e.workid.is_empty() {
+        die("ITER_WORKID is not set — reject acts on the calling work item".into());
+    }
+    e.api
+        .post(&format!("/api/projects/{}/workitems/{}/reject", e.project, e.workid), &json!({"reason": reason.trim()}))
+        .unwrap_or_else(|err| die(format!("could not reject: {err}")));
     println!("rejected — this work item parks for human review when this turn ends. Finish your turn now.");
+}
+
+/// Who this call acts as, as iter_data records it (`agent:<agent>@<engine>`).
+fn actor(e: &Env) -> String {
+    e.api
+        .get(&format!("/api/projects/{}/whoami", e.project))
+        .ok()
+        .and_then(|v| v.get("requestedby").and_then(|r| r.as_str()).map(String::from))
+        .unwrap_or_else(|| format!("the {} agent", e.agent))
 }
 
 /// `iter block --cluster-restart [--reason …]` (built 2026-09-09; plan:
@@ -1295,8 +1308,8 @@ fn block(e: &Env, cluster_restart: bool, reason: Option<String>) {
     let _ = e.api.post(
         &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
         &json!({"key": "doc", "valuetype": "text", "value": format!(
-            "blocked by cluster restart (the {} agent): {reason} — attempt put back from {before} to {after}; parked until the cluster is back up and healthy",
-            e.agent
+            "blocked by cluster restart ({}): {reason} — attempt put back from {before} to {after}; parked until the cluster is back up and healthy",
+            actor(e)
         )}),
     );
     e.api
@@ -1369,8 +1382,8 @@ fn wait(e: &Env, on: Vec<String>, reason: Option<String>) {
     let _ = e.api.post(
         &format!("/api/projects/{}/workitems/{}/details", e.project, e.workid),
         &json!({"key": "doc", "valuetype": "text", "value": format!(
-            "waiting on {} (the {} agent, attempt {}){}",
-            added.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "), e.agent,
+            "waiting on {} ({}, attempt {}){}",
+            added.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "), actor(e),
             item.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0),
             if reason.is_empty() { String::new() } else { format!(": {reason}") }
         )}),

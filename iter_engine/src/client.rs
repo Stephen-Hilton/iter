@@ -53,6 +53,9 @@ pub struct Api {
     check: crate::trust::Check,
     /// why this base URL may not be used at all (plain http to another machine)
     refused: Option<String>,
+    /// the calling work item, sent as X-Iter-Workid: iter_data names the
+    /// actor (agent:<agent>@<engine>) and the parent of new items from it
+    workid: Option<String>,
 }
 
 #[derive(Debug)]
@@ -92,7 +95,14 @@ impl Api {
             Ok((h, p, c)) => (h, p, c, None),
             Err(why) => (reqwest::blocking::Client::new(), None, crate::trust::Check::Loopback, Some(why)),
         };
-        Self { base, token: Arc::new(RwLock::new(token.to_string())), key: None, http, pin, check, refused }
+        Self { base, token: Arc::new(RwLock::new(token.to_string())), key: None, http, pin, check, refused, workid: None }
+    }
+
+    /// Every call names this work item as the caller's (X-Iter-Workid); "" sends none.
+    pub fn with_workid(mut self, workid: &str) -> Self {
+        let w = workid.trim();
+        self.workid = if w.is_empty() { None } else { Some(w.to_string()) };
+        self
     }
 
     /// May a call that carries a token go out now?
@@ -282,6 +292,9 @@ impl Api {
             return Err(e);
         }
         let mut req = self.http.request(method, format!("{}{}", self.base, path)).bearer_auth(token);
+        if let Some(w) = &self.workid {
+            req = req.header("x-iter-workid", w);
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -367,6 +380,8 @@ pub mod fake {
         pub base: String,
         /// every request seen: (method, path, body)
         pub calls: Arc<Mutex<Vec<(String, String, Value)>>>,
+        /// every request's header lines, as sent
+        pub heads: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeServer {
@@ -387,13 +402,16 @@ pub mod fake {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let calls: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let heads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let handler: Arc<BearerHandler> = Arc::new(handler);
         let seen = calls.clone();
+        let seen_heads = heads.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let handler = handler.clone();
                 let seen = seen.clone();
+                let seen_heads = seen_heads.clone();
                 std::thread::spawn(move || {
                     let mut buf: Vec<u8> = Vec::new();
                     let mut chunk = [0u8; 8192];
@@ -425,6 +443,7 @@ pub mod fake {
                         .lines()
                         .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().trim_start_matches("Bearer ").to_string()))
                         .unwrap_or_default();
+                    seen_heads.lock().unwrap().push(head.clone());
                     seen.lock().unwrap().push((method.clone(), path.clone(), body.clone()));
                     let Some((code, out)) = handler(&bearer, &method, &path, &body) else {
                         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -439,7 +458,7 @@ pub mod fake {
                 });
             }
         });
-        FakeServer { base, calls }
+        FakeServer { base, calls, heads }
     }
 }
 
@@ -447,6 +466,18 @@ pub mod fake {
 mod tests {
     use super::*;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+    /// The `iter` CLI names its calling work item on every call (MG-12):
+    /// iter_data decides from it who acted and which item is the parent.
+    #[test]
+    fn the_calling_work_item_rides_on_every_call() {
+        let srv = fake::serve(|_, _, _| Some((200, serde_json::json!({}))));
+        srv.api().with_workid("w-123").get("/api/x").unwrap();
+        srv.api().with_workid("  ").get("/api/y").unwrap();
+        let heads = srv.heads.lock().unwrap().clone();
+        assert!(heads[0].to_ascii_lowercase().contains("x-iter-workid: w-123"), "{}", heads[0]);
+        assert!(!heads[1].to_ascii_lowercase().contains("x-iter-workid"), "{}", heads[1]);
+    }
 
     fn write_key(path: &Path) -> String {
         let k = SigningKey::generate(&mut rand::rngs::OsRng);
