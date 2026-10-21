@@ -376,8 +376,13 @@ expect "heartbeat: the engine record belongs to no user" "" "$(echo "$EJ" | jq -
 check "engine created one paused test sweep per project" bash -c "for p in $PA $PB; do curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/\$p/workitems | jq -e '[.[]|select(.system==\"test-sweep\" and .state==\"paused\")]|length==1' || exit 1; done"
 
 # ---- deep / shallow / failed blockers ----
-DP=$(wi_new $PA '{"name":"deep plan","agent":"exec","exec_shell":"true","state":"complete","lockdirs":["{topdir}/dp/"]}')
+# a person may name only an open item as parent (MG-12): file the child while
+# the plan is parked, then close the plan
+DP=$(wi_new $PA '{"name":"deep plan","agent":"exec","exec_shell":"true","state":"parked","lockdirs":["{topdir}/dp/"]}')
 DC=$(wi_new $PA "{\"name\":\"deep child\",\"agent\":\"exec\",\"exec_shell\":\"echo child > out_dchild.txt\",\"createdby\":\"$DP\",\"state\":\"parked\",\"lockdirs\":[\"{topdir}/dc/\"]}")
+expect "a person's child names its open parent" "$DP" "$(wi $PA "$DC" | jq -r .createdby)"
+wi_set $PA "$DP" '.state="complete"'
+expect "the plan is complete" complete "$(wi_state $PA "$DP")"
 DD=$(wi_new $PA "{\"name\":\"deep dependent\",\"agent\":\"exec\",\"exec_shell\":\"echo dep > out_ddep.txt\",\"blockedby\":[\"$DP\"],\"lockdirs\":[\"{topdir}/dd/\"]}")
 DS=$(wi_new $PA "{\"name\":\"shallow dependent\",\"agent\":\"exec\",\"exec_shell\":\"echo shallow > out_dshallow.txt\",\"blockedby\":[\"$DP\"],\"blockedby_shallow\":true,\"lockdirs\":[\"{topdir}/ds/\"]}")
 DF=$(wi_new $PA '{"name":"failed blocker","agent":"exec","exec_shell":"false","state":"failed","lockdirs":["{topdir}/df/"]}')
