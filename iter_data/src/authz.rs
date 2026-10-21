@@ -90,13 +90,9 @@ pub async fn project_authz(State(st): State<Arc<AppState>>, req: Request, next: 
     let Some(project) = project_of_path(req.uri().path()) else {
         return next.run(req).await;
     };
-    let token = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
+    // the extractor's own parser (MG-17): a token the handler would accept
+    // is always checked here first
+    let token = crate::api::bearer(req.headers()).to_string();
     // a bad, revoked or unknown token: the handler's extractor answers 401
     // (engine tokens and signed tokens alike: crate::api::authenticate)
     let Ok(who) = crate::api::authenticate(&st, &token).await else {

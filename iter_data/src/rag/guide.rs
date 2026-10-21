@@ -63,9 +63,6 @@ async fn ingest(a: &ArangoBackend) -> Result<String, String> {
         hash, extra: json!({"description": "How to use iter: projects, engines, work items, agents, the map, GraphRAG and MCP."}), by: "iter_data",
     };
     let n = p.chunks.len();
-    pipeline::store_prepared(a, meta, &p).await.map_err(|e| match e {
-        ApiError::Status(_, m) => m,
-        _ => "store failed".into(),
-    })?;
+    pipeline::store_prepared(a, meta, &p).await.map_err(|e| pipeline::failure_text(e, "STARTUP", "guide"))?;
     Ok(format!("indexed {n} chunks (summaries follow from the Summary agent)"))
 }

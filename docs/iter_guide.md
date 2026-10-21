@@ -385,7 +385,9 @@ Semantic search over a project's knowledge, in the fourth web tab. It indexes tw
 
 ### How does GraphRAG index a document?
 
-The text is extracted, split into chapters (the sections under the top heading level) and chunks of about 200 model tokens, and each chunk is embedded twice: its raw text at once (so a document is searchable immediately), and a short summary written by the **Summary** agent (Haiku by default) as a second vector. Chapter and document summaries follow when every chunk is summarised.
+A live engine serving the project claims the upload, extracts the text, splits it into chapters (the sections under the top heading level) and chunks of about 200 model tokens, and embeds each chunk twice: its raw text right away, and a short summary written by the **Summary** agent (Haiku by default) as a second vector. Chapter and document summaries follow when every chunk is summarised.
+
+A document is **searchable** once its chunks are stored, which takes one engine tick (5 s) plus extraction and embedding: about 5–30 seconds for a text under 1 MB when an engine is live. Keyword and raw-text search find it from then on, and summary search once it is **ready** (minutes later). With no live engine it stays **queued** until one checks in. The document's `searchable` flag (in the GraphRAG tab, `rag_doc`, `rag_docs`) says which it is.
 
 ### How does GraphRAG search work?
 
@@ -401,30 +403,49 @@ Ingestion and summaries need a live engine with a Claude account. Search works w
 
 ### How is the index kept up to date?
 
-Engines re-index node files after every map push. The **Create a scheduled RAG change sweep** button makes a scheduled `iter rag sync` item; `iter_engine cli rag sync [--force]` does it by hand.
+Node files (`*.iter.md`) are never uploaded: engines index them from the checkout. After every file-sync round that changed something, an engine re-indexes the changed node files, at most once a minute, so a node edited with `graph_node_update` reaches search about a minute after the engine writes its file. The **Create a scheduled RAG change sweep** button makes a scheduled `iter rag sync` item as a backstop; `iter_engine cli rag sync [--force]` does it by hand.
+
+To check that every node file is indexed, run `test/iter_data/rag_node_count.sh <project>`. It compares the distinct `*.iter.md` paths of the map (after the project's `node_types` setting) with the node documents that are searchable, names any that are missing, and exits 0 only when they match. The map is the reference, not `git ls-files`: agent memory and interface files are not map nodes.
 
 ## MCP for agents
 
 ### Does iter have an MCP server?
 
-Yes: a stateless MCP server (Streamable HTTP, JSON responses) at `POST /mcp` on iter_data. Send `Authorization: Bearer <token>`, and optionally `X-Iter-Project` and `X-Iter-Workid` to set the default project and calling item. Every tool call goes through the same API rules as HTTP.
+Yes: a stateless MCP server (Streamable HTTP, JSON responses) at `POST /mcp` on iter_data. Send `Authorization: Bearer <token>`, and optionally `X-Iter-Project` and `X-Iter-Workid` to set the default project and calling item. Every tool call goes through the same API rules as HTTP. Clients that send `MCP-Protocol-Version: 2025-06-18` must send one message per request (no batches), as that version of the specification says.
+
+Each tool's description has six parts, **Use**, **Arguments**, **Example**, **Returns**, **Errors** and **Limits**, and each tool declares the shape of its result, so an agent can call it without guessing.
+
+Who filed or changed a work item is set by the server from the token and the calling work item (`X-Iter-Workid`): `user:<name>` for a person, `agent:<agent>@<engine>` for an agent working on its own in-progress item, `engine:<engine>` otherwise. Whatever `requestedby` or `createdby` a request sends is ignored, and named in the reply's `warnings`.
 
 ### Which MCP tools are there?
 
 - **Work queue:** `status`, `workitem_list`, `workitem_get`, `workitem_details`, `workitem_create`, `workitem_ask`, `workitem_reject`, `workitem_wait`, `workitem_doc`, `workitem_block`, `capability`, `locks_list`.
-- **Map:** `graph_stats`, `graph_lookup`, `graph_node`, `graph_neighbors`, `graph_owner`, `graph_usecase`.
+- **Map:** `graph_stats`, `graph_lookup`, `graph_node`, `graph_neighbors`, `graph_owner`, `graph_usecase`, and the edit tools `graph_node_create`, `graph_node_update`, `graph_edge_add`, `graph_edge_remove`.
+- **Requirements:** `req_create`, `req_update`, `req_move`, `req_delete` (one `## ` section of a bizreq or techreq file each).
+- **Other:** `testlogs` (test results of the test nodes), `settings_graph` (engines, projects, accounts, agents and their edges).
 - **GraphRAG:** `rag_search`, `rag_status`, `rag_docs`, `rag_doc`, `rag_add_document`, `rag_link_document`.
+
+`workitem_list` reaches every item of a project, closed ones included: filter on any field (`{"field": "ts.receive", "op": "gte", "value": "2026-10-01"}`; a missing field reads as false or empty), sort on any field (newest first by default), and page with `limit` (up to 500) by passing each reply's `next_cursor` back as `cursor` until it is `null`.
+
+`rag_add_document` takes `wait_sec` (up to 60): the call returns as soon as the document is searchable, or when the wait runs out, with its state and a message saying what to do next. It refuses `*.iter.md` files: change a node with `graph_node_update` instead.
 
 The checkout verbs (validate, runtests, teststate, usecase, markers, critreview) stay on the `iter` command line.
 
 ### How do I connect an agent to the MCP server?
 
-Every agent session an engine starts gets it automatically. For your own Claude Code session, add to `.mcp.json`:
+Every agent session an engine starts gets it automatically, with its calling work item in `X-Iter-Workid`. For your own Claude Code session, add to `.mcp.json`:
 
 ```json
-{"mcpServers": {"iter": {"type": "http", "url": "http://127.0.0.1:8400/mcp",
-  "headers": {"Authorization": "Bearer ${ITER_ENGINE_TOKEN}", "X-Iter-Project": "${ITER_PROJECT}"}}}}
+{"mcpServers": {"iter": {"type": "http", "url": "https://127.0.0.1:8400/mcp",
+  "headers": {"Authorization": "Bearer ${ITER_ENGINE_TOKEN}", "X-Iter-Project": "${ITER_PROJECT}",
+              "X-Iter-Workid": "${ITER_WORKID}"}}}}
 ```
+
+Leave `X-Iter-Workid` out when you are not working on an item: then you act as yourself (`user:<name>`).
+
+### Can a web page call the MCP server?
+
+Only browser-based clients (a page on another site, like the MCP Inspector) are affected by this. Agents and Claude Code are not browsers and are never affected. By default every site is allowed: iter_data trusts only the bearer token, which a browser never adds by itself. An admin can limit which sites may call it under the iter_data settings, **Allowed web origins** (one `https://host[:port]` per line). An empty list allows every site, and the webui on its own server is always allowed, whatever the server is called. A change takes effect within 15 seconds.
 
 ## The iter command line
 
@@ -448,6 +469,10 @@ Every agent session an engine starts gets it automatically. For your own Claude 
 ### What can I customise per project?
 
 In the project's gear: description, state, git repository, main file, default context files, the agent ladder, the daily cost cap, `fix_on_test_failure` (file fix items when tests fail), `session_chain_max` (how many items one session may take in a row, default 3), per-agent overrides (model, flags, timeout, max, close gate, lock shape), the failure policy, cluster restart, dedup, pinned tags, engines, accounts and `commit_extra_paths` (extra paths every commit includes). The Project graph can hide folders (`graph.hide`) and move nodes (`graph.parents`).
+
+### Which settings does the iter_data server itself have?
+
+The iter_data settings (⚙ on the iter_data node) show its host, database and environment, read only, and, for admins, **Allowed web origins**: the sites whose web pages may call this server from a browser, one `https://host[:port]` per line. Leave it empty to allow every site. Agents that are not browsers are never affected, and the webui is always allowed. It is the same as `PUT /api/server/origins {"allowed_origins": [...]}`; there is no flag or environment variable, and no installer setting.
 
 ### What is agent tooling?
 

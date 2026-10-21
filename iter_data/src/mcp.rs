@@ -59,7 +59,6 @@ struct Caller {
     project: String,
     workid: String,
     sub: String,
-    role: String,
 }
 
 async fn handle(State(m): State<Mcp>, headers: HeaderMap, Json(msg): Json<Value>) -> Response {
@@ -73,8 +72,21 @@ async fn handle(State(m): State<Mcp>, headers: HeaderMap, Json(msg): Json<Value>
         }
     };
     let hdr = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string();
-    let caller = Caller { auth, project: hdr("x-iter-project"), workid: hdr("x-iter-workid"), sub: user.sub, role: user.role };
+    // the client's protocol version (MG-19): none = 2025-03-26, as the
+    // specification says; one we do not speak is a 400
+    let version = hdr("mcp-protocol-version");
+    if !version.is_empty() && !PROTOCOL_VERSIONS.contains(&version.as_str()) {
+        let msg = format!("unsupported MCP-Protocol-Version {version} (supported: {})", PROTOCOL_VERSIONS.join(", "));
+        return (StatusCode::BAD_REQUEST, Json(err(&Value::Null, -32600, &msg))).into_response();
+    }
+    let version = if version.is_empty() { "2025-03-26".to_string() } else { version };
+    let caller = Caller { auth, project: hdr("x-iter-project"), workid: hdr("x-iter-workid"), sub: user.sub };
     match msg {
+        // batching was removed in 2025-06-18 (dates compare as strings)
+        Value::Array(_) if version.as_str() >= "2025-06-18" => {
+            let msg = format!("batching is not supported in protocol version {version}");
+            (StatusCode::BAD_REQUEST, Json(err(&Value::Null, -32600, &msg))).into_response()
+        }
         Value::Array(batch) => {
             let mut out = Vec::new();
             for one in batch {
@@ -138,12 +150,11 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
                 started.elapsed().as_millis(),
                 if is_error { " ERROR" } else { "" }
             );
+            // every result is an object, so structuredContent is always sent (MG-1)
+            debug_assert!(body.is_object(), "{name} returned a non-object result");
+            let body = if body.is_object() { body } else { json!({"result": body}) };
             let text = serde_json::to_string_pretty(&body).unwrap_or_default();
-            let mut result = json!({"content": [{"type": "text", "text": text}], "isError": is_error});
-            if body.is_object() {
-                result["structuredContent"] = body;
-            }
-            ok(&id, result)
+            ok(&id, json!({"content": [{"type": "text", "text": text}], "isError": is_error, "structuredContent": body}))
         }
         "resources/list" => ok(&id, json!({"resources": []})),
         "prompts/list" => ok(&id, json!({"prompts": []})),
@@ -151,145 +162,20 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
     })
 }
 
-const INSTRUCTIONS: &str = "iter's data API as tools. Work items: status, list, get, details, create (iter add), ask, reject, wait, doc, block. \
-The project graph (nodes = the *.iter.md node files): graph_* tools look a node up by path or name, walk its neighbours, find the code node that owns a path, \
-and edit the graph — graph_node_create / graph_node_update / graph_edge_add / graph_edge_remove change the nodes at once and an engine writes the files. \
-Requirements are the `## ` sections of bizreq/techreq files (graph nodes of type req): req_create / req_update / req_move / req_delete edit one section. \
-testlogs: the test results of test nodes. settings_graph: the settings graph (engines, projects, accounts, agents and their edges). \
-GraphRAG: rag_search finds the chunks of the project's documents and *.iter.md node files closest in meaning to a question and returns the FULL chunk text, \
-with its chapter and document summaries and, for node files, the node's neighbours in the map — search before reading files blind. \
-Most tools take `project` (default: the X-Iter-Project header); ask/reject/wait/block act on the calling work item (`workid`, default X-Iter-Workid).";
+pub const INSTRUCTIONS: &str = "iter's data API as tools. Each tool's description has six parts: Use, Arguments, Example, Returns, Errors, Limits — read them instead of guessing. \
+Work items: status (the open queue), workitem_list (every item, any filter and sort, paged: pass next_cursor back as `cursor` until it is null), get, details, create (iter add), ask, reject, wait, doc, block. \
+Who filed or changed an item (requestedby, createdby) is set by the server from your token and calling work item, never from the arguments. \
+The project map (nodes = the *.iter.md node files): graph_* tools look a node up by path or name, walk its neighbours, find the code node that owns a path, \
+and edit the map — graph_node_create / graph_node_update / graph_edge_add / graph_edge_remove change the nodes at once and an engine writes the files. \
+Requirements are the `## ` sections of bizreq/techreq files: req_create / req_update / req_move / req_delete edit one section. \
+testlogs: the test results of test nodes. settings_graph: engines, projects, accounts, agents and their edges. \
+GraphRAG: rag_search finds the chunks of the project's documents and node files closest in meaning to a question and returns the FULL chunk text with its summaries and map neighbours — search before reading files blind. \
+Do not upload *.iter.md node files: the iter engine indexes them from the checkout after each map sync. A node edited with graph_node_update reaches search after the engine writes the file and its next sync (about a minute). \
+An uploaded document (rag_add_document) is not searchable at once: an engine must ingest it first (about 5–30 s with a live engine; it stays queued while none is live). Pass wait_sec, or poll rag_doc until searchable is true; summaries follow minutes later. \
+Most tools take `project` (default: the X-Iter-Project header); ask/reject/wait/block act on the calling work item (`workid`, default: the X-Iter-Workid header).";
 
-// ---------- the tool catalogue ----------
-
-fn p_project() -> Value {
-    json!({"type": "string", "description": "project name (default: the X-Iter-Project header)"})
-}
-fn p_workid() -> Value {
-    json!({"type": "string", "description": "the calling work item id (default: the X-Iter-Workid header)"})
-}
-fn tool(name: &str, title: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
-    json!({
-        "name": name, "title": title, "description": desc,
-        "inputSchema": {"type": "object", "properties": props, "required": required},
-        "annotations": {"readOnlyHint": read_only, "destructiveHint": false, "idempotentHint": read_only, "openWorldHint": false},
-    })
-}
-
-fn tools() -> Vec<Value> {
-    let strs = json!({"type": "array", "items": {"type": "string"}});
-    vec![
-        // ----- work items -----
-        tool("status", "Project status", "Open work items (in progress, queued, question, paused, parked, scheduled) ordered like `iter status`, plus wait-for deadlocks and stale lock rows.",
-            json!({"project": p_project()}), &[], true),
-        tool("workitem_list", "List work items", "Work items of a project, newest first, filtered. Returns id, name, state, agent, priority, tags, blockedby.",
-            json!({"project": p_project(), "state": {"type": "string", "description": "only this state (queued, in-progress, question, complete, …)"},
-                   "text": {"type": "string", "description": "case-insensitive substring of the name"}, "tag": {"type": "string"},
-                   "limit": {"type": "integer", "description": "default 50, max 500"}}), &[], true),
-        tool("workitem_get", "Get a work item", "One work item's full record. `id` may be the full id or a unique suffix (the webui shows the last 12 characters).",
-            json!({"project": p_project(), "id": {"type": "string"}}), &["id"], true),
-        tool("workitem_details", "Work item history", "A work item's detail rows (request, runs, doc notes, questions and answers, reviews), in order.",
-            json!({"project": p_project(), "id": {"type": "string"}}), &["id"], true),
-        tool("workitem_create", "Create a work item (iter add)",
-            "File new work. Inside a work item it becomes that item's child (inherits priority and use-case tags). A `question` files a question for the human instead of runnable work.",
-            json!({"project": p_project(), "workid": p_workid(),
-                   "title": {"type": "string"}, "agent": {"type": "string", "description": "code | plan | test | … (default code)"},
-                   "request": {"type": "string", "description": "the instructions: what to do and how to know it is done"},
-                   "codepaths": {"type": "array", "items": {"type": "string"}, "description": "lock scope: {topdir}/… or repo-relative paths"},
-                   "priority": {"type": "integer", "description": "0–99, lower = sooner (ignored inside an agent: children inherit)"},
-                   "depends_on": {"type": "array", "items": {"type": "string"}, "description": "ids or unique suffixes this item waits for (deep)"},
-                   "depends_on_shallow": {"type": "boolean"}, "context": strs.clone(),
-                   "model": {"type": "string"}, "tags": strs.clone(), "usecase": {"type": "string"},
-                   "question": {"type": "string", "description": "file the item AS a question for a human (the six-part shape); it queues for work once answered"}}), &["title"], false),
-        tool("workitem_ask", "Ask the human (iter ask)", "Record a question on the calling work item; it parks in `question` when this turn ends and queues again once answered. Finish your turn after calling this.",
-            json!({"project": p_project(), "workid": p_workid(), "question": {"type": "string"}}), &["question"], false),
-        tool("workitem_reject", "Reject the calling item (iter reject)", "The calling work item is invalid: it parks for human review with the reason recorded; no retry is burned.",
-            json!({"project": p_project(), "workid": p_workid(), "reason": {"type": "string"}}), &["reason"], false),
-        tool("workitem_wait", "Wait on other items (iter wait)", "Declare that the calling item cannot finish until other items land: links them as deep dependencies; the close gate then queues this item behind them.",
-            json!({"project": p_project(), "workid": p_workid(), "on": strs.clone(), "reason": {"type": "string"}}), &["on"], false),
-        tool("workitem_doc", "Append a note (iter doc)", "Append a `doc` detail row to a work item (the calling one by default; allowed on closed items too).",
-            json!({"project": p_project(), "workid": p_workid(), "id": {"type": "string", "description": "target item (default: the calling item)"}, "text": {"type": "string"}}), &["text"], false),
-        tool("workitem_block", "Block on the cluster restart (iter block)", "Park the calling item until the nightly cluster restart finishes, giving its attempt back. Refused when tonight's rebuild was skipped.",
-            json!({"project": p_project(), "workid": p_workid(), "reason": {"type": "string"}}), &[], false),
-        tool("capability", "Capabilities (iter capability)", "Without `name`: the list of capability documents. With `name`: that capability's full text.",
-            json!({"name": {"type": "string"}}), &[], true),
-        tool("locks_list", "Locks", "The project's lock rows: path, holder work item, expiry, whether the holder's lease is live.",
-            json!({"project": p_project()}), &[], true),
-        // ----- the map -----
-        tool("graph_stats", "Graph stats", "Counts of the project graph: nodes by type/level, edges by kind, file sync states, nodes unreachable from the project node, red tests.", json!({"project": p_project()}), &[], true),
-        tool("graph_lookup", "Find a map node", "A node of the architecture map by `path` ({topdir}/…/x.code.iter.md) or by `name` (+ optional nodetype).",
-            json!({"project": p_project(), "path": {"type": "string"}, "name": {"type": "string"}, "nodetype": {"type": "string"}}), &[], true),
-        tool("graph_node", "Get a map node", "One node of the map by id.", json!({"project": p_project(), "id": {"type": "string"}}), &["id"], true),
-        tool("graph_neighbors", "Map neighbours", "Nodes linked to a node, to a depth, following links out, in, or both.",
-            json!({"project": p_project(), "id": {"type": "string"}, "depth": {"type": "integer"}, "direction": {"type": "string", "enum": ["out", "in", "any"]}}), &["id"], true),
-        tool("graph_owner", "Owner of a path", "The code nodes whose code directories contain a path, deepest first.",
-            json!({"project": p_project(), "path": {"type": "string"}}), &["path"], true),
-        tool("graph_usecase", "A use case's parts", "A use case (id or name) with the code nodes it uses, everything they own, and its actors.",
-            json!({"project": p_project(), "ucid": {"type": "string"}}), &["ucid"], true),
-        tool("graph_node_create", "Create a graph node",
-            "Create a node (and its file, written by an engine): nodetype project|code|test|bizreq|techreq|philosophy|usecase|actor; code nodes take level context|container|component|connection. `attach_to` (a node id) hangs it under a parent by `attach_kind` (codenodes|tests|reqs|uses|drives|touches|supplies|connects|calls|pulls|pushes|same_as; inferred when omitted). The file path follows the designer folder rules. Returns {node, touched}.",
-            json!({"project": p_project(), "nodetype": {"type": "string"}, "level": {"type": "string"}, "name": {"type": "string"}, "desc": {"type": "string", "description": "~100 words: enough to decide whether to read the whole node"},
-                   "body": {"type": "string", "description": "markdown body (a bizreq/techreq: the one requirement + rationale)"}, "attach_to": {"type": "string"}, "attach_kind": {"type": "string"},
-                   "front": {"type": "object", "description": "type-specific keys (status, owner, flowmap, connects, …)"}, "children": {"type": "object", "description": "codedirs/codenodes/tests/reqs path lists"}}), &["nodetype", "name"], false),
-        tool("graph_node_update", "Update a graph node",
-            "Change a node's name, desc, body, teststate, level, front keys (null removes one) or children lists (a given list replaces the old one). `expect_version` refuses the write when someone changed the node since you read it. Renaming never moves the file.",
-            json!({"project": p_project(), "id": {"type": "string"}, "expect_version": {"type": "integer"}, "name": {"type": "string"}, "desc": {"type": "string"}, "body": {"type": "string"},
-                   "teststate": {"type": "string", "enum": ["inherit", "include", "omit", "block"]}, "level": {"type": "string"}, "front": {"type": "object"}, "children": {"type": "object"}}), &["id"], false),
-        tool("graph_edge_add", "Add a graph edge",
-            "Add an edge between two nodes (ids). kind: codenodes (owns a code node), tests, reqs, uses (use case → code), drives (actor → use case), touches (actor → code), supplies (code → connection), connects (connection → code), calls / pulls / pushes (code → code: one part calls another's API, pulls data from it, or pushes data to it), same_as (code → code: the source is a copy of the target, its master, placed elsewhere). It is written into the owning node's file.",
-            json!({"project": p_project(), "from": {"type": "string"}, "to": {"type": "string"}, "kind": {"type": "string"}}), &["from", "to", "kind"], false),
-        tool("graph_edge_remove", "Remove a graph edge",
-            "Remove an edge (from, to, kind) with a reason. Refused when only a glob pattern of the owning node matches the target: change that pattern with graph_node_update instead.",
-            json!({"project": p_project(), "from": {"type": "string"}, "to": {"type": "string"}, "kind": {"type": "string"}, "reason": {"type": "string"}}), &["from", "to", "kind", "reason"], false),
-        // ----- requirements (sections of bizreq / techreq files) -----
-        tool("req_create", "Add a requirement",
-            "Add one requirement (a `## ` section) to a requirement file: name the file (`file`, a bizreq/techreq node id) or the code/project node it belongs to plus `type` (bizreq | techreq) — that node's file is created in its reqs/ folder when it has none. `after` (a req id of that file) places it; default: last. Returns {req, file}.",
-            json!({"project": p_project(), "file": {"type": "string"}, "node": {"type": "string"}, "type": {"type": "string", "enum": ["bizreq", "techreq"]},
-                   "key": {"type": "string", "description": "e.g. PDY-TECH-034 (optional)"}, "title": {"type": "string"},
-                   "text": {"type": "string", "description": "markdown; use ### or lower for sub-headings"}, "status": {"type": "string", "enum": ["draft", "agreed", "done"]},
-                   "after": {"type": "string"}}), &["title"], false),
-        tool("req_update", "Update a requirement",
-            "Change a requirement's key, title, text or status (the other sections of its file are untouched). `expect_version` = the file node's node_version: refused when the file changed since you read it.",
-            json!({"project": p_project(), "id": {"type": "string"}, "key": {"type": "string"}, "title": {"type": "string"}, "text": {"type": "string"},
-                   "status": {"type": "string", "enum": ["draft", "agreed", "done"]}, "expect_version": {"type": "integer"}}), &["id"], false),
-        tool("req_move", "Move a requirement",
-            "Move a requirement to another requirement file of the project (same id), or reorder it within its file; `after` (a req id of the target file) places it, default last.",
-            json!({"project": p_project(), "id": {"type": "string"}, "to_file": {"type": "string"}, "after": {"type": "string"}}), &["id", "to_file"], false),
-        tool("req_delete", "Delete a requirement", "Remove one requirement from its file, with a reason (recorded in the commit).",
-            json!({"project": p_project(), "id": {"type": "string"}, "reason": {"type": "string"}}), &["id", "reason"], false),
-        tool("testlogs", "Test logs", "The test results posted for the project's test nodes, newest first: outcome, bucket counts, failing details, engine, work item.",
-            json!({"project": p_project(), "node": {"type": "string", "description": "only this test node (id)"}, "limit": {"type": "integer", "description": "default 50, max 1000"}}), &[], true),
-        tool("settings_graph", "Settings graph", "The settings graph: nodes (iter_data, engines, projects, agents, tooling, users, accounts, providers, work item states) and edges (serves, bills, holds, member, runs, …) with their settings. Admins see all; others the parts touching their projects.",
-            json!({}), &[], true),
-        // ----- GraphRAG -----
-        tool("rag_search", "Search the project's documents",
-            "Search the project's GraphRAG index (uploaded documents and *.iter.md node files) by meaning and by keyword at once. Each result is a FULL chunk of text with its chapter and document summaries and its place in the map: a node file's neighbours and linked documents, or the nodes that link an uploaded document. Use it before reading files blind, and before asking a human something the project's documents may already answer.",
-            json!({"project": p_project(), "query": {"type": "string", "description": "a question or description in plain words"},
-                   "k": {"type": "integer", "description": "results, default 8, max 50"},
-                   "kinds": {"type": "array", "items": {"type": "string", "enum": ["file", "node", "guide"]}, "description": "file = uploads, node = *.iter.md files, guide = the built-in iter user guide (default: all)"},
-                   "include_guide": {"type": "boolean", "description": "also search the iter user guide (how to use iter itself); default true"},
-                   "nodetypes": {"type": "array", "items": {"type": "string"}, "description": "node files of these types only: project, code, test, bizreq, techreq, philosophy, usecase, actor"},
-                   "doc": {"type": "string", "description": "search inside one document"},
-                   "mode": {"type": "string", "enum": ["hybrid", "vector", "keyword"], "description": "hybrid (default): keyword + raw-text + summary rankings fused; keyword alone for exact names and codes"},
-                   "vectors": {"type": "string", "enum": ["both", "raw", "summary"], "description": "which vectors the vector rankings use (default both)"},
-                   "docs": {"type": "boolean", "description": "also rank whole documents by their summaries"},
-                   "graph": {"type": "boolean", "description": "attach map neighbours to node hits (default true)"}}), &["query"], true),
-        tool("rag_status", "GraphRAG status", "Documents by kind and state, chunks by summary state, work waiting for the Summary agent, the docs directory, the embedding model, live engines, the change-sweep schedule.",
-            json!({"project": p_project()}), &[], true),
-        tool("rag_docs", "GraphRAG documents", "Every document in the project's GraphRAG index, one per document (no text, no match score): kind file|node, title, path, state, chunk and chapter counts, its summary, and `locations` — the absolute path of its file on each engine's checkout.",
-            json!({"project": p_project(), "kind": {"type": "string", "enum": ["file", "node"]}, "state": {"type": "string"}}), &[], true),
-        tool("rag_doc", "One GraphRAG document", "A document with its chapter summaries and every chunk (text + summary).",
-            json!({"project": p_project(), "id": {"type": "string"}}), &["id"], true),
-        tool("rag_link_document", "Link a document to a map node",
-            "Record that an uploaded document describes a map node: the node's `children.documents` gains the document (at once in the graph; an engine writes the node file), so searches that hit either one bring the other. `unlink: true` removes the link.",
-            json!({"project": p_project(), "doc": {"type": "string", "description": "the GraphRAG document id (rag_docs lists them)"},
-                   "node": {"type": "string", "description": "the node file, {topdir}/…/x.code.iter.md, or the node id (graph_lookup finds it)"},
-                   "unlink": {"type": "boolean"}}), &["doc", "node"], false),
-        tool("rag_add_document", "Add a document to GraphRAG",
-            "Index a document: give `text` (a UTF-8 document, e.g. markdown) or `content_b64` (any supported file: pdf, docx, html, md, txt). It is searchable at once; the Summary agent adds summaries shortly after, and the original is committed to the project's docs directory unless store=false.",
-            json!({"project": p_project(), "filename": {"type": "string", "description": "e.g. design-notes.md (decides the format and the stored name)"},
-                   "text": {"type": "string"}, "content_b64": {"type": "string"}, "title": {"type": "string"}, "store": {"type": "boolean"}}), &["filename"], false),
-    ]
+pub fn tools() -> &'static [Value] {
+    crate::mcp_docs::tools()
 }
 
 // ---------- dispatch ----------
@@ -300,7 +186,37 @@ fn a<'a>(args: &'a Value, k: &str) -> &'a str {
 fn arr(args: &Value, k: &str) -> Vec<String> {
     args.get(k).and_then(|x| x.as_array()).map(|v| v.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()).unwrap_or_default()
 }
-fn enc(s: &str) -> String {
+
+/// The longest id or path segment a tool passes on.
+pub const MAX_SEGMENT: usize = 200;
+
+/// One id checked and percent-encoded as a path segment (MG-11): refused
+/// when empty, holding a control character, or longer than MAX_SEGMENT;
+/// everything but `A-Z a-z 0-9 - _ . ~` encoded, and `.` / `..` too, so no
+/// caller text can add a segment, a query or a fragment.
+pub fn seg(s: &str) -> Result<String, String> {
+    check_id(s)?;
+    if s == "." || s == ".." {
+        return Ok(s.replace('.', "%2E"));
+    }
+    Ok(pct(s))
+}
+
+/// The id rules of `seg`, without the encoding.
+pub fn check_id(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("an id is empty".into());
+    }
+    if s.chars().any(|c| c.is_control()) {
+        return Err("an id holds a control character".into());
+    }
+    if s.chars().count() > MAX_SEGMENT {
+        return Err(format!("an id is longer than {MAX_SEGMENT} characters"));
+    }
+    Ok(())
+}
+
+fn pct(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
@@ -310,6 +226,28 @@ fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+/// `/api/<parts…>?<query>`: every part through `seg`, every query value
+/// encoded the same way. The only way a tool builds a path.
+pub fn api_path(parts: &[&str], query: &[(&str, &str)]) -> Result<String, String> {
+    let mut p = String::from("/api");
+    for part in parts {
+        p.push('/');
+        p.push_str(&seg(part)?);
+    }
+    if !query.is_empty() {
+        let q: Vec<String> = query.iter().map(|(k, v)| format!("{}={}", pct(k), pct(v))).collect();
+        p.push('?');
+        p.push_str(&q.join("&"));
+    }
+    Ok(p)
+}
+
+/// A required argument: present and non-empty, or "<arg> is required".
+fn need<'a>(args: &'a Value, k: &str) -> Result<&'a str, String> {
+    let v = a(args, k);
+    if v.is_empty() { Err(format!("{k} is required")) } else { Ok(v) }
 }
 
 impl Mcp {
@@ -327,6 +265,10 @@ impl Mcp {
             None => path,
         };
         let mut b = Request::builder().method(method).uri(path).header("authorization", &c.auth);
+        // the calling work item reaches the API, which decides who acted (MG-12)
+        if !c.workid.is_empty() {
+            b = b.header("x-iter-workid", &c.workid);
+        }
         let req = match body {
             Some(v) => {
                 b = b.header("content-type", "application/json");
@@ -342,17 +284,21 @@ impl Mcp {
         if status.is_success() {
             Ok(v)
         } else {
+            // never the internal route (MG-16): the status, the API's message, the error id
             let msg = v.get("error").and_then(|e| e.as_str()).map(String::from).unwrap_or_else(|| v.to_string());
-            Err(format!("{} {}: {msg}", status.as_u16(), path))
+            let id = v.get("error_id").and_then(|e| e.as_str()).map(|i| format!(" (error_id {i})")).unwrap_or_default();
+            Err(format!("{}: {msg}{id}", status.as_u16()))
         }
     }
 
     async fn items(&self, c: &Caller, project: &str) -> Result<Vec<Value>, String> {
-        Ok(self.call(c, "GET", &format!("/api/projects/{}/workitems", enc(project)), None).await?.as_array().cloned().unwrap_or_default())
+        Ok(self.call(c, "GET", &api_path(&["projects", project, "workitems"], &[])?, None).await?.as_array().cloned().unwrap_or_default())
     }
 
     /// Full id from a full id or unique prefix/suffix (like `iter`'s resolve_id).
     async fn resolve(&self, c: &Caller, project: &str, needle: &str, all: Option<&[Value]>) -> Result<String, String> {
+        let n = needle.trim();
+        check_id(n).map_err(|e| format!("work item id: {e}"))?;
         let owned;
         let all = match all {
             Some(a) => a,
@@ -361,7 +307,6 @@ impl Mcp {
                 &owned
             }
         };
-        let n = needle.trim();
         let hits: Vec<&str> = all
             .iter()
             .filter_map(|i| i.get("id").and_then(|x| x.as_str()))
@@ -373,15 +318,30 @@ impl Mcp {
             k => Err(format!("'{n}' is ambiguous ({k} matches) — use more of the id")),
         }
     }
+
+    /// The calling work item (`workid`, else the X-Iter-Workid header),
+    /// resolved against the project's real items: only a full id that exists
+    /// is ever put in a path.
+    async fn workid(&self, c: &Caller, args: &Value, project: &str, all: Option<&[Value]>) -> Result<String, String> {
+        let w = if a(args, "workid").is_empty() { c.workid.as_str() } else { a(args, "workid") };
+        if w.is_empty() {
+            return Err("no calling work item: pass workid or send X-Iter-Workid".into());
+        }
+        self.resolve(c, project, w, all).await
+    }
+
+    /// Who this request acts as on `project` (the server's principal).
+    async fn actor(&self, c: &Caller, project: &str) -> String {
+        match api_path(&["projects", project, "whoami"], &[]) {
+            Ok(p) => self.call(c, "GET", &p, None).await.ok().and_then(|v| v["requestedby"].as_str().map(String::from)).unwrap_or_else(|| c.sub.clone()),
+            Err(_) => c.sub.clone(),
+        }
+    }
 }
 
 fn project_of(c: &Caller, args: &Value) -> Result<String, String> {
     let p = if a(args, "project").is_empty() { c.project.clone() } else { a(args, "project").to_string() };
     if p.is_empty() { Err("no project: pass `project` or send the X-Iter-Project header".into()) } else { Ok(p) }
-}
-fn workid_of(c: &Caller, args: &Value) -> Result<String, String> {
-    let w = if a(args, "workid").is_empty() { c.workid.clone() } else { a(args, "workid").to_string() };
-    if w.is_empty() { Err("no calling work item: pass `workid` or send the X-Iter-Workid header".into()) } else { Ok(w) }
 }
 
 fn question_widget(question: &str) -> Value {
@@ -399,10 +359,21 @@ fn lockdir(p: &str) -> String {
     }
 }
 
+/// `args` without the keys the tool consumed itself (the rest is the body).
+fn body_without(args: &Value, keys: &[&str]) -> Value {
+    let mut body = args.clone();
+    if let Some(o) = body.as_object_mut() {
+        for k in keys {
+            o.remove(*k);
+        }
+    }
+    body
+}
+
 async fn call_tool(m: &Mcp, c: &Caller, name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "capability" => {
-            let rows = m.call(c, "GET", "/api/tooling", None).await?.as_array().cloned().unwrap_or_default();
+            let rows = m.call(c, "GET", &api_path(&["tooling"], &[])?, None).await?.as_array().cloned().unwrap_or_default();
             let caps: Vec<&Value> = rows.iter().filter(|r| r["kind"] == "capability").collect();
             let want = a(args, "name");
             if want.is_empty() {
@@ -414,16 +385,28 @@ async fn call_tool(m: &Mcp, c: &Caller, name: &str, args: &Value) -> Result<Valu
                 .map(|x| json!({"name": x["id"], "title": x["name"], "body": x["body"]}))
                 .ok_or_else(|| format!("no capability named '{want}'"))
         }
-        "settings_graph" => m.call(c, "GET", "/api/settings/graph", None).await,
+        "settings_graph" => m.call(c, "GET", &api_path(&["settings", "graph"], &[])?, None).await,
         _ => {
             let project = project_of(c, args)?;
-            let pp = format!("/api/projects/{}", enc(&project));
-            project_tool(m, c, name, args, &project, &pp).await
+            check_id(&project).map_err(|e| format!("project: {e}"))?;
+            project_tool(m, c, name, args, &project).await
         }
     }
 }
 
-async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &str, pp: &str) -> Result<Value, String> {
+async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &str) -> Result<Value, String> {
+    let p = project;
+    // /api/projects/<p>/<rest…>
+    let pp = |rest: &[&str]| -> Result<String, String> {
+        let mut parts = vec!["projects", p];
+        parts.extend_from_slice(rest);
+        api_path(&parts, &[])
+    };
+    let ppq = |rest: &[&str], q: &[(&str, &str)]| -> Result<String, String> {
+        let mut parts = vec!["projects", p];
+        parts.extend_from_slice(rest);
+        api_path(&parts, q)
+    };
     match name {
         "status" => {
             let mut all = m.items(c, project).await?;
@@ -432,44 +415,30 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             };
             all.retain(|i| !matches!(i["state"].as_str(), Some("complete") | Some("failed")));
             all.sort_by_key(|i| (order(i["state"].as_str().unwrap_or("")), i["priority"].as_i64().unwrap_or(5)));
-            let deadlocks = m.call(c, "GET", &format!("{pp}/deadlocks"), None).await.unwrap_or(Value::Null);
+            let deadlocks = m.call(c, "GET", &pp(&["deadlocks"])?, None).await.unwrap_or(Value::Null);
             Ok(json!({"project": project, "open": all.iter().map(brief).collect::<Vec<_>>(), "open_count": all.len(),
                       "deadlocks": deadlocks.get("cycles").cloned().unwrap_or(json!([])),
                       "stale_lock_rows": deadlocks.get("stale_lock_rows").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0)}))
         }
-        "workitem_list" => {
-            let mut all = m.items(c, project).await?;
-            let st = a(args, "state");
-            let text = a(args, "text").to_lowercase();
-            let tag = a(args, "tag");
-            all.retain(|i| {
-                (st.is_empty() || i["state"] == st)
-                    && (text.is_empty() || i["name"].as_str().unwrap_or("").to_lowercase().contains(&text))
-                    && (tag.is_empty() || i["tags"].as_array().map(|t| t.iter().any(|x| x["text"] == tag)).unwrap_or(false))
-            });
-            all.sort_by(|x, y| y["created"].as_str().unwrap_or("").cmp(x["created"].as_str().unwrap_or("")));
-            let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50).clamp(1, 500) as usize;
-            let total = all.len();
-            Ok(json!({"total": total, "items": all.iter().take(limit).map(brief).collect::<Vec<_>>()}))
-        }
+        "workitem_list" => m.call(c, "POST", &pp(&["workitems", "query"])?, Some(&body_without(args, &["project"]))).await,
         "workitem_get" => {
-            let id = m.resolve(c, project, a(args, "id"), None).await?;
-            m.call(c, "GET", &format!("{pp}/workitems/{id}"), None).await
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            m.call(c, "GET", &pp(&["workitems", &id])?, None).await
         }
         "workitem_details" => {
-            let id = m.resolve(c, project, a(args, "id"), None).await?;
-            Ok(json!({"id": id, "details": m.call(c, "GET", &format!("{pp}/workitems/{id}/details"), None).await?}))
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            Ok(json!({"id": id, "details": m.call(c, "GET", &pp(&["workitems", &id, "details"])?, None).await?}))
         }
-        "workitem_create" => create(m, c, args, project, pp).await,
+        "workitem_create" => create(m, c, args, project).await,
         "workitem_ask" => {
             let q = a(args, "question");
             if q.is_empty() {
                 return Err("the question is empty".into());
             }
-            let wid = workid_of(c, args)?;
-            let item = m.call(c, "GET", &format!("{pp}/workitems/{wid}"), None).await?;
-            m.call(c, "POST", &format!("{pp}/workitems/{wid}/details"), Some(&json!({"key": "question", "valuetype": "json", "value": question_widget(q)}))).await?;
-            set_state(m, c, pp, &wid, item, "question", None).await?;
+            let wid = m.workid(c, args, project, None).await?;
+            let item = m.call(c, "GET", &pp(&["workitems", &wid])?, None).await?;
+            m.call(c, "POST", &pp(&["workitems", &wid, "details"])?, Some(&json!({"key": "question", "valuetype": "json", "value": question_widget(q)}))).await?;
+            set_state(m, c, project, &wid, item, "question", None).await?;
             Ok(json!({"ok": true, "message": "question recorded — this work item parks in `question` when this turn ends and queues again once a human answers. Finish your turn now."}))
         }
         "workitem_reject" => {
@@ -477,17 +446,13 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             if reason.is_empty() {
                 return Err("a reason is required".into());
             }
-            let wid = workid_of(c, args)?;
-            let item = m.call(c, "GET", &format!("{pp}/workitems/{wid}"), None).await?;
-            let agent = item["agent"].as_str().unwrap_or("").to_string();
-            let _ = m.call(c, "POST", &format!("{pp}/workitems/{wid}/details"), Some(&json!({"key": "doc", "valuetype": "text", "value": format!("rejected by the {agent} agent: {reason}")}))).await;
-            let note: String = format!("rejected: {}", reason.chars().take(400).collect::<String>());
-            set_state(m, c, pp, &wid, item, "parked", Some(&note)).await?;
+            let wid = m.workid(c, args, project, None).await?;
+            m.call(c, "POST", &pp(&["workitems", &wid, "reject"])?, Some(&json!({"reason": reason}))).await?;
             Ok(json!({"ok": true, "message": "rejected — this work item parks for human review when this turn ends. Finish your turn now."}))
         }
         "workitem_wait" => {
-            let wid = workid_of(c, args)?;
             let all = m.items(c, project).await?;
+            let wid = m.workid(c, args, project, Some(&all)).await?;
             let mut ids = Vec::new();
             for n in arr(args, "on") {
                 ids.push(m.resolve(c, project, &n, Some(&all)).await?);
@@ -495,7 +460,7 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             if ids.is_empty() {
                 return Err("`on` names no work item".into());
             }
-            let mut item = m.call(c, "GET", &format!("{pp}/workitems/{wid}"), None).await?;
+            let mut item = m.call(c, "GET", &pp(&["workitems", &wid])?, None).await?;
             let version = item["version"].as_u64().unwrap_or(1);
             let existing: Vec<String> = item["blockedby"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             let mut merged = existing.clone();
@@ -509,14 +474,16 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             }
             let added: Vec<String> = merged.iter().filter(|x| !existing.contains(x)).cloned().collect();
             if added.is_empty() {
-                return Ok(json!({"ok": true, "message": "already waiting on all of them — nothing to add"}));
+                return Ok(json!({"ok": true, "added": [], "message": "already waiting on all of them — nothing to add"}));
             }
             item["blockedby"] = json!(merged);
-            m.call(c, "PUT", &format!("{pp}/workitems/{wid}?expect_version={version}"), Some(&item)).await?;
+            let ver = version.to_string();
+            m.call(c, "PUT", &ppq(&["workitems", &wid], &[("expect_version", &ver)])?, Some(&item)).await?;
             let reason: String = a(args, "reason").chars().take(400).collect();
+            let actor = m.actor(c, project).await;
             let _ = m
-                .call(c, "POST", &format!("{pp}/workitems/{wid}/details"), Some(&json!({"key": "doc", "valuetype": "text", "value": format!(
-                    "waiting on {} (the {} agent, attempt {}){}", added.join(", "), item["agent"].as_str().unwrap_or(""),
+                .call(c, "POST", &pp(&["workitems", &wid, "details"])?, Some(&json!({"key": "doc", "valuetype": "text", "value": format!(
+                    "waiting on {} ({actor}, attempt {}){}", added.join(", "),
                     item["attempt"].as_u64().unwrap_or(0), if reason.is_empty() { String::new() } else { format!(": {reason}") })})))
                 .await;
             Ok(json!({"ok": true, "added": added, "message": "linked as dependencies. Finish what you can, then end your turn listing what still waits on them as NOT DONE lines: the close gate queues this item behind them and the engine re-runs it once they close complete."}))
@@ -526,131 +493,152 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             if text.trim().is_empty() {
                 return Err("doc text is empty".into());
             }
-            let target = if !a(args, "id").is_empty() { m.resolve(c, project, a(args, "id"), None).await? } else { workid_of(c, args)? };
-            let row = m.call(c, "POST", &format!("{pp}/workitems/{target}/details"), Some(&json!({"key": "doc", "valuetype": "text", "value": text}))).await?;
+            let target = if !a(args, "id").is_empty() { m.resolve(c, project, a(args, "id"), None).await? } else { m.workid(c, args, project, None).await? };
+            let row = m.call(c, "POST", &pp(&["workitems", &target, "details"])?, Some(&json!({"key": "doc", "valuetype": "text", "value": text}))).await?;
             Ok(json!({"ok": true, "id": target, "order": row["order"]}))
         }
-        "workitem_block" => block(m, c, args, project, pp).await,
-        "locks_list" => m.call(c, "GET", &format!("{pp}/locks"), None).await,
-        "graph_stats" => m.call(c, "GET", &format!("{pp}/graph/stats"), None).await,
+        "workitem_block" => block(m, c, args, project).await,
+        "locks_list" => Ok(json!({"locks": m.call(c, "GET", &pp(&["locks"])?, None).await?})),
+        "graph_stats" => m.call(c, "GET", &pp(&["graph", "stats"])?, None).await,
         "graph_lookup" => {
-            let q = format!("path={}&name={}&nodetype={}", enc(a(args, "path")), enc(a(args, "name")), enc(a(args, "nodetype")));
-            m.call(c, "GET", &format!("{pp}/graph/lookup?{q}"), None).await
+            let q = [("path", a(args, "path")), ("name", a(args, "name")), ("nodetype", a(args, "nodetype"))];
+            m.call(c, "GET", &ppq(&["graph", "lookup"], &q)?, None).await
         }
-        "graph_node" => m.call(c, "GET", &format!("{pp}/graph/nodes/{}", enc(a(args, "id"))), None).await,
+        "graph_node" => m.call(c, "GET", &pp(&["graph", "nodes", need(args, "id")?])?, None).await,
         "graph_neighbors" => {
-            let depth = args.get("depth").and_then(|d| d.as_u64()).unwrap_or(1);
+            let depth = args.get("depth").and_then(|d| d.as_u64()).unwrap_or(1).to_string();
             let dir = if a(args, "direction").is_empty() { "any" } else { a(args, "direction") };
-            m.call(c, "GET", &format!("{pp}/graph/nodes/{}/neighbors?depth={depth}&direction={}", enc(a(args, "id")), enc(dir)), None).await
+            m.call(c, "GET", &ppq(&["graph", "nodes", need(args, "id")?, "neighbors"], &[("depth", &depth), ("direction", dir)])?, None).await
         }
-        "graph_owner" => m.call(c, "GET", &format!("{pp}/graph/owner?path={}", enc(a(args, "path"))), None).await,
-        "graph_usecase" => m.call(c, "GET", &format!("{pp}/graph/usecases/{}", enc(a(args, "ucid"))), None).await,
-        "graph_node_create" => {
-            let mut body = args.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("project");
-            }
-            m.call(c, "POST", &format!("{pp}/graph/nodes"), Some(&body)).await
-        }
+        "graph_owner" => m.call(c, "GET", &ppq(&["graph", "owner"], &[("path", need(args, "path")?)])?, None).await,
+        "graph_usecase" => m.call(c, "GET", &pp(&["graph", "usecases", need(args, "ucid")?])?, None).await,
+        "graph_node_create" => m.call(c, "POST", &pp(&["graph", "nodes"])?, Some(&body_without(args, &["project"]))).await,
         "graph_node_update" => {
-            let mut body = args.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("project");
-                o.remove("id");
-            }
-            m.call(c, "PATCH", &format!("{pp}/graph/nodes/{}", enc(a(args, "id"))), Some(&body)).await
+            let id = need(args, "id")?;
+            m.call(c, "PATCH", &pp(&["graph", "nodes", id])?, Some(&body_without(args, &["project", "id"]))).await
         }
         "graph_edge_add" => {
             let body = json!({"from": a(args, "from"), "to": a(args, "to"), "kind": a(args, "kind")});
-            m.call(c, "POST", &format!("{pp}/graph/edges"), Some(&body)).await
+            m.call(c, "POST", &pp(&["graph", "edges"])?, Some(&body)).await
         }
         "graph_edge_remove" => {
             let body = json!({"from": a(args, "from"), "to": a(args, "to"), "kind": a(args, "kind"), "reason": a(args, "reason")});
-            m.call(c, "DELETE", &format!("{pp}/graph/edges"), Some(&body)).await
+            m.call(c, "DELETE", &pp(&["graph", "edges"])?, Some(&body)).await
         }
-        "req_create" => {
-            let mut body = args.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("project");
-            }
-            m.call(c, "POST", &format!("{pp}/graph/reqs"), Some(&body)).await
-        }
+        "req_create" => m.call(c, "POST", &pp(&["graph", "reqs"])?, Some(&body_without(args, &["project"]))).await,
         "req_update" => {
-            let mut body = args.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("project");
-                o.remove("id");
-            }
-            m.call(c, "PATCH", &format!("{pp}/graph/reqs/{}", enc(a(args, "id"))), Some(&body)).await
+            let id = need(args, "id")?;
+            m.call(c, "PATCH", &pp(&["graph", "reqs", id])?, Some(&body_without(args, &["project", "id"]))).await
         }
         "req_move" => {
+            let id = need(args, "id")?;
             let mut body = json!({"to_file": a(args, "to_file")});
             if !a(args, "after").is_empty() {
                 body["after"] = json!(a(args, "after"));
             }
-            m.call(c, "POST", &format!("{pp}/graph/reqs/{}/move", enc(a(args, "id"))), Some(&body)).await
+            m.call(c, "POST", &pp(&["graph", "reqs", id, "move"])?, Some(&body)).await
         }
         "req_delete" => {
-            let body = json!({"reason": a(args, "reason")});
-            m.call(c, "DELETE", &format!("{pp}/graph/reqs/{}", enc(a(args, "id"))), Some(&body)).await
+            let id = need(args, "id")?;
+            m.call(c, "DELETE", &pp(&["graph", "reqs", id])?, Some(&json!({"reason": a(args, "reason")}))).await
         }
         "testlogs" => {
-            let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50);
-            m.call(c, "GET", &format!("{pp}/testlogs?node={}&limit={limit}", enc(a(args, "node"))), None).await
+            let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50).to_string();
+            m.call(c, "GET", &ppq(&["testlogs"], &[("node", a(args, "node")), ("limit", &limit)])?, None).await
         }
-        "rag_search" => {
-            let mut body = args.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("project");
-            }
-            m.call(c, "POST", &format!("{pp}/rag/search"), Some(&body)).await
-        }
-        "rag_status" => m.call(c, "GET", &format!("{pp}/rag"), None).await,
+        "rag_search" => m.call(c, "POST", &pp(&["rag", "search"])?, Some(&body_without(args, &["project"]))).await,
+        "rag_status" => m.call(c, "GET", &pp(&["rag"])?, None).await,
         "rag_docs" => {
-            let q = format!("kind={}&state={}", enc(a(args, "kind")), enc(a(args, "state")));
-            Ok(json!({"documents": m.call(c, "GET", &format!("{pp}/rag/docs?{q}"), None).await?}))
+            let q = [("kind", a(args, "kind")), ("state", a(args, "state"))];
+            Ok(json!({"documents": m.call(c, "GET", &ppq(&["rag", "docs"], &q)?, None).await?}))
         }
-        "rag_doc" => m.call(c, "GET", &format!("{pp}/rag/docs/{}", enc(a(args, "id"))), None).await,
+        "rag_doc" => m.call(c, "GET", &pp(&["rag", "docs", need(args, "id")?])?, None).await,
         "rag_link_document" => {
-            let body = json!({"node": a(args, "node"), "unlink": args.get("unlink").and_then(|u| u.as_bool()).unwrap_or(false)});
-            m.call(c, "POST", &format!("{pp}/rag/docs/{}/links", enc(a(args, "doc"))), Some(&body)).await
+            let (doc, node) = (need(args, "doc")?, need(args, "node")?);
+            let body = json!({"node": node, "unlink": args.get("unlink").and_then(|u| u.as_bool()).unwrap_or(false)});
+            m.call(c, "POST", &pp(&["rag", "docs", doc, "links"])?, Some(&body)).await
         }
-        "rag_add_document" => {
-            use base64::Engine as _;
-            let b64 = if !a(args, "content_b64").is_empty() {
-                a(args, "content_b64").to_string()
-            } else {
-                let t = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                if t.trim().is_empty() {
-                    return Err("give `text` or `content_b64`".into());
-                }
-                base64::engine::general_purpose::STANDARD.encode(t.as_bytes())
-            };
-            let body = json!({"filename": a(args, "filename"), "content_b64": b64, "title": a(args, "title"),
-                              "store": args.get("store").and_then(|s| s.as_bool()).unwrap_or(true)});
-            m.call(c, "POST", &format!("{pp}/rag/docs"), Some(&body)).await
-        }
+        "rag_add_document" => add_document(m, c, args, project).await,
         other => Err(format!("unknown tool {other}")),
     }
 }
 
-fn brief(i: &Value) -> Value {
-    json!({"id": i["id"], "name": i["name"], "state": i["state"], "agent": i["agent"], "priority": i["priority"],
-           "tags": i["tags"].as_array().map(|t| t.iter().map(|x| x["text"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
-           "blockedby": i["blockedby"], "created": i["created"]})
+/// `rag_add_document`: the upload, then (with `wait_sec`) a poll once a second
+/// until the document is searchable, fails, or the wait runs out (MG-5).
+async fn add_document(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    use base64::Engine as _;
+    let filename = need(args, "filename")?;
+    if filename.ends_with(".iter.md") {
+        return Err(crate::rag::NODE_FILE_REFUSAL.into());
+    }
+    let b64 = if !a(args, "content_b64").is_empty() {
+        a(args, "content_b64").to_string()
+    } else {
+        let t = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        if t.trim().is_empty() {
+            return Err("give `text` or `content_b64`".into());
+        }
+        base64::engine::general_purpose::STANDARD.encode(t.as_bytes())
+    };
+    let body = json!({"filename": filename, "content_b64": b64, "title": a(args, "title"),
+                      "store": args.get("store").and_then(|s| s.as_bool()).unwrap_or(true)});
+    let up = m.call(c, "POST", &api_path(&["projects", project, "rag", "docs"], &[])?, Some(&body)).await?;
+    let id = up["id"].as_str().unwrap_or("").to_string();
+    let live = up["live_engines"].as_u64().unwrap_or(0);
+    let wait = args.get("wait_sec").and_then(|w| w.as_u64()).unwrap_or(0).min(MAX_WAIT_SEC);
+    let started = std::time::Instant::now();
+    let mut doc = up.clone();
+    if wait > 0 {
+        let path = api_path(&["projects", project, "rag", "docs", &id], &[])?;
+        let deadline = started + std::time::Duration::from_secs(wait);
+        loop {
+            if doc["searchable"] == true || doc["state"] == "failed" {
+                break;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            tokio::time::sleep((deadline - now).min(std::time::Duration::from_secs(1))).await;
+            doc = m.call(c, "GET", &path, None).await?;
+        }
+    }
+    let state = doc["state"].as_str().unwrap_or("queued").to_string();
+    let searchable = doc["searchable"] == true;
+    let message = if searchable {
+        "searchable now".to_string()
+    } else if state == "failed" {
+        format!("failed: {}", doc["error"].as_str().unwrap_or("indexing failed"))
+    } else if live == 0 {
+        crate::rag::NO_LIVE_ENGINE.to_string()
+    } else {
+        format!("still {state}: poll rag_doc until searchable is true")
+    };
+    Ok(json!({"id": id, "state": state, "searchable": searchable, "live_engines": live,
+              "waited_sec": started.elapsed().as_secs(), "message": message}))
 }
 
-async fn set_state(m: &Mcp, c: &Caller, pp: &str, wid: &str, mut item: Value, state: &str, note: Option<&str>) -> Result<(), String> {
-    let version = item["version"].as_u64().unwrap_or(1);
+/// The longest `wait_sec` of rag_add_document.
+pub const MAX_WAIT_SEC: u64 = 60;
+
+/// The default shape of a work item in a list (wiquery's, the same for `status`).
+fn brief(i: &Value) -> Value {
+    crate::wiquery::project_item(i, &[])
+}
+
+async fn set_state(m: &Mcp, c: &Caller, project: &str, wid: &str, mut item: Value, state: &str, note: Option<&str>) -> Result<(), String> {
+    let version = item["version"].as_u64().unwrap_or(1).to_string();
     item["state"] = json!(state);
     if let Some(n) = note {
         item["lasterror"] = json!(n);
     }
-    m.call(c, "PUT", &format!("{pp}/workitems/{wid}?expect_version={version}"), Some(&item)).await.map(|_| ())
+    m.call(c, "PUT", &api_path(&["projects", project, "workitems", wid], &[("expect_version", &version)])?, Some(&item)).await.map(|_| ())
 }
 
-/// `iter add`, the same body the CLI sends.
-async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> Result<Value, String> {
+/// `iter add`, the same body the CLI sends. Who filed it (`requestedby`) and
+/// its parent (`createdby`) are the server's to set from the token (MG-12):
+/// the calling item is offered as the parent and kept only when it checks out.
+async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
     // the `iter add --file` names are accepted too (type, name, mainwork, codepath, codepaths/lockdirs, blockedby)
     let pick = |keys: &[&str]| keys.iter().map(|k| a(args, k)).find(|v| !v.is_empty()).unwrap_or("");
     let title = pick(&["title", "name"]);
@@ -663,9 +651,11 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> R
     if request.is_empty() && question.is_empty() {
         return Err("an item needs a request (what to do and how to know it is done), or a question".into());
     }
-    // inside an agent: the calling item is the parent
-    let workid = if a(args, "workid").is_empty() { c.workid.clone() } else { a(args, "workid").to_string() };
     let all = m.items(c, project).await?;
+    // inside an agent: the calling item is the parent (resolved when it can be;
+    // otherwise sent as given, and the server replaces it with a warning)
+    let given = if a(args, "workid").is_empty() { c.workid.clone() } else { a(args, "workid").to_string() };
+    let workid = if given.is_empty() { String::new() } else { m.resolve(c, project, &given, Some(&all)).await.unwrap_or(given) };
     let mut blockedby = Vec::new();
     let mut deps = arr(args, "depends_on");
     deps.extend(arr(args, "blockedby"));
@@ -675,20 +665,16 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> R
     if !workid.is_empty() && blockedby.contains(&workid) {
         return Err("an item cannot depend on the item that creates it".into());
     }
-    let calling_agent = if workid.is_empty() {
-        String::new()
-    } else {
-        all.iter().find(|i| i["id"] == workid.as_str()).and_then(|i| i["agent"].as_str()).unwrap_or("").to_string()
-    };
+    let calling_agent = all.iter().find(|i| i["id"] == workid.as_str()).and_then(|i| i["agent"].as_str()).unwrap_or("").to_string();
     let state = if !question.is_empty() {
         "question".to_string()
     } else {
-        let proj = m.call(c, "GET", pp, None).await.unwrap_or(json!({}));
+        let proj = m.call(c, "GET", &api_path(&["projects", project], &[])?, None).await.unwrap_or(json!({}));
         let over = proj.pointer(&format!("/agents/{calling_agent}/childstate")).and_then(|x| x.as_str()).map(String::from);
         let def = if calling_agent.is_empty() {
             None
         } else {
-            m.call(c, "GET", &format!("/api/agents/{}", enc(&calling_agent)), None).await.ok().and_then(|a| a["childstate"].as_str().map(String::from))
+            m.call(c, "GET", &api_path(&["agents", &calling_agent], &[])?, None).await.ok().and_then(|a| a["childstate"].as_str().map(String::from))
         };
         over.or(def).filter(|x| !x.is_empty()).unwrap_or_else(|| "queued".into())
     };
@@ -699,11 +685,6 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> R
             _ => json!({"text": t, "color": ""}),
         })
         .collect();
-    let requestedby = if calling_agent.is_empty() {
-        if c.role == "engine" { "agent".to_string() } else { format!("user:{}", c.sub) }
-    } else {
-        format!("agent:{calling_agent}")
-    };
     let usecase = a(args, "usecase");
     let mut paths = arr(args, "codepaths");
     paths.extend(arr(args, "lockdirs"));
@@ -711,38 +692,42 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> R
         paths.insert(0, a(args, "codepath").to_string());
     }
     let lockdirs: Vec<String> = paths.iter().map(|p| lockdir(p)).collect();
-    let body = json!({
+    let mut body = json!({
         "name": title, "agent": agent, "state": state, "priority": args.get("priority").and_then(|p| p.as_i64()),
         "lockdirs": lockdirs,
         "blockedby": blockedby, "blockedby_shallow": args.get("depends_on_shallow").and_then(|b| b.as_bool()).unwrap_or(false),
         "context": arr(args, "context"), "model": a(args, "model"), "tags": tags,
         "usecase": if usecase.is_empty() { Value::Null } else { json!(usecase) },
-        "createdby": if workid.is_empty() { requestedby.clone() } else { workid.clone() },
-        "requestedby": requestedby, "prework": [], "postwork": [], "request": request,
+        "prework": [], "postwork": [], "request": request,
     });
-    let created = m.call(c, "POST", &format!("{pp}/workitems"), Some(&body)).await?;
+    if !workid.is_empty() {
+        body["createdby"] = json!(workid);
+    }
+    let created = m.call(c, "POST", &api_path(&["projects", project, "workitems"], &[])?, Some(&body)).await?;
     let id = created["id"].as_str().unwrap_or("").to_string();
     let already = created.get("already_open").and_then(|b| b.as_bool()).unwrap_or(false);
     if !already && !question.is_empty() {
-        let _ = m.call(c, "POST", &format!("{pp}/workitems/{id}/details"), Some(&json!({"key": "question", "valuetype": "json", "value": question_widget(question)}))).await;
+        let _ = m.call(c, "POST", &api_path(&["projects", project, "workitems", &id, "details"], &[])?, Some(&json!({"key": "question", "valuetype": "json", "value": question_widget(question)}))).await;
     }
     Ok(json!({"id": id, "state": created["state"], "agent": created["agent"], "priority": created["priority"],
+              "requestedby": created["requestedby"], "createdby": created["createdby"],
               "already_open": already, "warnings": created.get("warnings").cloned().unwrap_or(json!([])),
               "message": if already { "already open: the same check and container is filed; your request text was recorded on it. Do not file it again." } else { "added" }}))
 }
 
 /// `iter block --cluster-restart`.
-async fn block(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> Result<Value, String> {
-    let wid = workid_of(c, args)?;
+async fn block(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    let all = m.items(c, project).await?;
+    let wid = m.workid(c, args, project, Some(&all)).await?;
     let reason: String = {
         let r = a(args, "reason");
         if r.is_empty() { "the cluster is required for this work".into() } else { r.chars().take(400).collect() }
     };
-    let proj: Option<iter_core::Project> = m.call(c, "GET", pp, None).await.ok().and_then(|v| serde_json::from_value(v).ok());
+    let proj: Option<iter_core::Project> = m.call(c, "GET", &api_path(&["projects", project], &[])?, None).await.ok().and_then(|v| serde_json::from_value(v).ok());
     if let Some(proj) = proj {
-        let all: Vec<iter_core::WorkItem> = m.items(c, project).await?.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
-        if let Some(clone) = iter_core::cluster::newest_clone(&proj.cluster_restart, &all) {
-            let details: Vec<Value> = m.call(c, "GET", &format!("{pp}/workitems/{}/details", clone.id), None).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let items: Vec<iter_core::WorkItem> = all.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect();
+        if let Some(clone) = iter_core::cluster::newest_clone(&proj.cluster_restart, &items) {
+            let details: Vec<Value> = m.call(c, "GET", &api_path(&["projects", project, "workitems", &clone.id, "details"], &[])?, None).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
             if iter_core::cluster::rebuild_skipped(Some(clone), &details, chrono::Utc::now()) {
                 return Err(format!(
                     "refused: tonight's cluster rebuild was skipped (restart window {} posted \"skipped\"), so there is no restart to wait for — the cluster stays up. Do the work now; if the cluster is really unavailable, say so with workitem_ask.",
@@ -751,17 +736,18 @@ async fn block(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> Re
             }
         }
     }
-    let mut item = m.call(c, "GET", &format!("{pp}/workitems/{wid}"), None).await?;
-    let version = item["version"].as_u64().unwrap_or(1);
+    let item_path = api_path(&["projects", project, "workitems", &wid], &[])?;
+    let mut item = m.call(c, "GET", &item_path, None).await?;
+    let version = item["version"].as_u64().unwrap_or(1).to_string();
     let before = item["attempt"].as_u64().unwrap_or(0);
     iter_core::cluster::apply_block(&mut item, &reason);
     let after = item["attempt"].as_u64().unwrap_or(0);
+    let actor = m.actor(c, project).await;
     let _ = m
-        .call(c, "POST", &format!("{pp}/workitems/{wid}/details"), Some(&json!({"key": "doc", "valuetype": "text", "value": format!(
-            "blocked by cluster restart (the {} agent): {reason} — attempt put back from {before} to {after}; parked until the cluster is back up and healthy",
-            item["agent"].as_str().unwrap_or(""))})))
+        .call(c, "POST", &api_path(&["projects", project, "workitems", &wid, "details"], &[])?, Some(&json!({"key": "doc", "valuetype": "text", "value": format!(
+            "blocked by cluster restart ({actor}): {reason} — attempt put back from {before} to {after}; parked until the cluster is back up and healthy")})))
         .await;
-    m.call(c, "PUT", &format!("{pp}/workitems/{wid}?expect_version={version}"), Some(&item)).await?;
+    m.call(c, "PUT", &api_path(&["projects", project, "workitems", &wid], &[("expect_version", &version)])?, Some(&item)).await?;
     Ok(json!({"ok": true, "attempt_before": before, "attempt_after": after, "message": format!(
         "blocked on the cluster restart — this item parks when this turn ends, tagged `{}`; the engine requeues it once the cluster is healthy. Finish your turn now.",
         iter_core::cluster::CLUSTER_RESTART_TAG)}))
@@ -770,6 +756,68 @@ async fn block(m: &Mcp, c: &Caller, args: &Value, project: &str, pp: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tools of the hardening plan's §2.1, in order.
+    const TOOL_NAMES: [&str; 34] = [
+        "status", "workitem_list", "workitem_get", "workitem_details", "workitem_create", "workitem_ask", "workitem_reject",
+        "workitem_wait", "workitem_doc", "workitem_block", "capability", "locks_list",
+        "graph_stats", "graph_lookup", "graph_node", "graph_neighbors", "graph_owner", "graph_usecase",
+        "graph_node_create", "graph_node_update", "graph_edge_add", "graph_edge_remove",
+        "req_create", "req_update", "req_move", "req_delete", "testlogs", "settings_graph",
+        "rag_search", "rag_status", "rag_docs", "rag_doc", "rag_link_document", "rag_add_document",
+    ];
+
+    #[test]
+    fn every_tool_is_documented() {
+        let t = tools();
+        assert_eq!(t.iter().map(|x| x["name"].as_str().unwrap()).collect::<Vec<_>>(), TOOL_NAMES);
+        for tool in t {
+            let name = tool["name"].as_str().unwrap();
+            let d = tool["description"].as_str().unwrap();
+            // the six labels, in order, each part non-empty
+            let mut at = Vec::new();
+            for l in crate::mcp_docs::LABELS {
+                let i = d.find(&format!("{l} ")).unwrap_or_else(|| panic!("{name}: no {l}"));
+                at.push(i);
+            }
+            assert!(at.windows(2).all(|w| w[0] < w[1]), "{name}: labels out of order");
+            for (k, l) in crate::mcp_docs::LABELS.iter().enumerate() {
+                let end = at.get(k + 1).copied().unwrap_or(d.len());
+                assert!(!d[at[k] + l.len()..end].trim().is_empty(), "{name}: {l} is empty");
+            }
+            let props = tool["inputSchema"]["properties"].as_object().unwrap();
+            let required: Vec<&str> = tool["inputSchema"]["required"].as_array().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+            for (k, p) in props {
+                let desc = p["description"].as_str().unwrap_or("");
+                assert!(!desc.is_empty(), "{name}.{k}: no description");
+                if !required.contains(&k.as_str()) {
+                    assert!(p.get("default").is_some() || desc.contains("default"), "{name}.{k}: neither a default nor \"no default\"");
+                }
+            }
+            // the example is one complete arguments object
+            let ex_text = d[at[2] + "Example:".len()..at[3]].trim();
+            let ex: Value = serde_json::from_str(ex_text).unwrap_or_else(|e| panic!("{name}: Example is not JSON ({e}): {ex_text}"));
+            let ex = ex.as_object().unwrap_or_else(|| panic!("{name}: Example is not an object"));
+            for k in ex.keys() {
+                assert!(props.contains_key(k), "{name}: Example key {k} is not an argument");
+            }
+            for r in &required {
+                assert!(ex.contains_key(*r), "{name}: Example lacks required {r}");
+            }
+            let out = &tool["outputSchema"];
+            assert!(out["type"] == "object" && out["properties"].is_object() && out["required"].is_array(), "{name}: outputSchema");
+        }
+        let limit = &tools()[1]["inputSchema"]["properties"]["limit"];
+        assert_eq!((limit["default"].as_u64(), limit["maximum"].as_u64()), (Some(50), Some(500)));
+    }
+
+    #[test]
+    fn instructions_state_the_rules() {
+        assert!(INSTRUCTIONS.contains("Do not upload *.iter.md node files: the iter engine indexes them from the checkout after each map sync."));
+        for want in ["searchable", "next_cursor", "set by the server"] {
+            assert!(INSTRUCTIONS.contains(want), "{want}");
+        }
+    }
 
     #[test]
     fn every_tool_has_a_schema_and_unique_name() {
@@ -786,6 +834,19 @@ mod tests {
     fn lockdirs_and_encoding() {
         assert_eq!(lockdir("src/x"), "{topdir}/src/x");
         assert_eq!(lockdir("{topdir}/a"), "{topdir}/a");
-        assert_eq!(enc("{topdir}/a b"), "%7Btopdir%7D%2Fa%20b");
+        assert_eq!(seg("{topdir}/a b").unwrap(), "%7Btopdir%7D%2Fa%20b");
+    }
+
+    #[test]
+    fn api_path_encodes_every_segment() {
+        assert_eq!(seg("a/b?c#d%e f").unwrap(), "a%2Fb%3Fc%23d%25e%20f");
+        assert_eq!((seg("..").unwrap().as_str(), seg(".").unwrap().as_str()), ("%2E%2E", "%2E"));
+        assert_eq!(seg("x.code.iter.md").unwrap(), "x.code.iter.md");
+        assert!(seg("").is_err());
+        assert!(seg("a\nb").is_err() && seg("a\u{7f}").is_err());
+        assert!(seg(&"a".repeat(201)).is_err());
+        assert!(seg(&"a".repeat(200)).is_ok());
+        assert_eq!(api_path(&["projects", "p q", "workitems", "id/explain?"], &[("x", "1&y=2")]).unwrap(),
+                   "/api/projects/p%20q/workitems/id%2Fexplain%3F?x=1%26y%3D2");
     }
 }

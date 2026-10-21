@@ -10,6 +10,7 @@ mod contract_tests;
 mod auth;
 mod datasync;
 mod defaults;
+mod errid;
 mod filesync;
 mod graph;
 mod keys;
@@ -17,6 +18,7 @@ mod graph_view;
 #[cfg(test)]
 mod graph_tests;
 mod mcp;
+mod mcp_docs;
 mod names;
 mod next;
 mod nodes;
@@ -27,6 +29,8 @@ mod storage;
 mod switches;
 mod testlogs;
 mod tls;
+mod weblayers;
+mod wiquery;
 pub mod sync_hooks;
 #[cfg(test)]
 mod test_db;
@@ -255,7 +259,11 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let state = Arc::new(AppState { store, secret, engine_secret, tls: tls.clone(), state_dir: dir.clone() });
+    // the HTTP layers' settings: allowed origins re-read every 15 s, HSTS on HTTPS
+    let web = weblayers::WebCfg::open(!matches!(tls.mode, tls::Mode::Off));
+    web.reload(store.as_ref()).await;
+    weblayers::spawn_refresh(web.clone(), store.clone());
+    let state = Arc::new(AppState { store, secret, engine_secret, tls: tls.clone(), state_dir: dir.clone(), web: web.clone() });
 
     rag::embed::set_model_dir(&args.embed_model);
     match rag::embed::find_model_dir() {
@@ -265,18 +273,14 @@ async fn main() {
 
     let mut app = api::router(state.clone())
         .merge(mcp::routes(state.clone()))
-        .route("/iter_engine_setup.sh", axum::routing::get(engine_setup_sh))
-        .layer(
-        tower_http::cors::CorsLayer::new()
-            .allow_origin(tower_http::cors::Any)
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
-    );
+        .route("/iter_engine_setup.sh", axum::routing::get(engine_setup_sh));
     if !args.webui_dir.is_empty() {
         app = app.fallback_service(tower_http::services::ServeDir::new(&args.webui_dir));
     } else {
         app = app.fallback(embedded_index);
     }
+    // error ids, origin guard + CORS, HSTS: around everything, webui included
+    let app = weblayers::apply(app, web);
 
     let listen = if !args.listen.is_empty() {
         args.listen.clone()

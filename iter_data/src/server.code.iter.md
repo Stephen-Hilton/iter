@@ -7,11 +7,11 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_data/src/main.rs", "{topdir}/iter_data/build.rs"]
+  codedirs:  ["{topdir}/iter_data/src/main.rs", "{topdir}/iter_data/build.rs", "{topdir}/iter_data/src/weblayers.rs"]
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 23:03:19Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-21 20:00:00Z", last_tested: ""}
 ---
 
 # Long Description
@@ -22,7 +22,7 @@ Turns the data server on, connects it to its database and puts the web page insi
 
 Server startup is iter_data's `main` (`iter_data/src/main.rs`). It parses the command line (`Args`: `--arango-url`, `--arango-db` default `iter_db`, `--listen`, `--webui-dir`, `--secret-file`, `--env-file`, `--embed-model`) and loads the `.env` file line by line without shell semantics (`load_env_file`; a variable already set wins).
 
-How it works: `open_arango` connects to ArangoDB (`ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER` [iter_user], `ARANGO_PASSWORD` override the flags; `ARANGO_ROOT_PASSWORD` only sets that user and database up; `ARANGO_CERT_FINGERPRINT`, `ARANGO_CA_CERT` and `ARANGO_ALLOW_PLAIN_HTTP` decide how the connection is checked; see the ArangoDB storage backend) — the only store iter has; any `--backend` other than `arango` exits. Then, in order: `bootstrap_admin` creates `admin` when there are no users (password from `ITER_ADMIN_PASSWORD`, else generated and printed once); `settings::bootstrap` seeds the settings graph; `defaults::add_once` adds the default agents and tooling (`iter_data/defaults/`, embedded) the first time a database starts, never again, so one an admin deletes stays deleted (`iter_data defaults add` adds the missing ones on request); `rag::guide::ingest_at_startup` indexes the built-in user guide (compiled in by `build.rs` from `docs/iter_guide.md`); `auth::load_secret` loads the token-signing secret; `rag::embed` locates the embedding model. The router is `api::router` (which merges the graph, file sync, test log, settings, GraphRAG and datasync routes under the authz layer) plus `mcp::routes`, `/iter_engine_setup.sh` (the retired setup stub `iter_data/iter_engine_setup.sh`, no sign-in) and a permissive CORS layer. It listens on `127.0.0.1:8400` unless `--listen` or `ITER_PORT` says otherwise.
+How it works: `open_arango` connects to ArangoDB (`ARANGO_URL`, `ARANGO_DB`, `ARANGO_USER` [iter_user], `ARANGO_PASSWORD` override the flags; `ARANGO_ROOT_PASSWORD` only sets that user and database up; `ARANGO_CERT_FINGERPRINT`, `ARANGO_CA_CERT` and `ARANGO_ALLOW_PLAIN_HTTP` decide how the connection is checked; see the ArangoDB storage backend) — the only store iter has; any `--backend` other than `arango` exits. Then, in order: `bootstrap_admin` creates `admin` when there are no users (password from `ITER_ADMIN_PASSWORD`, else generated and printed once); `settings::bootstrap` seeds the settings graph; `defaults::add_once` adds the default agents and tooling (`iter_data/defaults/`, embedded) the first time a database starts, never again, so one an admin deletes stays deleted (`iter_data defaults add` adds the missing ones on request); `rag::guide::ingest_at_startup` indexes the built-in user guide (compiled in by `build.rs` from `docs/iter_guide.md`); `auth::load_secret` loads the token-signing secret; `rag::embed` locates the embedding model. The router is `api::router` (which merges the graph, file sync, test log, settings, GraphRAG and datasync routes under the authz layer) plus `mcp::routes`, `/iter_engine_setup.sh` (the retired setup stub `iter_data/iter_engine_setup.sh`, no sign-in), wrapped by `weblayers::apply`: error ids, the origin guard and CORS (every origin allowed while the admin setting `allowed_origins` is empty; no `Origin` and the webui's own host always allowed; `GET`/`PUT /api/server/origins`, re-read every 15 s), and `Strict-Transport-Security: max-age=31536000` when TLS is on. It listens on `127.0.0.1:8400` unless `--listen` or `ITER_PORT` says otherwise.
 
 The web page is compiled into the binary (`WEBUI_INDEX`, `WEBUI_FILES`: the page, Project graph viewer and editor, Intro, GraphRAG tab, settings graph, the shared UI kit and the vendored Cytoscape libraries), served by `embedded_index`; `--webui-dir` serves a folder instead, for development.
 

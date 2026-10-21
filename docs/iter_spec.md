@@ -333,6 +333,21 @@ caps (max agents, budget, account choice) stay in the engine and are checked **b
 - Users: admin sees all. Non-admin users see/act on projects where they have an active `member` edge
   (role on the edge: `user|viewer`). The project creator gets a member edge automatically.
 - MCP calls use the same rules.
+- One bearer parser (`api::bearer`) serves the `AuthUser` extractor, `user_password` and the project authz
+  layer: the scheme in any case (`Bearer`, `bearer`, `BEARER`, RFC 7235 §2.1), then spaces or tabs. The layer
+  passes a token it cannot verify on to the handler, so the two must never disagree about what a token is.
+- Provenance (2026-10-21): the server, never the caller, records who acted. The principal of a request is
+  `user:<name>` for a person's token; for an engine session `agent:<agent>@<engine>` when `X-Iter-Workid`
+  names an item of the project that is `in-progress` and claimed by that same engine (`engine` field), else
+  `engine:<engine>`. `POST …/workitems` sets `requestedby` to the principal and `createdby` to the verified
+  parent (an agent's own item; for a person, an open item of the project the body names) or else the
+  principal; a sent value that is replaced is named in `warnings`. `PUT …/workitems/{id}` keeps the stored
+  `createdby` and `requestedby`. Detail rows carry `by` (the token subject) and, for an agent, `by_workid`.
+  `GET …/whoami` returns the principal; `POST …/workitems/{id}/reject {reason}` writes "rejected by
+  <principal>: <reason>" and parks the item with `lasterror`. Members still see every item of the project.
+- Errors: every 5xx, and every 401 from token verification, answers `{"error": "<generic>", "error_id":
+  "e-<12 hex>"}`; the detail is logged once with that id, the method and the path (`errid.rs`). 4xx messages
+  about the caller's own input stay as they are. The embedding model's directory is shown to admins only.
 
 ---
 
@@ -404,6 +419,39 @@ Live smoke: `test/e2e.sh --live` queues one tiny item to a real `claude` account
 Remove interface nodetypes. Add tools `graph_node_create`, `graph_node_update`, `graph_edge_add`, `graph_edge_remove`,
 `testlogs`, `settings_graph` (read; admin). Every tool requires a project (arg or `X-Iter-Project`) and goes
 through the same authz.
+
+Hardening (2026-10-21, docs/build_plans/mcp_graphrag_hardening.md):
+- **Tool documentation.** Each of the 34 tools' `description` has six labelled parts in order — `Use:`,
+  `Arguments:` (generated from the input schema), `Example:` (one complete arguments object), `Returns:`,
+  `Errors:`, `Limits:` (`iter_data/src/mcp_docs.rs`). Every input property has a description and, where one
+  exists, a JSON Schema `default`; every tool declares an `outputSchema`, and every result is an object sent as
+  `structuredContent` too (`locks_list` returns `{"locks": [...]}`).
+- **Paths.** Every request path a tool builds goes through `api_path`, which percent-encodes each segment
+  (`.` and `..` too); ids are refused when empty, holding a control character or longer than 200 characters,
+  and work-item ids (`workid`, `id`, `on`, `depends_on`) are resolved against the project's items first.
+  Replayed calls carry the caller's `X-Iter-Workid`. Tool errors read `<status>: <message>[ (error_id …)]`,
+  never the internal route.
+- **Work-item listing.** `POST /api/projects/{p}/workitems/query {filter, sort, limit, cursor, fields, state,
+  tag, text}` → `{total, items, next_cursor, sort, unknown_fields}` (`wiquery.rs`); `workitem_list` is that
+  route. Filters on any dotted field (`eq ne in nin gt gte lt lte contains prefix exists empty`, `{any: […]}`
+  ORs); a missing or null field reads as false/empty. Sort on any field, default `ts.receive` desc, `id` asc
+  always last. Paging by cursor (bound to its filter and sort: another query's cursor is a 400), limit 1–500,
+  default 50. `GET …/workitems` is unchanged.
+- **GraphRAG.** `rag_doc` / `rag_docs` carry `searchable` (stored chunks and state summarizing, rollup or ready).
+  `rag_add_document` refuses `*.iter.md`, returns `{id, state, searchable, live_engines, waited_sec, message}`
+  and with `wait_sec` (≤ 60) polls until searchable. `rag_status.engines` lists every engine with an active
+  serves edge: `{name, display, account, hold, last_seen, age_sec, live}`, live = seen within 3 × ticksec + 5 s.
+- **Protocol.** `MCP-Protocol-Version` naming a version not in `PROTOCOL_VERSIONS` is a 400; a JSON-RPC batch
+  (array body) is refused with 400 / `-32600` when the header is `2025-06-18` or later, and accepted without a
+  header or with `2025-03-26` / `2024-11-05` (no header = 2025-03-26, as the specification says).
+- **Origins and CORS** (`weblayers.rs`): no `Origin` (every non-browser agent) is always allowed; an `Origin`
+  naming the host the request was addressed to (the webui on its own server) is always allowed; the
+  admin setting `allowed_origins` (server record `webui`/`server`, `GET`/`PUT /api/server/origins`, re-read
+  within 15 s) empty allows every origin, non-empty refuses any other with 403 (on `/mcp` a JSON-RPC error
+  without an id). CORS echoes the allowed origin with `Vary: Origin`, no credentials, `Max-Age: 600`, and
+  allows the MCP and iter headers. Open by default on purpose: iter_data trusts only a bearer token a
+  browser never adds by itself, so MCP's DNS-rebinding "MUST validate Origin" does not apply.
+- **HSTS.** Over HTTPS every response carries `Strict-Transport-Security: max-age=31536000`.
 
 ---
 

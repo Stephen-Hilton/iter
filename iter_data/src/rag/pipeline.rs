@@ -69,7 +69,17 @@ pub struct Prepared {
     pub ocr: bool,
 }
 
-fn vec_ok(v: &Value) -> bool {
+/// What a failed document write says: the caller's own input error as it is,
+/// an internal failure as a generic text with the id of its logged detail.
+pub(crate) fn failure_text(e: ApiError, method: &str, path: &str) -> String {
+    match e {
+        ApiError::Status(code, m) if !code.is_server_error() => m,
+        ApiError::Status(_, d) | ApiError::Internal(_, d) => format!("indexing failed (error_id {})", crate::errid::record(&d, method, path)),
+        _ => "indexing failed".into(),
+    }
+}
+
+pub(crate) fn vec_ok(v: &Value) -> bool {
     v.as_array().map(|a| a.len() == embed::DIM && a.iter().all(|x| x.is_number())).unwrap_or(false)
 }
 
@@ -131,23 +141,29 @@ pub async fn store_prepared(a: &ArangoBackend, d: DocMeta<'_>, p: &Prepared) -> 
     for (i, c) in p.chunks.iter().enumerate() {
         let text = s(c, "text").trim().to_string();
         let h = sha(&text);
-        let kept = reuse.get(&h);
+        // a kept summary counts only with its vector: a chunk marked done
+        // without one (an older write) is summarised again
+        let kept = reuse.get(&h).filter(|k| vec_ok(&k["vec_sum"]));
         if kept.is_none() {
             pending += 1;
         }
-        rows.push(json!({
+        let mut row = json!({
             "_key": chunk_key(&d.id, i), "project": d.project, "doc": d.id, "kind": d.kind, "nodetype": nodetype,
             "path": d.path, "title": d.title, "idx": i, "chapter": c["chapter"].as_u64().unwrap_or(0), "heading": s(c, "heading"),
             "text": text, "chars": text.len(), "tokens": c.get("tokens").cloned().unwrap_or(Value::Null), "text_hash": h,
             "vec_raw": c["vec_raw"], "vec_model": p.model, "created": now,
             "summary": kept.map(|k| k["summary"].clone()).unwrap_or(json!("")),
-            // no vec_sum until a summary exists: the sparse vector index skips a
-            // missing attribute but refuses a null one
-            "vec_sum": kept.map(|k| k["vec_sum"].clone()).unwrap_or(Value::Null),
-            "sum_model": kept.map(|k| k["sum_model"].clone()).unwrap_or(Value::Null),
             "sum_state": if kept.is_some() { "done" } else { "pending" },
             "sum_engine": "", "sum_expires": "", "sum_attempts": 0, "sum_error": "",
-        }));
+        });
+        // no vec_sum until a summary exists: the sparse vector index skips a
+        // missing attribute but refuses a null one, and `keepNull: false` does
+        // not apply to a plain INSERT
+        if let Some(k) = kept {
+            row["vec_sum"] = k["vec_sum"].clone();
+            row["sum_model"] = k["sum_model"].clone();
+        }
+        rows.push(row);
     }
     let state = if pending > 0 { "summarizing" } else { "rollup" };
     let chapters: Vec<Value> = p
@@ -162,7 +178,7 @@ pub async fn store_prepared(a: &ArangoBackend, d: DocMeta<'_>, p: &Prepared) -> 
         "_key": d.id, "project": d.project, "kind": d.kind, "title": d.title, "path": d.path,
         "format": if p.format.is_empty() { "markdown".to_string() } else { p.format.clone() },
         "hash": d.hash, "chars": p.chars, "pages": p.pages, "ocr": p.ocr, "chunks": p.chunks.len(), "chapters": chapters,
-        "state": state, "summary": "", "vec_sum": null, "vec_model": p.model,
+        "state": state, "summary": "", "vec_model": p.model,
         "rollup_state": if state == "rollup" { "pending" } else { "" }, "rollup_engine": "", "rollup_expires": "", "rollup_attempts": 0,
         "error": "", "updated": now, "by": d.by,
         "created": prev.as_ref().map(|x| s(x, "created").to_string()).filter(|c| !c.is_empty()).unwrap_or_else(|| now.clone()),
@@ -206,8 +222,8 @@ async fn maybe_single_chunk_rollup(a: &ArangoBackend, project: &str, doc: &str) 
          FILTER d != null AND d.chunks == 1 AND d.state == 'rollup'
          LET c = FIRST(FOR c IN rag_chunk FILTER c.project == @p AND c.doc == @d RETURN c)
          FILTER c != null AND c.sum_state == 'done'
-         UPDATE d WITH {state: 'ready', rollup_state: 'done', summary: c.summary, vec_sum: c.vec_sum,
-                        chapters: [MERGE(d.chapters[0], {summary: c.summary})], updated: @now} IN rag_doc",
+         UPDATE d WITH {state: 'ready', rollup_state: 'done', summary: c.summary, vec_sum: IS_ARRAY(c.vec_sum) ? c.vec_sum : null,
+                        chapters: [MERGE(d.chapters[0], {summary: c.summary})], updated: @now} IN rag_doc OPTIONS {keepNull: false}",
         json!({"p": project, "d": doc, "now": now_utc()}),
     )
     .await
@@ -315,11 +331,7 @@ pub async fn nodes_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Js
         let extra = json!({"node_id": s(n, "node_id"), "nodetype": nodetype, "name": s(n, "name"), "description": s(n, "description")});
         let meta = DocMeta { project: &name, id: node_doc_id(&name, &path), kind: "node", title, path: path.clone(), hash, extra, by: &u.sub };
         if let Err(e) = store_prepared(a, meta, &prepared).await {
-            let msg = match e {
-                ApiError::Status(_, m) => m,
-                _ => "ingest failed".into(),
-            };
-            failed.push(json!({"path": path, "error": msg}));
+            failed.push(json!({"path": path, "error": failure_text(e, "PUT", &format!("/api/projects/{name}/rag/nodes"))}));
         }
     }
     let mut removed = 0;
@@ -404,7 +416,7 @@ pub async fn files_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Js
         let extra = json!({"source": "repo", "filename": path.rsplit('/').next().unwrap_or("")});
         let meta = DocMeta { project: &name, id: repo_doc_id(&name, &path), kind: "file", title, path: path.clone(), hash, extra, by: &u.sub };
         if let Err(e) = store_prepared(a, meta, &prepared).await {
-            failed.push(json!({"path": path, "error": match e { ApiError::Status(_, m) => m, _ => "ingest failed".into() }}));
+            failed.push(json!({"path": path, "error": failure_text(e, "PUT", &format!("/api/projects/{name}/rag/files"))}));
         }
     }
     let mut removed = 0;
@@ -690,21 +702,32 @@ async fn chunks_done(a: &ArangoBackend, project: &str, req: &DoneReq) -> Result<
         .collect();
     let stamp = if req.embed_model.is_empty() { embed::disk_stamp().unwrap_or_default() } else { req.embed_model.clone() };
     let mut updates = Vec::new();
+    let mut bad_vec: Vec<(String, String)> = Vec::new();
     for c in mine.iter().filter(|c| got.contains_key(s(c, "id"))) {
         let r = got[s(c, "id")];
         let sm = s(r, "summary").trim();
         let input = if s(c, "heading").is_empty() { format!("{} — {sm}", s(c, "title")) } else { format!("{} — {}: {sm}", s(c, "title"), s(c, "heading")) };
         let v = vector_or_embed(&r["vec_sum"], input).await?;
+        // never a vector the index would refuse: the chunk fails instead
+        if !vec_ok(&v) {
+            let id = crate::errid::record(&format!("chunk {}: summary vector is not {} numbers", s(c, "id"), embed::DIM), "POST", &format!("/api/projects/{project}/rag/work/done"));
+            bad_vec.push((s(c, "id").to_string(), format!("indexing failed (error_id {id})")));
+            continue;
+        }
         updates.push(json!({"_key": s(c, "id"), "summary": sm, "vec_sum": v, "sum_state": "done", "sum_error": "", "sum_by": req.model,
                             "sum_model": stamp, "sum_expires": ""}));
     }
     let failed: Vec<Value> = mine
         .iter()
-        .filter(|c| !got.contains_key(s(c, "id")))
+        .filter(|c| !got.contains_key(s(c, "id")) || bad_vec.iter().any(|(k, _)| k == s(c, "id")))
         .map(|c| {
             let give_up = c["attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS;
-            json!({"_key": s(c, "id"), "sum_state": if give_up { "failed" } else { "pending" }, "sum_expires": "", "sum_engine": "",
-                   "sum_error": if req.error.is_empty() { "no summary returned for this chunk".to_string() } else { req.error.clone() }})
+            let err = match bad_vec.iter().find(|(k, _)| k == s(c, "id")) {
+                Some((_, e)) => e.clone(),
+                None if req.error.is_empty() => "no summary returned for this chunk".to_string(),
+                None => req.error.clone(),
+            };
+            json!({"_key": s(c, "id"), "sum_state": if give_up { "failed" } else { "pending" }, "sum_expires": "", "sum_engine": "", "sum_error": err})
         })
         .collect();
     a.aql_retry("FOR u IN @rows UPDATE u IN rag_chunk", json!({"rows": updates.iter().chain(failed.iter()).collect::<Vec<_>>()}))
@@ -779,6 +802,17 @@ async fn rollup_one(a: &ArangoBackend, project: &str, req: &DoneReq, e: &Value) 
         return Ok(json!({"doc": doc_id, "rollup": "failed", "gave_up": give_up}));
     }
     let v = vector_or_embed(&e["vec_sum"], format!("{} — {summary}", s(&doc, "title"))).await?;
+    if !vec_ok(&v) {
+        let id = crate::errid::record(&format!("rollup of {doc_id}: document vector is not {} numbers", embed::DIM), "POST", &format!("/api/projects/{project}/rag/work/done"));
+        let give_up = doc["rollup_attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS;
+        a.aql_retry(
+            "UPDATE {_key: @d} WITH {rollup_state: @st, state: @ds, rollup_expires: '', rollup_engine: '', error: @err} IN rag_doc",
+            json!({"d": doc_id, "st": if give_up { "failed" } else { "pending" }, "ds": if give_up { "ready" } else { "rollup" }, "err": format!("indexing failed (error_id {id})")}),
+        )
+        .await
+        .map_err(backend)?;
+        return Ok(json!({"doc": doc_id, "rollup": "failed", "gave_up": give_up}));
+    }
     let by_idx: HashMap<u64, &str> = e["chapters"]
         .as_array()
         .into_iter()

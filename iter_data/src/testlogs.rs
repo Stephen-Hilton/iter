@@ -119,7 +119,7 @@ async fn testresult(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Stri
                 failing.join("\n")),
         });
         let who = AuthUser { sub: user.sub.clone(), role: user.role.clone() };
-        if let Ok(Json(v)) = crate::api::workitem_create(who, State(st.clone()), Path(name.clone()), Json(item)).await {
+        if let Ok(Json(v)) = crate::api::workitem_create(who, State(st.clone()), Path(name.clone()), crate::api::WorkidHeader(String::new()), Json(item)).await {
             filed = json!({"id": v["id"], "already_open": v.get("already_open").cloned().unwrap_or(json!(false))});
         }
     }
@@ -178,7 +178,7 @@ async fn run_tests(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
            "lockdirs": [], "blockedby": [], "context": [n.doc.path], "tags": [{"text": "tests", "color": ""}],
            "requestedby": user.sub, "prework": [], "postwork": [],
            "request": format!("Run the tests of \"{}\" ({}) once (queued from the Project graph).", n.doc.name, n.doc.path)});
-    crate::api::workitem_create(user, State(st), Path(name), Json(item)).await
+    crate::api::workitem_create(user, State(st), Path(name), crate::api::WorkidHeader(String::new()), Json(item)).await
 }
 
 #[cfg(test)]

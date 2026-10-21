@@ -23,7 +23,8 @@ impl T {
         for (u, role) in [("adm", "admin"), ("alice", "user"), ("bob", "user"), ("vic", "viewer")] {
             st.store.put("webui_user", u, NOSK, &json!({"user": u, "role": role, "tokenver": 1, "pwhash": ""})).await.unwrap();
         }
-        let app = crate::api::router(st.clone()).merge(crate::mcp::routes(st.clone()));
+        // the layers as deployed (weblayers.rs)
+        let app = crate::weblayers::apply(crate::api::router(st.clone()).merge(crate::mcp::routes(st.clone())), st.web.clone());
         T { st, db, app }
     }
     /// A bearer for `who`: an engine session for "eng1" (engine e1), "eng2"
@@ -45,7 +46,14 @@ impl T {
         crate::auth::mint_token(&self.st.secret, who, role, 1, 3600).unwrap()
     }
     async fn call(&self, who: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.call_h(who, method, path, body, &[]).await
+    }
+    /// `call` with extra request headers.
+    async fn call_h(&self, who: &str, method: &str, path: &str, body: Option<Value>, headers: &[(&str, &str)]) -> (u16, Value) {
         let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", self.tok(who).await));
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
         let req = match body {
             Some(v) => {
                 b = b.header("content-type", "application/json");
@@ -97,6 +105,8 @@ impl T {
         self.call(who, "POST", &format!("/api/projects/{project}/next"), Some(b)).await
     }
 }
+
+mod hardening;
 
 // ---------- settings graph ----------
 

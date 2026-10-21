@@ -11,7 +11,7 @@ children:
   codenodes: []
   tests:     []
   reqs:      []
-timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-19 22:47:22Z", last_tested: ""}
+timestamps: {create: "2026-10-02 23:05:35Z", last_modified: "2026-10-21 20:00:00Z", last_tested: ""}
 ---
 
 # Long Description
@@ -27,3 +27,5 @@ How it works: the heavy work happens on engines. An upload is kept as bytes (`ra
 What goes in and out: the webui's GraphRAG tab, the MCP gateway's `rag_*` tools and iter_engine's GraphRAG worker call it; it reads the Project graph store for context.
 
 Example: "what is the code word for the password exercise" finds a scanned runbook's OCR'd page first, because the keyword ranking catches "code word" where meaning alone chose a login component.
+
+Hardening (2026-10-21): no write stores a null vector (`vec_sum` / `vec_raw` are absent until they exist: a sparse vector index refuses null, and `keepNull: false` does not cover a plain INSERT), and `ensure_schema` repairs old rows once per start (`repair_null_vectors`: null vectors removed, uploads refused for one queued again). `rag_doc` / `rag_docs` carry `searchable`; an upload returns `live_engines` and refuses `*.iter.md`; `status.engines` lists every engine with an active serves edge and whether it is live (`settings::serving_engines`). Stored and returned errors of an internal failure are generic with an `error_id`.

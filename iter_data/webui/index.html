@@ -1385,7 +1385,7 @@ async function createItem(body,request){
 function cloneBody(i,over={}){
   return {name:i.name,agent:i.agent,exec_shell:i.exec_shell||"",priority:i.priority??PRIO_DEFAULT,lockdirs:i.lockdirs||[],
     blockedby:i.blockedby||[],tags:i.tags||[],prework:i.prework||[],postwork:i.postwork||[],context:i.context||[],model:i.model||"",
-    requestedby:me||"",createdby:me||"",state:"queued",...over};
+    state:"queued",...over};  /* who filed it (requestedby/createdby) is the server's to set */
 }
 async function doAction(act,i){
   switch(act){
@@ -1637,7 +1637,7 @@ function openForm(mode,src){
         await api(P(i.id)+"/details/0",{method:"PUT",body:JSON.stringify({key:"request",valuetype:"text",value:val("#f-req")})});
         form.close();await loadItems(project);jumpToItem(i.id);
       }else{
-        const c=await createItem({...body,requestedby:me||"",createdby:me||"",prework:[],postwork:[]},val("#f-req"));
+        const c=await createItem({...body,prework:[],postwork:[]},val("#f-req"));
         form.close();await loadItems(project);jumpToItem(c.id);
       }
     }catch(e){err.textContent="save failed: "+e.message;}
@@ -1970,6 +1970,7 @@ async function keysScreen(note){
 }
 async function dataSettings(){
   const h=await fetch("/health").then(r=>r.json()).catch(()=>({}));
+  const og=isAdmin()?await api("/api/server/origins").catch(()=>null):null;
   const fields=[
     {key:"host",type:"readonly"},{key:"backend",type:"readonly"},{key:"ts",label:"server time (UTC)",type:"readonly"},
     {key:"env",label:"deploy settings",type:"readonly"},
@@ -1977,8 +1978,20 @@ async function dataSettings(){
   settingsBox("iter_data",fields,{host:location.host,backend:h.backend,ts:h.ts,
     env:"ITER_JWT_SECRET (signs tokens) · ITER_ADMIN_PASSWORD (first-run admin) · ARANGO_URL / ARANGO_DB / ARANGO_PASSWORD (the database) · ITER_EMBED_MODEL (GraphRAG model) — from the container environment or the .env file"},
     async()=>{},{canSave:false,note:"iter_data has no runtime-editable settings; the values below come from its environment. Every other setting is a node or an edge in the Settings tab.",
-      extra:`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="iter_data:self">iter_data in the settings graph ↗</button></div>`});
+      extra:`${og?`<h3>Allowed web origins</h3>
+        <div class="kv">Web pages on other sites that may call this server from a browser, one per line (<code>https://host[:port]</code>). Leave empty to allow every site. Agents that are not browsers are never affected, and this webui is always allowed, whatever name the server has.</div>
+        <textarea id="og-list" rows="4" style="width:100%" spellcheck="false" placeholder="https://inspector.example.org">${esc((og.allowed_origins||[]).join("\n"))}</textarea>
+        <div style="text-align:right"><span class="err" id="og-err" style="margin-right:12px"></span><span class="kv" id="og-note"></span> <button class="sm" id="og-save">Save origins</button></div>`:""}
+        <div style="margin-top:14px"><button class="ghost sm" data-sgopen="iter_data:self">iter_data in the settings graph ↗</button></div>`});
   sdlg.querySelectorAll("[data-sgopen]").forEach(b=>b.onclick=()=>{sdlg.close();openSettingsGraph(b.dataset.sgopen);});
+  const ogSave=sdlg.querySelector("#og-save");
+  if(ogSave)ogSave.onclick=async()=>{
+    const e=sdlg.querySelector("#og-err"),n=sdlg.querySelector("#og-note");e.textContent="";n.textContent="";
+    const allowed_origins=sdlg.querySelector("#og-list").value.split("\n").map(x=>x.trim()).filter(Boolean);
+    try{const r=await api("/api/server/origins",{method:"PUT",body:JSON.stringify({allowed_origins})});
+      n.textContent=r.allowed_origins.length?`saved: ${r.allowed_origins.length} allowed`:"saved: every site allowed";}
+    catch(x){e.textContent=x.message;}
+  };
 }
 
 /* ================= detail lightbox ================= */

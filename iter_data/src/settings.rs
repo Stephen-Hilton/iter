@@ -311,6 +311,58 @@ pub fn serves_edge<'a>(edges: &'a [SysEdge], engine: &str, project: &str) -> Opt
     edges.iter().find(|e| e.edge_type == "serves" && e.from == eid && e.to == pid && e.is_active())
 }
 
+/// One engine serving a project, and whether it is live: seen within three
+/// of its ticks plus five seconds (the webui's rule, shared by project
+/// status, explain and GraphRAG status).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineLiveness {
+    pub name: String,
+    pub display: String,
+    pub account: String,
+    pub hold: String,
+    pub state: String,
+    /// the engine's own switch (switches.rs)
+    pub active: bool,
+    /// the checkout on that engine (the serves edge's `topdir`)
+    pub topdir: String,
+    pub last_seen: String,
+    pub age_sec: Option<i64>,
+    pub live: bool,
+}
+
+/// Every engine with an active serves edge to `project`, by name.
+pub async fn serving_engines(store: &dyn Storage, project: &str) -> Result<Vec<EngineLiveness>, StorageError> {
+    let edges = load_edges(store).await?;
+    let now = chrono::Utc::now();
+    let mut out: Vec<EngineLiveness> = store
+        .scan("engine")
+        .await?
+        .iter()
+        .filter_map(|e| {
+            let name = body_str(e, "id");
+            let edge = serves_edge(&edges, &name, project)?;
+            let tick = e.get("ticksec").and_then(|t| t.as_i64()).unwrap_or(5).max(1);
+            let last_seen = body_str(e, "last_seen");
+            let age_sec = chrono::DateTime::parse_from_rfc3339(&last_seen).ok().map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds());
+            Some(EngineLiveness {
+                display: body_str(e, "name"),
+                account: body_str(e, "account"),
+                hold: body_str(e, "hold"),
+                state: body_str(e, "state"),
+                active: crate::switches::is_on(e),
+                topdir: edge.setting_str("topdir"),
+                live: age_sec.map(|a| a <= 3 * tick + 5).unwrap_or(false),
+                last_seen,
+                age_sec,
+                name,
+            })
+        })
+        .filter(|e| !e.name.is_empty())
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 /// The member role (`user` | `viewer`) of an active member edge, if any.
 pub fn member_role(edges: &[SysEdge], user: &str, project: &str) -> Option<String> {
     let (uid, pid) = (node_id("user", user), node_id("project", project));

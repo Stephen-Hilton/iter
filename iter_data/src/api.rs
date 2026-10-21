@@ -32,6 +32,8 @@ pub struct AppState {
     /// where iter_data keeps its files (the secret file's folder): the
     /// marker that the first-boot admin password was replaced goes here
     pub state_dir: std::path::PathBuf,
+    /// the HTTP layers' live settings (allowed origins, HTTPS): weblayers.rs
+    pub web: Arc<crate::weblayers::WebCfg>,
 }
 
 impl AppState {
@@ -40,7 +42,14 @@ impl AppState {
     pub fn for_tests(store: Arc<dyn Storage>, secret: &[u8]) -> AppState {
         let mut engine_secret = secret.to_vec();
         engine_secret.extend_from_slice(b"-engine");
-        AppState { store, secret: secret.to_vec(), engine_secret, tls: Arc::new(crate::tls::TlsState::off()), state_dir: std::path::PathBuf::new() }
+        AppState {
+            store,
+            secret: secret.to_vec(),
+            engine_secret,
+            tls: Arc::new(crate::tls::TlsState::off()),
+            state_dir: std::path::PathBuf::new(),
+            web: crate::weblayers::WebCfg::open(false),
+        }
     }
 }
 
@@ -55,11 +64,23 @@ pub enum ApiError {
     /// a refusal whose body the caller reads as data (lease-bound locks:
     /// `{"refused": "not running", "error": …}`), sent as-is
     Refused(StatusCode, Value),
+    /// a server-side failure (database, embedding model, …): the caller sees
+    /// "internal error" and an error id, the detail goes to the log (errid.rs)
+    Internal(StatusCode, String),
+    /// a token that does not verify: the library's reason is logged, never sent
+    BadToken(String),
 }
+
+/// The 401 every unverifiable token gets.
+pub(crate) const INVALID_TOKEN: &str = "invalid or expired token";
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
+            ApiError::Internal(code, detail) => crate::errid::response(code, crate::errid::INTERNAL, detail),
+            // every 5xx is internal, whoever built it
+            ApiError::Status(code, msg) if code.is_server_error() => crate::errid::response(code, crate::errid::INTERNAL, msg),
+            ApiError::BadToken(detail) => crate::errid::response(StatusCode::UNAUTHORIZED, INVALID_TOKEN, detail),
             ApiError::Status(code, msg) => (code, Json(json!({"error": msg}))).into_response(),
             ApiError::Conflict(current) => (
                 StatusCode::CONFLICT,
@@ -75,7 +96,7 @@ impl From<StorageError> for ApiError {
     fn from(e: StorageError) -> Self {
         match e {
             StorageError::Conflict(cur) => ApiError::Conflict(cur.unwrap_or(Value::Null)),
-            StorageError::Backend(msg) => ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, msg),
+            StorageError::Backend(msg) => ApiError::Internal(StatusCode::INTERNAL_SERVER_ERROR, msg),
         }
     }
 }
@@ -116,13 +137,66 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let header = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        authenticate(state, header.strip_prefix("Bearer ").unwrap_or("")).await
+        authenticate(state, bearer(&parts.headers)).await
     }
+}
+
+/// The token of an `Authorization: Bearer <token>` header: the scheme in any
+/// case (RFC 7235 §2.1), then spaces or tabs; "" for any other header. The one
+/// parser of the extractor, `user_password` and the project authz layer, so
+/// the layer never passes on a token the handler would accept.
+pub(crate) fn bearer(headers: &axum::http::HeaderMap) -> &str {
+    let h = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").trim();
+    match h.split_once([' ', '\t']) {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("bearer") => rest.trim_matches([' ', '\t']),
+        _ => "",
+    }
+}
+
+/// The calling work item an agent's request names (`X-Iter-Workid`: the
+/// `iter` CLI's ITER_WORKID, MCP's header); "" when absent.
+pub struct WorkidHeader(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for WorkidHeader {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(WorkidHeader(parts.headers.get("x-iter-workid").and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string()))
+    }
+}
+
+/// Who acted, as the server records it (MG-12): never what the caller says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Principal {
+    /// `user:<name>`, `agent:<agent>@<engine>` or `engine:<engine>`
+    pub requestedby: String,
+    /// the verified parent: an agent's own work item
+    pub parent: Option<String>,
+    /// the agent's work item, stamped on its detail rows
+    pub by_workid: Option<String>,
+}
+
+/// The principal of a request on `project`. An engine session is an agent
+/// only when `workid` names an item of this project that is in progress and
+/// claimed by that same engine; otherwise it is the engine itself.
+pub(crate) async fn principal(st: &AppState, user: &AuthUser, project: &str, workid: &str) -> Result<Principal, ApiError> {
+    if user.role != "engine" {
+        return Ok(Principal { requestedby: format!("user:{}", user.sub), parent: None, by_workid: None });
+    }
+    let engine = crate::settings::machine_engine(&user.sub).unwrap_or(&user.sub).to_string();
+    let workid = workid.trim();
+    if !workid.is_empty() && workid.len() <= 200 {
+        if let Some(item) = st.store.get("workitem", project, workid).await? {
+            if body_str(&item, "state") == "in-progress" && body_str(&item, "engine") == engine {
+                return Ok(Principal {
+                    requestedby: format!("agent:{}@{engine}", body_str(&item, "agent")),
+                    parent: Some(workid.to_string()),
+                    by_workid: Some(workid.to_string()),
+                });
+            }
+        }
+    }
+    Ok(Principal { requestedby: format!("engine:{engine}"), parent: None, by_workid: None })
 }
 
 /// Who a bearer token signs in as: an engine session (keys.rs) or a signed
@@ -150,13 +224,13 @@ pub(crate) async fn authenticate_any(state: &AppState, token: &str) -> Result<(A
     // engine session secret: keys.rs) or a person's token (the user secret);
     // engines only ever sign in with their key, never as a user
     if let Some(jwt) = iter_core::enginekey::session_jwt(token) {
-        let claims: Claims = auth::verify_token(&state.engine_secret, jwt).map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
+        let claims: Claims = auth::verify_token(&state.engine_secret, jwt).map_err(ApiError::BadToken)?;
         if claims.kid.is_empty() {
             return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "bad engine session".into()));
         }
         return Ok((crate::keys::check_session(state, &claims).await?, false));
     }
-    let claims: Claims = auth::verify_token(&state.secret, token).map_err(|e| ApiError::Status(StatusCode::UNAUTHORIZED, e))?;
+    let claims: Claims = auth::verify_token(&state.secret, token).map_err(ApiError::BadToken)?;
     if !claims.kid.is_empty() || claims.role == "engine" {
         return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "engines sign in with their engine key (iter_engine key new), not a user token".into()));
     }
@@ -184,6 +258,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::settings::routes())
         .merge(crate::switches::routes())
         .merge(crate::keys::routes())
+        .merge(crate::weblayers::routes())
         .route("/health", get(health))
         .route("/tls/ca.crt", get(tls_ca))
         .route("/auth/login", post(login))
@@ -217,6 +292,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/engines/{name}/probe", post(engine_probe))
         // workitems
         .route("/api/projects/{name}/workitems", get(workitems_list).post(workitem_create))
+        .route("/api/projects/{name}/workitems/query", post(workitems_query))
         .route("/api/projects/{name}/migrate_priority", post(project_migrate_priority))
         .route("/api/projects/{name}/realign_priority", post(project_realign_priority))
         .route(
@@ -232,6 +308,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{name}/workitems/{id}/explain", post(workitem_explain).delete(workitem_explained))
         .route("/api/projects/{name}/workitems/{id}/explain/claim", post(workitem_explain_claim))
         .route("/api/projects/{name}/workitems/{id}/duplicate_of", post(workitem_duplicate_of))
+        .route("/api/projects/{name}/workitems/{id}/reject", post(workitem_reject))
+        .route("/api/projects/{name}/whoami", get(whoami))
         // locks
         .route("/api/projects/{name}/locks", get(locks_list))
         .route("/api/projects/{name}/locks/acquire", post(lock_acquire))
@@ -245,11 +323,35 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/{name}/deadlocks", get(deadlocks_get))
         // iter server-side get_next (spec §4.3)
         .route("/api/projects/{name}/next", post(crate::next::get_next))
+        // tests: which route template each request matched (MG-11)
+        .route_layer(axum::middleware::from_fn(record_matched))
         // iter authz (spec §4.4): one layer over every route above, keyed on
         // the path's project segment (graph/rag/datasync included; MCP
         // replays through this router so it inherits it)
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::authz::project_authz))
+        // internal errors: generic body + error_id, detail logged (errid.rs);
+        // outermost here, so MCP's replays get it too
+        .layer(axum::middleware::from_fn(crate::errid::layer))
         .with_state(state)
+}
+
+/// Every request's (project, method, matched route template), for the tests
+/// that check a tool reaches only the endpoint it names; nothing outside tests.
+#[cfg(test)]
+pub(crate) fn matched_routes() -> &'static std::sync::Mutex<Vec<(String, String, String)>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String, String)>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+async fn record_matched(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    #[cfg(test)]
+    if let Some(m) = req.extensions().get::<axum::extract::MatchedPath>() {
+        let project = crate::authz::project_of_path(req.uri().path()).unwrap_or_default();
+        if let Ok(mut r) = matched_routes().lock() {
+            r.push((project, req.method().to_string(), m.as_str().to_string()));
+        }
+    }
+    next.run(req).await
 }
 
 // ---------- misc ----------
@@ -380,8 +482,7 @@ struct PasswordReq {
 /// Replacing the first admin's first-boot password leaves a marker file for
 /// the installers to remove that password from the env file (and SSM).
 async fn user_password(State(st): Ctx, headers: axum::http::HeaderMap, Path(name): Path<String>, Json(req): Json<PasswordReq>) -> Result<Json<Value>, ApiError> {
-    let bearer = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").strip_prefix("Bearer ").unwrap_or("").to_string();
-    let (user, _) = authenticate_any(&st, &bearer).await?;
+    let (user, _) = authenticate_any(&st, bearer(&headers)).await?;
     if user.sub != name || user.role == "engine" {
         return Err(ApiError::Status(StatusCode::FORBIDDEN, "you change only your own password (an admin resets someone else's with PUT /api/users/<user>)".into()));
     }
@@ -752,34 +853,21 @@ async fn project_status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) 
             *inprogress_by_engine.entry(body_str(i, "engine")).or_insert(0) += 1;
         }
     }
-    let now = chrono::Utc::now();
     let mut engines_out = Vec::new();
     let mut not_honoring = Vec::new();
-    let edges = crate::settings::load_edges(st.store.as_ref()).await?;
-    for e in st.store.scan("engine").await? {
-        // only engines that serve this project (an active serves edge)
-        let served = crate::settings::serves_edge(&edges, &body_str(&e, "id"), &name).is_some();
-        if !served {
-            continue;
-        }
-        let ename = body_str(&e, "id");
-        let ticksec = e.get("ticksec").and_then(|t| t.as_u64()).unwrap_or(5);
-        let last_seen = body_str(&e, "last_seen");
-        let age_sec = chrono::DateTime::parse_from_rfc3339(&last_seen)
-            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds())
-            .unwrap_or(i64::MAX);
-        let stale = age_sec > (3 * ticksec as i64 + 5);
-        let running = inprogress_by_engine.get(&ename).copied().unwrap_or(0);
-        if project_state == "Draining" && stale && running > 0 {
-            not_honoring.push(ename.clone());
+    // only engines that serve this project (an active serves edge)
+    for e in crate::settings::serving_engines(st.store.as_ref(), &name).await? {
+        let running = inprogress_by_engine.get(&e.name).copied().unwrap_or(0);
+        if project_state == "Draining" && !e.live && running > 0 {
+            not_honoring.push(e.name.clone());
         }
         engines_out.push(json!({
-            "name": ename, "display": body_str(&e, "name"),
-            "state": body_str(&e, "state"),
-            "active": crate::switches::is_on(&e),
-            "last_seen": last_seen,
-            "age_sec": if age_sec == i64::MAX { Value::Null } else { json!(age_sec) },
-            "stale": stale,
+            "name": e.name, "display": e.display,
+            "state": e.state,
+            "active": e.active,
+            "last_seen": e.last_seen,
+            "age_sec": e.age_sec,
+            "stale": !e.live,
             "inprogress": running,
         }));
     }
@@ -1176,6 +1264,15 @@ async fn workitems_list(
     Ok(Json(Value::Array(rows)))
 }
 
+/// Page through a project's work items with any filter and sort
+/// (wiquery.rs): `{total, items, next_cursor, sort, unknown_fields}`.
+async fn workitems_query(_u: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let q = crate::wiquery::parse(&body).map_err(bad)?;
+    let rows = st.store.query("workitem", &name).await?;
+    let (total, items, next, unknown) = crate::wiquery::run(rows, &q).map_err(bad)?;
+    Ok(Json(json!({"total": total, "items": items, "next_cursor": next, "sort": crate::wiquery::sort_json(&q.sort), "unknown_fields": unknown})))
+}
+
 /// Priority + usecase placement of a NEW item (decided 2026-09-08), before the
 /// row is parsed:
 /// - a `usecase` string field becomes the engine-owned tag `usecase:<name>`;
@@ -1221,7 +1318,7 @@ async fn place_new_item(st: &Arc<AppState>, project: &str, body: &mut Value) -> 
         body["priority"] = json!(pprio);
     } else if requested.is_none() {
         let is_usecase = body_str(body, "agent") == "usecase" || tags.iter().any(|t| t.get("text").and_then(|x| x.as_str()).map(|x| x.starts_with(USECASE_TAG_PREFIX)).unwrap_or(false));
-        let human = !body_str(body, "requestedby").starts_with("agent");
+        let human = body_str(body, "requestedby").starts_with("user:");
         let band = if is_usecase { PRIO_BAND_USECASE } else if human { PRIO_BAND_HUMAN } else { PRIO_BAND_MAINT };
         let used: Vec<i64> = st
             .store
@@ -1612,10 +1709,27 @@ pub(crate) async fn workitem_create(
     user: AuthUser,
     State(st): Ctx,
     Path(name): Path<String>,
+    WorkidHeader(workid): WorkidHeader,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
     let mut body = body;
+    // provenance from the token, before anything reads it (MG-12)
+    let warnings = stamp_provenance(&st, &user, &name, &workid, &mut body).await?;
+    create_stamped(user, st, name, body, warnings).await
+}
+
+/// A create made by iter_data itself on someone's behalf (the design build's
+/// plan item, filed when the engine reports the build, for the person who
+/// asked for it): the server names the principal, never a request body.
+pub(crate) async fn workitem_create_for(user: AuthUser, st: Arc<AppState>, name: String, requestedby: &str, mut body: Value) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    body["requestedby"] = json!(requestedby);
+    body["createdby"] = json!(requestedby);
+    create_stamped(user, st, name, body, vec![]).await
+}
+
+async fn create_stamped(user: AuthUser, st: Arc<AppState>, name: String, mut body: Value, mut warnings: Vec<String>) -> Result<Json<Value>, ApiError> {
     let sweep_template = test_sweep_on_create(&st, &name, &mut body).await?;
     // users-only rule (itersched.md): schedules come from humans via the
     // webui/API — the engine role (the agents' path) may not create them.
@@ -1642,7 +1756,7 @@ pub(crate) async fn workitem_create(
     if let Some(o) = body.as_object_mut() {
         o.remove("request");
     }
-    let mut warnings = place_new_item(&st, &name, &mut body).await?;
+    warnings.extend(place_new_item(&st, &name, &mut body).await?);
     // stage 1 repeat detection (iter_core::dedup, built 2026-09-10): a
     // request carrying both a check and a container (fields, or the
     // `check:` / `container:` tags) is a repeat of any OPEN item with the
@@ -1668,13 +1782,14 @@ pub(crate) async fn workitem_create(
             recurrence = Some((body_str(closed, "id"), completed(closed)));
         }
     }
+    let by_workid = Some(body_str(&body, "requestedby")).filter(|r| r.starts_with("agent:")).map(|_| body_str(&body, "createdby"));
     let (id, body) = normalize_new_item(&name, body)?;
     warnings.extend(lockshape_findings(&st, &name, &body).await?);
     refuse_dependency_cycle(&st, &name, &id, &body).await?;
     st.store.put_versioned("workitem", &name, &id, &body, 0).await?;
     st.store.bump_seq(&name, "workitem").await?;
     if !request.is_empty() {
-        let row = prepare_detail(&user, &id, 0, json!({"key": "request", "valuetype": "text", "value": request}))?;
+        let row = prepare_detail(&user, by_workid.as_deref(), &id, 0, json!({"key": "request", "valuetype": "text", "value": request}))?;
         st.store.put("workitem_detail", &id, &detail_sk(0), &row).await?;
         st.store.bump_seq(&name, "workitem_detail").await?;
     }
@@ -1683,6 +1798,38 @@ pub(crate) async fn workitem_create(
         let _ = append_detail(&st, &user, &name, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
     }
     Ok(Json(with_warnings(body, warnings)))
+}
+
+/// `requestedby` and `createdby` of a new item, set here from the token
+/// (MG-12): `createdby` is the verified parent (an agent's own item, or an
+/// open item of this project a person names) or else the principal. A sent
+/// value that is replaced is reported in the returned warnings.
+async fn stamp_provenance(st: &AppState, user: &AuthUser, project: &str, workid_hdr: &str, body: &mut Value) -> Result<Vec<String>, ApiError> {
+    let sent_by = body_str(body, "requestedby");
+    let sent_parent = body_str(body, "createdby");
+    // an engine CLI too old to send X-Iter-Workid names its item in createdby;
+    // it counts only when it passes the same check
+    let candidate = if workid_hdr.is_empty() && user.role == "engine" { sent_parent.as_str() } else { workid_hdr };
+    let p = principal(st, user, project, candidate).await?;
+    let createdby = match &p.parent {
+        Some(parent) => parent.clone(),
+        None if user.role != "engine" && !sent_parent.is_empty() && sent_parent.len() <= 200 => {
+            match st.store.get("workitem", project, &sent_parent).await? {
+                Some(item) if !is_closed(&body_str(&item, "state")) => sent_parent.clone(),
+                _ => p.requestedby.clone(),
+            }
+        }
+        None => p.requestedby.clone(),
+    };
+    let mut warnings = Vec::new();
+    for (sent, kept) in [(&sent_by, &p.requestedby), (&sent_parent, &createdby)] {
+        if !sent.is_empty() && sent != kept {
+            warnings.push(format!("requestedby/createdby are set by the server; the sent value {sent} was ignored"));
+        }
+    }
+    body["requestedby"] = json!(p.requestedby);
+    body["createdby"] = json!(createdby);
+    Ok(warnings)
 }
 
 /// Who a repeat came from, for the survivor's "seen again" row.
@@ -1874,6 +2021,17 @@ async fn workitem_put(
     // exception is "tags", so finished work can still be organized.
     let current = st.store.get("workitem", &name, &id).await?;
     if let Some(current) = &current {
+        // who filed it never changes (MG-12)
+        for k in ["createdby", "requestedby"] {
+            match current.get(k) {
+                Some(v) => body[k] = v.clone(),
+                None => {
+                    if let Some(o) = body.as_object_mut() {
+                        o.remove(k);
+                    }
+                }
+            }
+        }
         test_sweep_on_update(current, &mut body)?;
         if is_closed(&body_str(current, "state")) && !tags_only_change(current, &body) {
             return Err(closed_err());
@@ -1988,10 +2146,18 @@ fn closed_err() -> ApiError {
 
 /// Validate + provenance-stamp a detail body.  Every detail write records
 /// who (JWT principal) and when, so a closeout note is a real record.
-fn prepare_detail(user: &AuthUser, id: &str, order: i64, mut body: Value) -> Result<Value, ApiError> {
+fn prepare_detail(user: &AuthUser, by_workid: Option<&str>, id: &str, order: i64, mut body: Value) -> Result<Value, ApiError> {
     body["id"] = json!(id);
     body["order"] = json!(order);
     body["by"] = json!(user.sub);
+    match by_workid {
+        Some(w) => body["by_workid"] = json!(w),
+        None => {
+            if let Some(o) = body.as_object_mut() {
+                o.remove("by_workid");
+            }
+        }
+    }
     body["ts"] = json!(now_utc());
     let parsed: iter_core::WorkItemDetail =
         serde_json::from_value(body.clone()).map_err(|e| bad(format!("detail does not parse: {e}")))?;
@@ -2017,6 +2183,7 @@ async fn detail_put(
     user: AuthUser,
     State(st): Ctx,
     Path((name, id, order)): Path<(String, String, i64)>,
+    WorkidHeader(workid): WorkidHeader,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
@@ -2026,7 +2193,8 @@ async fn detail_put(
             return Err(closed_err());
         }
     }
-    let body = prepare_detail(&user, &id, order, body)?;
+    let p = principal(&st, &user, &name, &workid).await?;
+    let body = prepare_detail(&user, p.by_workid.as_deref(), &id, order, body)?;
     st.store.put("workitem_detail", &id, &detail_sk(order), &body).await?;
     st.store.bump_seq(&name, "workitem_detail").await?;
     Ok(Json(body))
@@ -2040,6 +2208,7 @@ async fn details_append(
     user: AuthUser,
     State(st): Ctx,
     Path((name, id)): Path<(String, String)>,
+    WorkidHeader(workid): WorkidHeader,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_writer()?;
@@ -2053,10 +2222,15 @@ async fn details_append(
             format!("closed workitem: only \"{DOC_KEY}\", \"{EXPLAINED_KEY}\" and \"spend\" detail rows may be appended"),
         ));
     }
-    append_detail(&st, &user, &name, &id, body).await
+    let p = principal(&st, &user, &name, &workid).await?;
+    append_detail_as(&st, &user, p.by_workid.as_deref(), &name, &id, body).await
 }
 
 async fn append_detail(st: &Arc<AppState>, user: &AuthUser, name: &str, id: &str, body: Value) -> Result<Json<Value>, ApiError> {
+    append_detail_as(st, user, None, name, id, body).await
+}
+
+async fn append_detail_as(st: &Arc<AppState>, user: &AuthUser, by_workid: Option<&str>, name: &str, id: &str, body: Value) -> Result<Json<Value>, ApiError> {
     for _ in 0..8 {
         let next = st
             .store
@@ -2067,7 +2241,7 @@ async fn append_detail(st: &Arc<AppState>, user: &AuthUser, name: &str, id: &str
             .max()
             .map(|m| m + 1)
             .unwrap_or(0);
-        let row = prepare_detail(user, id, next, body.clone())?;
+        let row = prepare_detail(user, by_workid, id, next, body.clone())?;
         match st.store.put_versioned("workitem_detail", id, &detail_sk(next), &row, 0).await {
             Ok(()) => {
                 st.store.bump_seq(name, "workitem_detail").await?;
@@ -2078,6 +2252,59 @@ async fn append_detail(st: &Arc<AppState>, user: &AuthUser, name: &str, id: &str
         }
     }
     Err(ApiError::Status(StatusCode::CONFLICT, "could not allocate a detail order (contention)".into()))
+}
+
+// ---------- reject, whoami (MG-13) ----------
+
+#[derive(serde::Deserialize, Default)]
+struct RejectReq {
+    #[serde(default)]
+    reason: String,
+}
+
+/// `iter reject` / MCP `workitem_reject`: the item is invalid. A doc row
+/// "rejected by <principal>: <reason>", then parked for human review with
+/// `lasterror`, in one versioned write (no retry is burned).
+async fn workitem_reject(
+    user: AuthUser,
+    State(st): Ctx,
+    Path((name, id)): Path<(String, String)>,
+    WorkidHeader(workid): WorkidHeader,
+    Json(req): Json<RejectReq>,
+) -> Result<Json<Value>, ApiError> {
+    user.require_writer()?;
+    let reason = req.reason.trim();
+    if reason.is_empty() {
+        return Err(bad("a reason is required"));
+    }
+    let p = principal(&st, &user, &name, &workid).await?;
+    let mut item = st.store.get("workitem", &name, &id).await?.ok_or_else(notfound)?;
+    if is_closed(&body_str(&item, "state")) {
+        return Err(closed_err());
+    }
+    let note = format!("rejected by {}: {reason}", p.requestedby);
+    let _ = append_detail_as(&st, &user, p.by_workid.as_deref(), &name, &id, json!({"key": DOC_KEY, "valuetype": "text", "value": note})).await?;
+    for _ in 0..6 {
+        let expect = body_u64(&item, "version");
+        item["state"] = json!("parked");
+        item["lasterror"] = json!(format!("rejected: {}", reason.chars().take(400).collect::<String>()));
+        item["version"] = json!(expect + 1);
+        match st.store.put_versioned("workitem", &name, &id, &item, expect).await {
+            Ok(()) => {
+                st.store.bump_seq(&name, "workitem").await?;
+                return Ok(Json(json!({"ok": true, "id": id, "state": "parked", "by": p.requestedby})));
+            }
+            Err(StorageError::Conflict(_)) => item = st.store.get("workitem", &name, &id).await?.ok_or_else(notfound)?,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(ApiError::Status(StatusCode::CONFLICT, "could not park the item (contention)".into()))
+}
+
+/// The principal this request acts as on the project (MG-12).
+async fn whoami(user: AuthUser, State(st): Ctx, Path(name): Path<String>, WorkidHeader(workid): WorkidHeader) -> Result<Json<Value>, ApiError> {
+    let p = principal(&st, &user, &name, &workid).await?;
+    Ok(Json(json!({"requestedby": p.requestedby, "parent": p.parent, "by_workid": p.by_workid, "sub": user.sub, "role": user.role})))
 }
 
 // ---------- explain (ELI5) ----------
@@ -2111,28 +2338,13 @@ async fn workitem_explain(
     Ok(Json(json!({"requested": ts, "engine": engine})))
 }
 
-/// Engines whose record names this project and that have heartbeated within
-/// three ticks (the webui's own liveness rule).
+/// Live, Running engines serving this project.
 async fn live_engines_for(st: &Arc<AppState>, project: &str) -> Result<Vec<String>, ApiError> {
-    let now = chrono::Utc::now();
-    let edges = crate::settings::load_edges(st.store.as_ref()).await?;
-    Ok(st
-        .store
-        .scan("engine")
+    Ok(crate::settings::serving_engines(st.store.as_ref(), project)
         .await?
-        .iter()
-        .filter(|e| {
-            crate::settings::serves_edge(&edges, &body_str(e, "id"), project).is_some()
-        })
-        .filter(|e| body_str(e, "state") == "Running")
-        .filter(|e| {
-            let tick = e.get("ticksec").and_then(|t| t.as_i64()).unwrap_or(5).max(1);
-            chrono::DateTime::parse_from_rfc3339(&body_str(e, "last_seen"))
-                .map(|seen| (now - seen.with_timezone(&chrono::Utc)).num_seconds() <= 3 * tick + 5)
-                .unwrap_or(false)
-        })
-        .map(|e| body_str(e, "id"))
-        .filter(|n| !n.is_empty())
+        .into_iter()
+        .filter(|e| e.live && e.state == "Running")
+        .map(|e| e.name)
         .collect())
 }
 
@@ -2706,11 +2918,13 @@ mod tests {
         AuthUser { sub: "tester".into(), role: "admin".into() }
     }
     async fn create(st: &Arc<AppState>, body: Value) -> Value {
-        match workitem_create(admin(), State(st.clone()), Path("p".into()), Json(body)).await {
+        match workitem_create(admin(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(body)).await {
             Ok(Json(v)) => v,
             Err(ApiError::Status(code, msg)) => panic!("create failed: {code} {msg}"),
             Err(ApiError::Conflict(v)) => panic!("create conflict: {v}"),
             Err(ApiError::Refused(c, v)) => panic!("create refused: {c} {v}"),
+            Err(ApiError::Internal(c, m)) => panic!("create failed: {c} {m}"),
+            Err(ApiError::BadToken(m)) => panic!("create failed: {m}"),
         }
     }
 
@@ -2743,10 +2957,11 @@ mod tests {
             }
             Ok(_) => panic!("cycle accepted"),
             Err(ApiError::Conflict(v)) | Err(ApiError::Refused(_, v)) => panic!("conflict: {v}"),
+            Err(e) => panic!("{e:?}"),
         }
         // a create that would wait on itself is refused too
         let dup = json!({"name": "self", "agent": "code", "state": "queued", "priority": 5, "id": "self-id", "blockedby": ["self-id"]});
-        assert!(matches!(workitem_create(admin(), State(st.clone()), Path("p".into()), Json(dup)).await, Err(ApiError::Status(_, _))));
+        assert!(matches!(workitem_create(admin(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(dup)).await, Err(ApiError::Status(_, _))));
         // an acyclic link is fine, and a tag edit on a looped item (data
         // from before the refusal) is not blocked by the loop it is in
         let mut fine = a.clone();
@@ -2755,6 +2970,8 @@ mod tests {
             Ok(Json(v)) => v,
             Err(ApiError::Status(c, m)) => panic!("acyclic edit refused: {c} {m}"),
             Err(ApiError::Conflict(v)) | Err(ApiError::Refused(_, v)) => panic!("conflict: {v}"),
+            Err(ApiError::Internal(c, m)) => panic!("acyclic edit failed: {c} {m}"),
+            Err(ApiError::BadToken(m)) => panic!("acyclic edit failed: {m}"),
         };
         assert_eq!(a2["version"], json!(2));
     }
@@ -2861,7 +3078,7 @@ mod tests {
     #[tokio::test]
     async fn no_key_tags_creates_as_today() {
         let st = mem().await;
-        let body = json!({"name": "same words", "agent": "code", "priority": 50, "requestedby": "user",
+        let body = json!({"name": "same words", "agent": "code", "priority": 50,
                           "tags": [{"text": "container:pdy_core_clearing", "color": ""}]});
         let a = create(&st, body.clone()).await;
         let b = create(&st, body).await;
@@ -2923,7 +3140,8 @@ mod tests {
         let sd = details(&st, &oid).await;
         let seen = sd.iter().find(|r| body_str(r, "key") == "doc").expect("seen-again row");
         let v = body_str(seen, "value");
-        assert!(v.contains("by agent:code") && v.contains(&format!("duplicate {nid} merged here")) && v.contains("newer report with a stack trace"), "{v}");
+        // the repeat names who really filed it (the server's principal), never the body's claim (MG-12)
+        assert!(v.contains("by user:tester") && v.contains(&format!("duplicate {nid} merged here")) && v.contains("newer report with a stack trace"), "{v}");
         assert_eq!(rows(&st).await.len(), 2, "a merge closes, never deletes");
     }
 
@@ -2985,6 +3203,8 @@ mod tests {
             Err(ApiError::Refused(c, v)) => Err((c, v)),
             Err(ApiError::Status(c, m)) => Err((c, json!({"error": m}))),
             Err(ApiError::Conflict(v)) => Err((StatusCode::CONFLICT, v)),
+            Err(ApiError::Internal(c, m)) => Err((c, json!({"error": m}))),
+            Err(ApiError::BadToken(m)) => Err((StatusCode::UNAUTHORIZED, json!({"error": m}))),
         }
     }
     async fn lock_rows(st: &Arc<AppState>) -> Vec<Value> {
@@ -3134,9 +3354,16 @@ mod tests {
         let qid = q["id"].as_str().unwrap().to_string();
         let x = create(&st, json!({"name": "x", "agent": "code", "state": "queued", "blockedby": [pid.clone()]})).await;
         let xid = x["id"].as_str().unwrap().to_string();
-        create(&st, json!({"name": "c", "agent": "code", "state": "queued", "createdby": pid.clone(), "blockedby": [qid.clone()]})).await;
-        let d = create(&st, json!({"name": "d", "agent": "code", "state": "queued", "createdby": qid.clone()})).await;
+        // children filed while p and q were open (a person may name only an open parent)
+        let c = create(&st, json!({"name": "c", "agent": "code", "state": "queued", "blockedby": [qid.clone()]})).await;
+        let d = create(&st, json!({"name": "d", "agent": "code", "state": "queued"})).await;
         let did = d["id"].as_str().unwrap().to_string();
+        for (child, parent) in [(&c, &pid), (&d, &qid)] {
+            let mut row = child.clone();
+            row["createdby"] = json!(parent);
+            st.store.put("workitem", "p", child["id"].as_str().unwrap(), &row).await.unwrap();
+        }
+        let d = st.store.get("workitem", "p", &did).await.unwrap().unwrap();
         let mut closing = d.clone();
         closing["blockedby"] = json!([xid]);
         let q: HashMap<String, String> = [("expect_version".to_string(), closing["version"].as_u64().unwrap().to_string())].into();
@@ -3154,7 +3381,7 @@ mod tests {
     async fn create_with_a_placeholder_request_is_refused() {
         let st = mem().await;
         let body = json!({"name": "t", "agent": "code", "request": "PLACEHOLDER - replaced immediately by the filing agent"});
-        match workitem_create(admin(), State(st.clone()), Path("p".into()), Json(body)).await {
+        match workitem_create(admin(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(body)).await {
             Err(ApiError::Status(code, msg)) => assert!(code == StatusCode::BAD_REQUEST && msg.contains("placeholder"), "{msg}"),
             _ => panic!("placeholder accepted"),
         }
@@ -3168,7 +3395,7 @@ mod tests {
     #[tokio::test]
     async fn the_test_sweep_is_one_undeletable_schedule() {
         let st = mem().await;
-        let tpl = match workitem_create(engine_user(), State(st.clone()), Path("p".into()), Json(iter_core::test_sweep_template_body("paused", 240))).await {
+        let tpl = match workitem_create(engine_user(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(iter_core::test_sweep_template_body("paused", 240))).await {
             Ok(Json(v)) => v,
             _ => panic!("the engine could not create the test sweep"),
         };
@@ -3176,9 +3403,9 @@ mod tests {
         assert_eq!(tpl["state"], "paused");
         // an ordinary schedule from the engine is still refused
         let other = json!({"name": "s", "agent": "exec", "exec_shell": "true", "state": "scheduled", "sched": {"kind": "every", "every_min": 5}});
-        assert!(matches!(workitem_create(engine_user(), State(st.clone()), Path("p".into()), Json(other)).await, Err(ApiError::Status(StatusCode::FORBIDDEN, _))));
+        assert!(matches!(workitem_create(engine_user(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(other)).await, Err(ApiError::Status(StatusCode::FORBIDDEN, _))));
         // a second template is refused, naming the first
-        match workitem_create(admin(), State(st.clone()), Path("p".into()), Json(iter_core::test_sweep_template_body("scheduled", 60))).await {
+        match workitem_create(admin(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(iter_core::test_sweep_template_body("scheduled", 60))).await {
             Err(ApiError::Status(code, msg)) => assert!(code == StatusCode::CONFLICT && msg.contains(&id), "{msg}"),
             _ => panic!("a second test sweep was accepted"),
         }

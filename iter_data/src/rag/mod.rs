@@ -40,6 +40,8 @@
 pub mod guide;
 pub mod pipeline;
 pub mod search;
+#[cfg(test)]
+mod store_tests;
 
 pub use iter_core::rag::{embed, extract};
 
@@ -101,10 +103,10 @@ pub(crate) fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError::Status(StatusCode::NOT_FOUND, msg.into())
 }
 pub(crate) fn backend(e: impl std::fmt::Display) -> ApiError {
-    ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    ApiError::Internal(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 pub(crate) fn unavailable(e: impl std::fmt::Display) -> ApiError {
-    ApiError::Status(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+    ApiError::Internal(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
 }
 pub(crate) fn conflict(msg: impl Into<String>) -> ApiError {
     ApiError::Status(StatusCode::CONFLICT, msg.into())
@@ -173,12 +175,35 @@ pub async fn ensure_schema(a: &ArangoBackend) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    // chunks written before 2026-09-30 carry vec_sum: null while they wait for
-    // a summary; the sparse vector index needs the attribute absent instead
-    a.aql("FOR c IN rag_chunk FILTER HAS(c, 'vec_sum') AND c.vec_sum == null UPDATE c WITH {vec_sum: null} IN rag_chunk OPTIONS {keepNull: false}", json!({}))
-        .await
-        .map_err(|e| e.to_string())?;
+    repair_null_vectors(a).await?;
     search::ensure_view(a).await
+}
+
+/// Once per start, idempotent (MG-4): a stored null vector loses the
+/// attribute (the sparse vector index skips a missing one but refuses null),
+/// and an upload that failed on exactly that refusal, whose bytes are still
+/// here, is queued again with fresh attempts. Each step logs what it changed.
+pub(crate) async fn repair_null_vectors(a: &ArangoBackend) -> Result<(), String> {
+    let steps = [
+        ("chunks: null vec_sum removed",
+         "FOR c IN rag_chunk FILTER HAS(c, 'vec_sum') AND c.vec_sum == null UPDATE c WITH {vec_sum: null} IN rag_chunk OPTIONS {keepNull: false} RETURN 1"),
+        ("chunks: null vec_raw removed",
+         "FOR c IN rag_chunk FILTER HAS(c, 'vec_raw') AND c.vec_raw == null UPDATE c WITH {vec_raw: null} IN rag_chunk OPTIONS {keepNull: false} RETURN 1"),
+        ("documents: null vec_sum removed",
+         "FOR d IN rag_doc FILTER HAS(d, 'vec_sum') AND d.vec_sum == null UPDATE d WITH {vec_sum: null} IN rag_doc OPTIONS {keepNull: false} RETURN 1"),
+        ("uploads refused for a null vector: queued again",
+         "FOR d IN rag_doc FILTER d.state == 'failed' AND CONTAINS(TO_STRING(d.error), 'array expected for vector attribute')
+            AND DOCUMENT(CONCAT('rag_blob/', d._key)) != null
+          UPDATE d WITH {state: 'queued', ingest_attempts: 0, ingest_engine: '', ingest_expires: '', error: '', updated: @now} IN rag_doc RETURN 1"),
+    ];
+    for (what, q) in steps {
+        let bind = if q.contains("@now") { json!({"now": now_utc()}) } else { json!({}) };
+        let n = a.aql(q, bind).await.map_err(|e| e.to_string())?.len();
+        if n > 0 {
+            println!("[iter_data] GraphRAG repair: {what}: {n}");
+        }
+    }
+    Ok(())
 }
 
 // ---------- settings ----------
@@ -271,25 +296,33 @@ async fn settings_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
 
 // ---------- status ----------
 
-async fn model_status(_u: AuthUser) -> Json<Value> {
-    Json(embed::status())
+async fn model_status(u: AuthUser) -> Json<Value> {
+    let mut model = embed::status();
+    if u.role != "admin" {
+        if let Some(o) = model.as_object_mut() {
+            o.remove("dir");
+            o.remove("error");
+        }
+    }
+    Json(model)
 }
 
-/// Engines that serve `project` and were seen in the last 2 minutes.
-async fn live_engines(store: &dyn Storage, project: &str) -> Vec<Value> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    store
-        .scan("engine")
+/// Every engine serving `project` (an active serves edge), live or not.
+pub(crate) async fn engines(store: &dyn Storage, project: &str) -> Vec<Value> {
+    crate::settings::serving_engines(store, project)
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| e.pointer(&format!("/projects/{}", project.replace('~', "~0").replace('/', "~1"))).is_some())
-        .filter(|e| s(e, "last_seen") >= cutoff.as_str())
-        .map(|e| json!({"name": s(&e, "id"), "display": s(&e, "name"), "account": s(&e, "account"), "hold": s(&e, "hold"), "last_seen": s(&e, "last_seen")}))
+        .map(|e| json!({"name": e.name, "display": e.display, "account": e.account, "hold": e.hold, "last_seen": e.last_seen, "age_sec": e.age_sec, "live": e.live}))
         .collect()
 }
 
-async fn status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+/// How many engines serving `project` are live now.
+pub(crate) async fn live_count(store: &dyn Storage, project: &str) -> usize {
+    crate::settings::serving_engines(store, project).await.unwrap_or_default().iter().filter(|e| e.live).count()
+}
+
+async fn status(u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     let a = arango(st.store.as_ref())?;
     let now = now_utc();
     let docs = a
@@ -320,14 +353,22 @@ async fn status(_u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Resul
         .and_then(|r| r.first().and_then(|v| v.as_u64()))
         .unwrap_or(0);
     let schedule = find_schedule(st.store.as_ref(), &name).await?;
-    let engines = live_engines(st.store.as_ref(), &name).await;
+    let engines = engines(st.store.as_ref(), &name).await;
+    // the model's directory and load error name server paths: admins only
+    let mut model = embed::status();
+    if u.role != "admin" {
+        if let Some(o) = model.as_object_mut() {
+            o.remove("dir");
+            o.remove("error");
+        }
+    }
     Ok(Json(json!({
         "project": name,
         "docs": docs,
         "chunks": chunks,
         "waiting": pipeline::waiting_one(a, &name).await.unwrap_or(0),
         "settings": settings(a, &name).await,
-        "model": embed::status(),
+        "model": model,
         "model_mismatch": mismatch,
         "vector_index": search::vector_index_state(a).await,
         "engines": engines,
@@ -375,7 +416,8 @@ fn yes() -> bool {
 
 /// Accept an upload: keep the bytes for the engine's ingest job, queue the
 /// original for the docs directory. The document is searchable once an engine
-/// has ingested it (seconds when one is live).
+/// has ingested it (one tick plus extraction and embedding, ~5–30 s, when one
+/// is live; it stays `queued` while none is): the reply says how many are.
 async fn doc_upload(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(req): Json<UploadReq>) -> Result<Json<Value>, ApiError> {
     use base64::Engine as _;
     u.require_writer()?;
@@ -386,8 +428,8 @@ async fn doc_upload(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(
         return Err(bad(format!("{} is {} MB; the limit is {} MB", req.filename, bytes.len() / 1_048_576, MAX_UPLOAD / 1_048_576)));
     }
     let fname = safe_filename(&req.filename);
-    if fname.ends_with(".iter.md") {
-        return Err(bad("*.iter.md files are map nodes: they are indexed from the checkout by `iter rag sync`, not uploaded"));
+    if fname.ends_with(".iter.md") || req.filename.trim().ends_with(".iter.md") {
+        return Err(bad(NODE_FILE_REFUSAL));
     }
     let ext = extract::ext_of(&fname);
     if ["doc", "ppt", "xls"].contains(&ext.as_str()) {
@@ -433,7 +475,24 @@ async fn doc_upload(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Json(
         .await
         .map_err(backend)?;
     st.store.bump_seq(&name, "rag").await?;
-    Ok(Json(clean(doc)))
+    let live = live_count(st.store.as_ref(), &name).await;
+    let mut out = clean(doc);
+    out["searchable"] = json!(false);
+    out["live_engines"] = json!(live);
+    out["message"] = json!(if live == 0 { NO_LIVE_ENGINE } else { "queued: a live engine ingests it within seconds" });
+    Ok(Json(out))
+}
+
+/// Why an upload named `*.iter.md` is refused (MG-6).
+pub const NODE_FILE_REFUSAL: &str =
+    "node files are indexed by the iter engine from the checkout; change the node with graph_node_update (or edit the file) instead";
+/// An upload with no live engine to ingest it.
+pub const NO_LIVE_ENGINE: &str = "no live engine serves this project: the document stays queued until one checks in";
+
+/// A document is searchable once it has stored chunks and is past ingest
+/// (keyword and raw-text search from then; summary search once `ready`).
+pub(crate) fn searchable(state: &str, chunks: u64) -> bool {
+    chunks > 0 && ["summarizing", "rollup", "ready"].contains(&state)
 }
 
 // ---------- documents ----------
@@ -455,8 +514,9 @@ async fn docs_list(_u: AuthUser, State(st): Ctx, Path(name): Path<String>, Query
             "FOR d IN rag_doc FILTER d.project == @p AND (@k == '' OR d.kind == @k) AND (@s == '' OR d.state == @s)
              LET done = LENGTH(FOR c IN rag_chunk FILTER c.project == @p AND c.doc == d._key AND c.sum_state == 'done' RETURN 1)
              LET links = d.kind == 'file' ? LENGTH(FOR n IN node FILTER n.project == @p AND d.path IN n.documents[*] RETURN 1) : 0
+             LET stored = LENGTH(FOR c IN rag_chunk FILTER c.project == @p AND c.doc == d._key LIMIT 1 RETURN 1)
              SORT d.updated DESC
-             RETURN MERGE(UNSET(d, '_id', '_rev', 'vec_sum'), {summarized: done, linked: links})",
+             RETURN MERGE(UNSET(d, '_id', '_rev', 'vec_sum'), {summarized: done, linked: links, stored_chunks: stored})",
             json!({"p": name, "k": q.kind, "s": q.state}),
         )
         .await
@@ -466,25 +526,22 @@ async fn docs_list(_u: AuthUser, State(st): Ctx, Path(name): Path<String>, Query
     for r in rows {
         let mut d = with_store_state(st.store.as_ref(), &name, clean(r)).await;
         d["locations"] = locations(&checkouts, s(&d, "path"));
+        let stored = d.as_object_mut().and_then(|o| o.remove("stored_chunks")).and_then(|v| v.as_u64()).unwrap_or(0);
+        d["searchable"] = json!(searchable(s(&d, "state"), stored));
         out.push(d);
     }
     Ok(Json(Value::Array(out)))
 }
 
-/// The checkouts of `project`: (engine, topdir, seen in the last 2 minutes),
-/// from every engine record that serves it.
+/// The checkouts of `project`: (engine, topdir, live), from every engine with
+/// an active serves edge to it (the edge's `topdir`), live engines first.
 pub(crate) async fn checkouts(store: &dyn Storage, project: &str) -> Vec<(String, String, bool)> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let key = project.replace('~', "~0").replace('/', "~1");
-    let mut v: Vec<(String, String, bool)> = store
-        .scan("engine")
+    let mut v: Vec<(String, String, bool)> = crate::settings::serving_engines(store, project)
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|e| {
-            let top = e.pointer(&format!("/projects/{key}/dirs/topdir"))?.as_str()?.trim_end_matches('/').to_string();
-            Some((s(&e, "id").to_string(), top, s(&e, "last_seen") >= cutoff.as_str()))
-        })
+        .filter(|e| !e.topdir.is_empty())
+        .map(|e| (e.name, e.topdir.trim_end_matches('/').to_string(), e.live))
         .collect();
     v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
     v
@@ -550,6 +607,7 @@ async fn doc_get(_u: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, S
     if doc["kind"] == "file" {
         doc["linked_nodes"] = Value::Array(linked_nodes(a, &name, s(&doc, "path")).await);
     }
+    doc["searchable"] = json!(searchable(s(&doc, "state"), chunks.len() as u64));
     doc["chunk_list"] = Value::Array(chunks.into_iter().map(clean).collect());
     Ok(Json(doc))
 }
@@ -614,7 +672,8 @@ async fn doc_resummarize(u: AuthUser, State(st): Ctx, Path((name, id)): Path<(St
     a.aql_retry(
         "FOR d IN rag_doc FILTER d._key == @d AND d.project == @p AND d.state NOT IN ['queued', 'ingesting']
          UPDATE d WITH {state: 'summarizing', summary: '', vec_sum: null, rollup_state: '', rollup_attempts: 0,
-                        chapters: (FOR c IN d.chapters RETURN MERGE(c, {summary: ''})), updated: @now} IN rag_doc",
+                        chapters: (FOR c IN d.chapters RETURN MERGE(c, {summary: ''})), updated: @now} IN rag_doc
+         OPTIONS {keepNull: false}",
         json!({"p": name, "d": id, "now": now_utc()}),
     )
     .await
@@ -723,7 +782,7 @@ async fn schedule_create(u: AuthUser, st: Ctx, Path(name): Path<String>, Json(re
         "requestedby": "user", "prework": [], "postwork": [],
         "request": "Scheduled GraphRAG change sweep: `iter rag sync` reads every node file (*.iter.md) the project map lists, chunks and embeds the ones whose text changed since the last sweep and sends them to iter_data (unchanged chunks keep their summaries; the Summary agent summarises the rest), and removes the documents of node files that no longer exist.",
     });
-    let created = crate::api::workitem_create(u, st.clone(), Path(name.clone()), Json(body)).await?;
+    let created = crate::api::workitem_create(u, st.clone(), Path(name.clone()), crate::api::WorkidHeader(String::new()), Json(body)).await?;
     Ok(Json(json!({"schedule": {"id": created.0["id"], "name": created.0["name"], "sched": created.0["sched"]}, "created": true})))
 }
 
