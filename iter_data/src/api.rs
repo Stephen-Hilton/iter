@@ -185,16 +185,17 @@ pub(crate) async fn principal(st: &AppState, user: &AuthUser, project: &str, wor
     }
     let engine = crate::settings::machine_engine(&user.sub).unwrap_or(&user.sub).to_string();
     let workid = workid.trim();
-    if !workid.is_empty() && workid.len() <= 200 {
-        if let Some(item) = st.store.get("workitem", project, workid).await? {
-            if body_str(&item, "state") == "in-progress" && body_str(&item, "engine") == engine {
-                return Ok(Principal {
-                    requestedby: format!("agent:{}@{engine}", body_str(&item, "agent")),
-                    parent: Some(workid.to_string()),
-                    by_workid: Some(workid.to_string()),
-                });
-            }
-        }
+    if !workid.is_empty()
+        && workid.len() <= 200
+        && let Some(item) = st.store.get("workitem", project, workid).await?
+        && body_str(&item, "state") == "in-progress"
+        && body_str(&item, "engine") == engine
+    {
+        return Ok(Principal {
+            requestedby: format!("agent:{}@{engine}", body_str(&item, "agent")),
+            parent: Some(workid.to_string()),
+            by_workid: Some(workid.to_string()),
+        });
     }
     Ok(Principal { requestedby: format!("engine:{engine}"), parent: None, by_workid: None })
 }

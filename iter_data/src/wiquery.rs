@@ -235,7 +235,7 @@ pub fn matches(rec: &Value, f: &Filter) -> bool {
             let Some(p) = x.as_str() else { return false };
             vals.iter().flat_map(|v| leaves(v)).any(|v| v.as_str().map(|s| s.starts_with(p)).unwrap_or(false))
         }
-        "exists" => !missing == x.as_bool().unwrap_or(true),
+        "exists" => missing != x.as_bool().unwrap_or(true),
         "empty" => (missing || vals.iter().all(|v| blank(v))) == x.as_bool().unwrap_or(true),
         _ => false,
     }
@@ -355,8 +355,11 @@ pub fn unknown_fields(rows: &[Value], q: &Query) -> Vec<String> {
     out
 }
 
-/// One page of `rows`: (total matching, the page, next cursor, unknown fields).
-pub fn run(rows: Vec<Value>, q: &Query) -> Result<(usize, Vec<Value>, Option<String>, Vec<String>), String> {
+/// (total matching, the page, next cursor, unknown fields).
+pub type Page = (usize, Vec<Value>, Option<String>, Vec<String>);
+
+/// One page of `rows`.
+pub fn run(rows: Vec<Value>, q: &Query) -> Result<Page, String> {
     let after = q.cursor.as_deref().map(|c| decode_cursor(q, c)).transpose()?;
     let unknown = unknown_fields(&rows, q);
     let mut hits: Vec<Value> = rows.into_iter().filter(|r| q.filter.iter().all(|f| matches(r, f))).collect();

@@ -298,11 +298,11 @@ async fn settings_put(u: AuthUser, State(st): Ctx, Path(name): Path<String>, Jso
 
 async fn model_status(u: AuthUser) -> Json<Value> {
     let mut model = embed::status();
-    if u.role != "admin" {
-        if let Some(o) = model.as_object_mut() {
-            o.remove("dir");
-            o.remove("error");
-        }
+    if u.role != "admin"
+        && let Some(o) = model.as_object_mut()
+    {
+        o.remove("dir");
+        o.remove("error");
     }
     Json(model)
 }
@@ -356,11 +356,11 @@ async fn status(u: AuthUser, State(st): Ctx, Path(name): Path<String>) -> Result
     let engines = engines(st.store.as_ref(), &name).await;
     // the model's directory and load error name server paths: admins only
     let mut model = embed::status();
-    if u.role != "admin" {
-        if let Some(o) = model.as_object_mut() {
-            o.remove("dir");
-            o.remove("error");
-        }
+    if u.role != "admin"
+        && let Some(o) = model.as_object_mut()
+    {
+        o.remove("dir");
+        o.remove("error");
     }
     Ok(Json(json!({
         "project": name,

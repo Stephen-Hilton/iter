@@ -88,15 +88,16 @@ pub fn origin_allowed(origin: Option<&str>, host: Option<&str>, list: &[String])
     let Some(origin) = origin else { return true };
     // the origin the request was addressed to: the webui calling its own server
     let authority = origin.split_once("://").map(|(_, a)| a).unwrap_or("");
-    if let Some(h) = host {
-        if !authority.is_empty() && authority.eq_ignore_ascii_case(h) {
-            return true;
-        }
+    if let Some(h) = host
+        && !authority.is_empty()
+        && authority.eq_ignore_ascii_case(h)
+    {
+        return true;
     }
     list.is_empty() || list.iter().any(|o| o == origin)
 }
 
-fn hstr<'a>(h: &'a HeaderMap, k: HeaderName) -> Option<&'a str> {
+fn hstr(h: &HeaderMap, k: HeaderName) -> Option<&str> {
     h.get(k).and_then(|v| v.to_str().ok())
 }
 
