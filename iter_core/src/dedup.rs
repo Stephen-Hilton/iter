@@ -5,9 +5,12 @@
 //! nothing looked for an existing item before creating one.  This module holds
 //! the rules both halves share:
 //!
-//! - **stage 1** (iter_data, at create, no model): an item whose tags carry
-//!   both `check:<label>` and `container:<name>` is a repeat of any OPEN item
-//!   with the same two tags — no second row, the survivor is told;
+//! - **stage 1** (iter_data, at create, no model): an item whose key carries
+//!   both a check and a container is a repeat of any OPEN item with the same
+//!   two — no second row, the survivor is told.  Writers may still pass the
+//!   key as `check:<label>` + `container:<name>` tags; iter_data folds them
+//!   into `repeat_check` / `repeat_container` (`fold_key_tags`, 2026-10-20) so
+//!   they never crowd the queue line;
 //! - **stage 2** (iter_engine, before dispatch, Sonnet): a new item is judged
 //!   against a deterministically narrowed set of open neighbours and merged
 //!   into one only on a confident `same_fault`.
@@ -21,7 +24,8 @@ use crate::{Tag, WorkItem, paths_overlap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// The identity of a repeat: `check:<rule label>` + `container:<name>`.
+/// The identity of a repeat as tags (how writers pass it, and how rows
+/// before 2026-10-20 still hold it): `check:<rule label>` + `container:<name>`.
 pub const CHECK_TAG_PREFIX: &str = "check:";
 pub const CONTAINER_TAG_PREFIX: &str = "container:";
 /// On the closed duplicate: `dup of: <last 12 of the survivor id>` — the
@@ -51,19 +55,64 @@ impl Default for DedupConfig {
 }
 
 fn tag_with_prefix(tags: &[Tag], prefix: &str) -> Option<String> {
-    tags.iter().find(|t| t.text.starts_with(prefix) && t.text.len() > prefix.len()).map(|t| t.text.clone())
+    tags.iter().find_map(|t| t.text.strip_prefix(prefix).filter(|v| !v.is_empty())).map(str::to_string)
 }
 fn json_tags(v: &Value) -> Vec<Tag> {
     v.get("tags").and_then(|t| serde_json::from_value(t.clone()).ok()).unwrap_or_default()
 }
+fn nonempty(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
 
-/// The stage-1 key (`check:` text, `container:` text) when BOTH are present.
-pub fn key_of(tags: &[Tag]) -> Option<(String, String)> {
-    Some((tag_with_prefix(tags, CHECK_TAG_PREFIX)?, tag_with_prefix(tags, CONTAINER_TAG_PREFIX)?))
+/// The two halves of an item's key (check, container), each from its field,
+/// else from the older tag form.
+pub fn key_parts(check: &str, container: &str, tags: &[Tag]) -> (Option<String>, Option<String>) {
+    (
+        nonempty(check).or_else(|| tag_with_prefix(tags, CHECK_TAG_PREFIX)),
+        nonempty(container).or_else(|| tag_with_prefix(tags, CONTAINER_TAG_PREFIX)),
+    )
+}
+/// The stage-1 key (check, container) when BOTH are present.
+pub fn key_of(item: &WorkItem) -> Option<(String, String)> {
+    match key_parts(&item.repeat_check, &item.repeat_container, &item.tags) {
+        (Some(c), Some(k)) => Some((c, k)),
+        _ => None,
+    }
 }
 /// Same, from a JSON row.
 pub fn key_of_row(row: &Value) -> Option<(String, String)> {
-    key_of(&json_tags(row))
+    let f = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match key_parts(&f("repeat_check"), &f("repeat_container"), &json_tags(row)) {
+        (Some(c), Some(k)) => Some((c, k)),
+        _ => None,
+    }
+}
+
+/// At create (iter_data): move `check:` / `container:` tags off a new row's
+/// tags into `repeat_check` / `repeat_container` (a field already set wins).
+/// The key is bookkeeping for repeat detection, not something a person acts
+/// on, so it never takes room on the queue line.
+pub fn fold_key_tags(row: &mut Value) {
+    let Some(tags) = row.get("tags").and_then(|t| t.as_array()).cloned() else { return };
+    let mut kept = Vec::with_capacity(tags.len());
+    for t in tags {
+        let text = t.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let field = text
+            .strip_prefix(CHECK_TAG_PREFIX)
+            .map(|v| ("repeat_check", v))
+            .or_else(|| text.strip_prefix(CONTAINER_TAG_PREFIX).map(|v| ("repeat_container", v)));
+        match field {
+            Some((key, value)) => {
+                let empty = row.get(key).and_then(|v| v.as_str()).map(|v| v.trim().is_empty()).unwrap_or(true);
+                if empty && !value.trim().is_empty() {
+                    row[key] = json!(value.trim());
+                }
+            }
+            None => kept.push(t),
+        }
+    }
+    row["tags"] = json!(kept);
 }
 
 /// Open = still someone's work: not closed, and not a schedule template.
@@ -133,20 +182,20 @@ pub fn seen_again_note(ts: &str, source: &str, via: &str, request: &str) -> Stri
 // ---------- stage 2 ----------
 
 /// Narrow deterministically: open items in the same project (never the new
-/// item itself, never a template) that share the new item's `container:`
-/// tag, or its `check:` tag, or whose lockdirs overlap its own, or whose name
+/// item itself, never a template) that share the new item's container
+/// (field or older tag), or its check, or whose lockdirs overlap its own, or whose name
 /// names the same failing testgroup or ends in the same long phrase
 /// (`titles_match`).  Newest first, at most `cap`.
 pub fn stage2_candidates<'a>(new: &WorkItem, items: &'a [WorkItem], cap: usize) -> Vec<&'a WorkItem> {
-    let check = tag_with_prefix(&new.tags, CHECK_TAG_PREFIX);
-    let container = tag_with_prefix(&new.tags, CONTAINER_TAG_PREFIX);
+    let (check, container) = key_parts(&new.repeat_check, &new.repeat_container, &new.tags);
     let mut out: Vec<&WorkItem> = items
         .iter()
         .filter(|i| i.id != new.id && is_open_state(&i.state))
         .filter(|i| {
-            let shares_tag = |want: &Option<String>| want.as_ref().map(|w| i.tags.iter().any(|t| &t.text == w)).unwrap_or(false);
-            shares_tag(&container)
-                || shares_tag(&check)
+            let (ic, ik) = key_parts(&i.repeat_check, &i.repeat_container, &i.tags);
+            let same = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+            same(&container, &ik)
+                || same(&check, &ic)
                 || new.lockdirs.iter().any(|a| i.lockdirs.iter().any(|b| paths_overlap(a, b)))
                 || titles_match(&new.name, &i.name)
         })
@@ -316,9 +365,41 @@ mod tests {
 
     #[test]
     fn key_needs_both_tags() {
-        assert_eq!(key_of(&[tag("check:a"), tag("container:b")]), Some(("check:a".into(), "container:b".into())));
-        assert_eq!(key_of(&[tag("check:a")]), None);
-        assert_eq!(key_of(&[tag("container:b"), tag("check:")]), None); // empty label is no key
+        assert_eq!(key_of(&item("x", "queued", &["check:a", "container:b"], &[], "")), Some(("a".into(), "b".into())));
+        assert_eq!(key_of(&item("x", "queued", &["check:a"], &[], "")), None);
+        assert_eq!(key_of(&item("x", "queued", &["container:b", "check:"], &[], "")), None); // empty label is no key
+    }
+
+    #[test]
+    fn key_fields_win_and_match_older_tags() {
+        let mut new = item("n", "queued", &[], &[], "");
+        new.repeat_check = "a".into();
+        assert_eq!(key_of(&new), None);
+        new.repeat_container = "b".into();
+        assert_eq!(key_of(&new), Some(("a".into(), "b".into())));
+        // a row from before the fold carries the same key as tags
+        let old = json!({"tags": [{"text": "check:a"}, {"text": "container:b"}]});
+        assert_eq!(key_of_row(&old), key_of(&new));
+        assert_eq!(key_of_row(&json!({"repeat_check": "a", "repeat_container": "b", "tags": []})), key_of(&new));
+    }
+
+    #[test]
+    fn fold_moves_key_tags_into_fields() {
+        let mut row = json!({"tags": [{"text": "sweep"}, {"text": "check:no-tests"}, {"text": "container:kafka"}, {"text": "usecase:x"}]});
+        fold_key_tags(&mut row);
+        assert_eq!(row["repeat_check"], "no-tests");
+        assert_eq!(row["repeat_container"], "kafka");
+        assert_eq!(row["tags"], json!([{"text": "sweep"}, {"text": "usecase:x"}]));
+        // a field already set wins; an empty label is dropped without a field
+        let mut row = json!({"repeat_container": "core", "tags": [{"text": "container:other"}, {"text": "check:"}]});
+        fold_key_tags(&mut row);
+        assert_eq!(row["repeat_container"], "core");
+        assert!(row.get("repeat_check").is_none());
+        assert_eq!(row["tags"], json!([]));
+        // no tags: untouched
+        let mut row = json!({"name": "x"});
+        fold_key_tags(&mut row);
+        assert_eq!(row, json!({"name": "x"}));
     }
 
     /// Case 5: 77 → 38 → 19 → 9 → 4 → 2 → 1 → 1; priority 1 stays 1.

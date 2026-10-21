@@ -35,9 +35,10 @@ A claim needs exactly one test node and always runs all of its scripts.
 A work item may sit queued for hours and then run against a tree that has moved on, so
 a defect-shaped item carries the test node that proves the defect. Fix items filed by
 the test sweep or by a red run are titled `Tests failing: "<test node name>" …`, quote
-the failing scripts' output in their request, and carry the tags
+the failing scripts' output in their request, and carry the repeat key
 `check:tests-non-green` + `container:<test node name>` (a red result posted from
-outside a run files `check:tests-failing` + `container:<last 12 of the test node id>`).
+outside a run files `check:tests-failing` + `container:<last 12 of the test node id>`),
+held in the item's `repeat_check` / `repeat_container` fields rather than its tags.
 The receiving agent reproduces BEFORE fixing — `--broken` first, then diagnose, then fix
 the CODE, then `--fixed`.
 

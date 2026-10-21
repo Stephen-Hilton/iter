@@ -3,7 +3,7 @@
 //! test node (`test`, `front.last_result`, `timestamps.last_tested` → the
 //! file is rewritten like any node edit) and appended to the `test_log`
 //! collection. A failed (or could-not-run) result files a work item, deduped
-//! on `check:tests-failing` + `container:<node>` so a red test is filed once.
+//! on repeat key `tests-failing` + `<node>` so a red test is filed once.
 //! "Run tests" from the graph is a `test` work item the engine runs.
 
 use crate::api::{ApiError, AppState, AuthUser};
@@ -110,7 +110,7 @@ async fn testresult(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Stri
         let item = json!({
             "name": format!("Fix failing tests: {}", n.doc.name), "agent": "code", "state": "queued", "priority": 50,
             "node": id, "lockdirs": [nf::dir_of(&n.doc.path)], "blockedby": [], "context": [n.doc.path],
-            "tags": [{"text": "check:tests-failing", "color": ""}, {"text": format!("container:{short}"), "color": ""}, {"text": "tests", "color": ""}],
+            "tags": [{"text": "tests", "color": ""}], "repeat_check": "tests-failing", "repeat_container": short,
             "requestedby": "test", "prework": [], "postwork": [],
             "request": format!(
                 "The test node \"{}\" ({}) {} at {now}: normal {}/{} pass, longtail {}/{}, failure {}/{} ({} errors).\n{}\n\nFind the cause and fix the code (or the test, when the test is wrong). Done when the test node's scripts pass.",

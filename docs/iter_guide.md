@@ -260,7 +260,7 @@ A scheduled item is a template in state `scheduled` with a `sched` of kind `ever
 
 ### What is dedup?
 
-Items tagged with the same `check:` and `container:` pair are the same work: filing one while another is open records a repeat on the open one (and raises its priority) instead of creating a second. Before a new item first runs, a Sonnet judge also compares it with open items and merges clear duplicates.
+Items with the same `check:` and `container:` pair are the same work (pass them as tags; the server moves them into the item's `repeat_check` / `repeat_container` fields so they never crowd the queue line): filing one while another is open records a repeat on the open one (and raises its priority) instead of creating a second. Before a new item first runs, a Sonnet judge also compares it with open items and merges clear duplicates.
 
 ### What happens when a run fails?
 

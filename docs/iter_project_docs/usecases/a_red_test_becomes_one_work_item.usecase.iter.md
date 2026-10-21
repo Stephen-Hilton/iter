@@ -6,7 +6,7 @@ creator: "iter migrate5"
 teststate: inherit
 actors: ["{topdir}/docs/iter_project_docs/usecases/developer.actor.iter.md", "{topdir}/docs/iter_project_docs/usecases/claude_agent.actor.iter.md"]
 flowmap:
-  summary: "When the Test sweep schedule comes due, the engine clones it into a run and starts it at once, outside the agent cap; its command is iter sweep. The sweep reads GET …/graph, evaluates teststate along each chain from the project node and every use case or actor, runs each eligible test node's scripts with the test runner, posts each aggregated result to the test node, and for each failing node files one code item locked to the owning node's codedirs. A repeat with the same check: + container: tags is merged into the open item. Could-not-run is recorded but files nothing. The fix item is then worked by an agent like any other."
+  summary: "When the Test sweep schedule comes due, the engine clones it into a run and starts it at once, outside the agent cap; its command is iter sweep. The sweep reads GET …/graph, evaluates teststate along each chain from the project node and every use case or actor, runs each eligible test node's scripts with the test runner, posts each aggregated result to the test node, and for each failing node files one code item locked to the owning node's codedirs. A repeat with the same repeat key (check + container) is merged into the open item. Could-not-run is recorded but files nothing. The fix item is then worked by an agent like any other."
   sequence: ["{topdir}/iter_engine/src/loop.code.iter.md", "{topdir}/iter_engine/src/sweep.code.iter.md", "{topdir}/iter_data/src/graph.code.iter.md", "{topdir}/iter_engine/src/local/runner.code.iter.md", "{topdir}/iter_data/src/testlogs.code.iter.md", "{topdir}/iter_data/src/api.code.iter.md", "{topdir}/docs/iter_project_docs/usecases/claude_agent.actor.iter.md"]
   process_flow:
     - step: 1
@@ -81,7 +81,7 @@ the Project graph shows it.
 
 For every failing test node the sweep files one fix item for the code agent,
 locked to the code of the node the test belongs to and carrying the failing
-output. Its `check:` and `container:` tags stop a second copy: while a fix
+output. Its repeat key (`repeat_check` + `repeat_container`) stops a second copy: while a fix
 item for that test is open, later sweeps only record a repeat on it. A test
 that could not run (the script itself broke) is recorded but not filed,
 because a broken test tool is not a defect in the code. The sweep also files

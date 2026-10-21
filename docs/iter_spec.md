@@ -541,8 +541,8 @@ also reachable from the graph view's picker as "Settings graph").
     them with `DELETE` on the same path, `?id=` for one node's); no work-item `doc`
     detail row is written (§3.2 step 3 said "and a `doc` detail").
 12. **Test results are accepted on test nodes only** (`…/graph/nodes/{id}/testresult` refuses any other nodetype). A red or
-    could-not-run result files a `code` work item at priority 50 tagged `check:tests-failing` + `container:<last 12 of the
-    test node id>`, so the dedup check files a repeat failure once.
+    could-not-run result files a `code` work item at priority 50 keyed `repeat_check: tests-failing` + `repeat_container:
+    <last 12 of the test node id>`, so the dedup check files a repeat failure once.
 13. **The project node and default reqs are server-seeded only while the project has no `serves` edge** (a designed
     project). When the repo's own project node arrives by file sync it replaces the seeds that were never edited.
 14. **The engine asks `next` with a `run_now` hint** (when its cap is full and a run-now item waits) rather than the server

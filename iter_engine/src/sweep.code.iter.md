@@ -37,7 +37,7 @@ Runs one use case's tests per sweep (the use case whose tests ran longest ago), 
   reaching an owner (via a `tests` edge) includes it.
 - **Running**: each test node's scripts run through `iter_engine::local`'s test runner; the aggregated standard
   result is posted to `POST …/graph/nodes/{id}/testresult`. A failed node files one `code` fix item locked
-  to its owner's codedirs (`file_fix_item`), keyed by `check:` + `container:` tags so a repeat is
+  to its owner's codedirs (`file_fix_item`), keyed by `repeat_check` + `repeat_container` (`keyed`) so a repeat is
   recorded on the open item instead of filed twice. "Could not run" is recorded but files nothing.
 - **Filing** (each capped per sweep): `untested_sweep` — leaf code nodes some chain includes with no
   linked test node that has a script on disk get a `test` item; `coverage_sweep` — test nodes short of

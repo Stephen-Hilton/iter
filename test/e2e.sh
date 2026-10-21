@@ -705,7 +705,7 @@ wait_for 40 "[ \"\$(api GET '/api/projects/$PA/testlogs?node=$TN&limit=1' | jq -
 expect "failing script → fail logged" fail "$(api GET "/api/projects/$PA/testlogs?node=$TN&limit=1" | jq -r '.logs[0].outcome')"
 check "failing details kept" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' '$BASE/api/projects/$PA/testlogs?node=$TN&limit=1' | jq -e '.logs[0].details|map(select(.pass==false))|length==2'"
 expect "test node shows red" red "$(gnode $PA $TN | jq -r .test.result)"
-check "a code work item was filed for the red test" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/workitems | jq -e '[.[]|select(.agent==\"code\" and (.tags|map(.text)|index(\"check:tests-failing\")))]|length==1'"
+check "a code work item was filed for the red test" bash -c "curl -sf -H 'authorization: Bearer $TOKEN' $BASE/api/projects/$PA/workitems | jq -e '[.[]|select(.agent==\"code\" and .repeat_check==\"tests-failing\")]|length==1'"
 echo 'echo "Hello, ${1:-World}"' > "$RA/src/greeter/lib/greet.sh"
 git -C "$RA" commit -qam "e2e: fix the greeting"
 fi

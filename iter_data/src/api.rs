@@ -1644,10 +1644,14 @@ pub(crate) async fn workitem_create(
     }
     let mut warnings = place_new_item(&st, &name, &mut body).await?;
     // stage 1 repeat detection (iter_core::dedup, built 2026-09-10): a
-    // request carrying both `check:` and `container:` tags is a repeat of any
-    // OPEN item with the same two — no second row; the twin is told (doc row,
-    // repeats, priority) and returned with `already_open`.  A CLOSED twin
+    // request carrying both a check and a container (fields, or the
+    // `check:` / `container:` tags) is a repeat of any OPEN item with the
+    // same two — no second row; the twin is told (doc row, repeats,
+    // priority) and returned with `already_open`.  A CLOSED twin
     // does not block: the fault has recurred, and the new item says so.
+    // the key's `check:` / `container:` tags become repeat_check /
+    // repeat_container (2026-10-20): bookkeeping, never on the queue line
+    dedup::fold_key_tags(&mut body);
     let mut recurrence: Option<(String, String)> = None;
     if let Some(key) = dedup::key_of_row(&body) {
         let rows = st.store.query("workitem", &name).await?;
@@ -2794,6 +2798,28 @@ mod tests {
         assert_eq!(body_str(&d[1], "key"), "doc");
         let note = body_str(&d[1], "value");
         assert!(note.starts_with("seen again ") && note.contains("by user") && note.contains("second report, run 2"), "{note}");
+    }
+
+    /// The key's tags are folded into repeat_check / repeat_container
+    /// (2026-10-20), and a row from before the fold, still carrying the key as
+    /// tags, is the twin of a new item keyed by the fields.
+    #[tokio::test]
+    async fn stage1_key_tags_fold_into_fields_and_match_older_rows() {
+        let st = mem().await;
+        let a = create(&st, keyed("kafka", 50, "no-tests", "kafka", "")).await;
+        assert_eq!(a["repeat_check"], json!("no-tests"));
+        assert_eq!(a["repeat_container"], json!("kafka"));
+        assert!(tag_texts(&a).is_empty(), "{:?}", tag_texts(&a));
+        let mut older = keyed("older", 50, "no-tests", "core", "");
+        older["id"] = json!("older-row");
+        older["project"] = json!("p");
+        older["state"] = json!("queued");
+        older["version"] = json!(1);
+        st.store.put_versioned("workitem", "p", "older-row", &older, 0).await.unwrap();
+        let b = create(&st, json!({"name": "core again", "agent": "code", "priority": 50, "requestedby": "user",
+                                   "repeat_check": "no-tests", "repeat_container": "core", "tags": [{"text": "sweep"}]})).await;
+        assert_eq!(b["already_open"], json!(true));
+        assert_eq!(b["id"], json!("older-row"));
     }
 
     /// Case 2: same check, different container → a new row.

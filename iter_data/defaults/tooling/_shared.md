@@ -785,7 +785,7 @@ when written. Prose cannot survive that gap; a test can.
 
 So a defect-shaped item carries the test node that proves the defect (fix items filed by
 the sweep or a red run name it — `Tests failing: "<test node name>" …` — quote the failing
-output, and carry the `check:tests-non-green` + `container:<test node name>` tags; name the
+output, and carry the repeat key `check:tests-non-green` + `container:<test node name>`; name the
 test node in `mainwork` on items you author — a defect claim that could have a test gets
 the test written first, then the fix item). The receiving agent reproduces BEFORE fixing:
 

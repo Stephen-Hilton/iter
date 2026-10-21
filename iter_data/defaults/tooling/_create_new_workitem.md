@@ -232,6 +232,10 @@ tags:
   raised it (`check:frontmatter-not-yaml`, `check:tests-non-green`). MAY be
   set when a named rule fired; leave it off for a defect you found by reading.
 
+The data server moves these two tags off the item's visible tags into its
+`repeat_check` / `repeat_container` fields as it creates the item, so the queue line
+shows only tags a person acts on; the key still works exactly as below.
+
 **Stage 1, exact, at create:** when BOTH tags are present and an OPEN item already
 carries the same two, no new item is made. `workitem_create` answers
 `already_open: true` with the open item's `id`: the open item was told (a `doc` row with your

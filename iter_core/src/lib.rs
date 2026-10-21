@@ -692,6 +692,14 @@ pub struct WorkItem {
     /// a stage-1 twin refused at create, or a duplicate merged into it
     #[serde(default)]
     pub repeats: u64,
+    /// the repeat key's halves (`dedup`, 2026-10-20): the rule or check that
+    /// fired and the component it fired on.  iter_data folds a create's
+    /// `check:` / `container:` tags into these, so the key never crowds the
+    /// item's visible tags; older rows still carry the tags
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repeat_check: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repeat_container: String,
     /// engine-owned: ISO ts of the stage-2 dedup triage (`dedup` module);
     /// "" = not yet — a queued item without it is held one tick for the judge
     #[serde(default)]

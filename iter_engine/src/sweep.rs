@@ -430,16 +430,22 @@ fn item(name: String, agent: &str, lockdirs: Vec<String>, tags: Vec<Value>, requ
         "prework": [], "postwork": [], "request": request, "node": node})
 }
 
-fn key_tags(check: &str, container: &str, ucs: &[String]) -> Vec<Value> {
-    let mut t = vec![
-        json!({"text": format!("{}{check}", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""}),
-        json!({"text": format!("{}{container}", iter_core::dedup::CONTAINER_TAG_PREFIX), "color": ""}),
-        json!({"text": "sweep", "color": ""}),
-    ];
+/// A sweep item's visible tags: `sweep` and the use cases it serves.  Its
+/// repeat key goes in `repeat_check` / `repeat_container` (`keyed`), never
+/// on the queue line.
+fn sweep_tags(ucs: &[String]) -> Vec<Value> {
+    let mut t = vec![json!({"text": "sweep", "color": ""})];
     for u in ucs {
         t.push(json!({"text": format!("usecase:{u}"), "color": ""}));
     }
     t
+}
+
+/// Stamp the repeat key (iter_core::dedup) on a new item's body.
+pub fn keyed(mut body: Value, check: &str, container: &str) -> Value {
+    body["repeat_check"] = json!(check);
+    body["repeat_container"] = json!(container);
+    body
 }
 
 fn untested_sweep(api: &Api, c: &Conn, nodes: &[Value], edges: &[Value], o: &SweepOpts) {
@@ -471,8 +477,9 @@ fn untested_sweep(api: &Api, c: &Conn, nodes: &[Value], edges: &[Value], o: &Swe
              - Run `iter runtests {test_file}` and report what is green and what is red. Do not change the code under test: a red test is filed as a `code` item by the next sweep.",
             lockdirs_of(v).join(", "),
         );
-        let tags = key_tags("no-tests", path, &usecases_touching(nodes, edges, s(v, "id")));
-        if post_item(api, c, item(format!("Tests first: write the first tests for {name}"), "test", vec![path.to_string(), format!("{dir}/tests/"), test_file.clone()], tags, request, s(v, "id")), "test", path) {
+        let tags = sweep_tags(&usecases_touching(nodes, edges, s(v, "id")));
+        let it = item(format!("Tests first: write the first tests for {name}"), "test", vec![path.to_string(), format!("{dir}/tests/"), test_file.clone()], tags, request, s(v, "id"));
+        if post_item(api, c, keyed(it, "no-tests", path), "test", path) {
             filed += 1;
         }
     }
@@ -506,8 +513,9 @@ fn coverage_sweep(api: &Api, c: &Conn, nodes: &[Value], edges: &[Value], o: &Swe
              - Run `iter runtests <test node>` and report what is green and what is red. Do not change the code under test.",
             listing.join("\n"),
         );
-        let tags = key_tags("test-coverage", path, &usecases_touching(nodes, edges, s(v, "id")));
-        if post_item(api, c, item(format!("Test coverage: top up the tests for {name}"), "test", lockdirs, tags, request, s(v, "id")), "coverage", path) {
+        let tags = sweep_tags(&usecases_touching(nodes, edges, s(v, "id")));
+        let it = item(format!("Test coverage: top up the tests for {name}"), "test", lockdirs, tags, request, s(v, "id"));
+        if post_item(api, c, keyed(it, "test-coverage", path), "coverage", path) {
             filed += 1;
         }
     }
@@ -545,10 +553,10 @@ fn text_sweep(api: &Api, c: &Conn, nodes: &[Value], o: &SweepOpts) {
             findings.iter().map(|f| format!("- {}: {}", f.0, f.1)).collect::<Vec<_>>().join("\n"),
             lockdirs_of(v).join(", "),
         );
-        let tags = key_tags("node-text", path, &[]);
+        let tags = sweep_tags(&[]);
         let mut it = item(format!("Node text: {name} — {}", codes.join(", ")), "ingest", vec![path.to_string()], tags, request, s(v, "id"));
         it["requestedby"] = json!("agent:test");
-        if post_item(api, c, it, "node-text", path) {
+        if post_item(api, c, keyed(it, "node-text", path), "node-text", path) {
             filed += 1;
         }
     }
@@ -610,8 +618,8 @@ fn file_fix_item(api: &Api, c: &Conn, run: &rt::NodeRun, owner: Option<&Value>, 
         when = iter_core::now_utc(),
         logs = logs.join("\n\n"),
     );
-    let tags = key_tags("tests-non-green", &run.name, usecases);
-    let body = item(format!("Tests failing: \"{}\" {}/{} in {}", run.name, tot.pass, tot.total, run.path.trim_start_matches("{topdir}/")), "code", lockdirs.clone(), tags, request, owner.map(|o| s(o, "id")).unwrap_or(""));
+    let tags = sweep_tags(usecases);
+    let body = keyed(item(format!("Tests failing: \"{}\" {}/{} in {}", run.name, tot.pass, tot.total, run.path.trim_start_matches("{topdir}/")), "code", lockdirs.clone(), tags, request, owner.map(|o| s(o, "id")).unwrap_or("")), "tests-non-green", &run.name);
     match api.post(&format!("/api/projects/{}/workitems", c.project), &body) {
         Ok(created) => {
             let id = created["id"].as_str().unwrap_or("").to_string();
@@ -816,6 +824,7 @@ mod tests {
         assert_eq!(items.len(), 1, "one fix item; A has runnable tests and fine text: {items:?}");
         assert_eq!(items[0]["agent"], "code");
         assert_eq!(items[0]["lockdirs"], json!(["{topdir}/a/"]));
-        assert!(items[0]["tags"].as_array().unwrap().iter().any(|t| t["text"] == format!("{}tests-non-green", iter_core::dedup::CHECK_TAG_PREFIX)));
+        assert_eq!(items[0]["repeat_check"], "tests-non-green");
+        assert!(items[0]["tags"].as_array().unwrap().iter().all(|t| !t["text"].as_str().unwrap().starts_with(iter_core::dedup::CONTAINER_TAG_PREFIX)));
     }
 }

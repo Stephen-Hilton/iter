@@ -614,10 +614,7 @@ mod local {
         let body = json!({
             "name": format!("Tests failing: \"{}\" {}/{}", run.name, tot.pass, tot.total), "agent": "code", "state": "queued",
             "lockdirs": [dir], "blockedby": [], "context": [], "model": "",
-            "tags": [
-                {"text": format!("{}tests-non-green", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""},
-                {"text": format!("{}{}", iter_core::dedup::CONTAINER_TAG_PREFIX, run.name), "color": ""},
-            ],
+            "tags": [], "repeat_check": "tests-non-green", "repeat_container": run.name,
             "createdby": workid, "requestedby": if agent.is_empty() { "user".to_string() } else { format!("agent:{agent}") },
             "prework": [], "postwork": [], "request": request,
         });
