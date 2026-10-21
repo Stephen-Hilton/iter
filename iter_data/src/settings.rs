@@ -614,8 +614,8 @@ fn iter_data_self(st: &AppState) -> Value {
     node_json(
         ITER_DATA_SELF,
         "self",
-        json!({"version": env!("CARGO_PKG_VERSION"), "backend": st.store.backend_name(), "db": db}),
-        format!("iter_data {}", env!("CARGO_PKG_VERSION")),
+        json!({"version": iter_core::VERSION, "backend": st.store.backend_name(), "db": db}),
+        format!("iter_data {}", iter_core::VERSION),
     )
 }
 

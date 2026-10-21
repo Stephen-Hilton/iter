@@ -371,7 +371,7 @@ async fn health(State(st): Ctx) -> Json<Value> {
         Some(a) => (a.ping().await, a.db_name().to_string()),
         None => (true, String::new()),
     };
-    Json(json!({"ok": ok, "backend": st.store.backend_name(), "db": db, "version": env!("CARGO_PKG_VERSION"), "ts": now_utc()}))
+    Json(json!({"ok": ok, "backend": st.store.backend_name(), "db": db, "version": iter_core::VERSION, "ts": now_utc()}))
 }
 
 async fn widget_validate(_user: AuthUser, Json(body): Json<Value>) -> Json<Value> {

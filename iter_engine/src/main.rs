@@ -46,7 +46,7 @@ enum Cmd {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "iter_engine", about = "iter engine: one per machine, serves every project assigned to it")]
+#[command(name = "iter_engine", version = iter_core::VERSION, about = "iter engine: one per machine, serves every project assigned to it")]
 struct Args {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -167,7 +167,7 @@ fn main() {
     if args.ticks > 0 {
         rt.max_ticks = Some(args.ticks);
     }
-    println!("[engine] {name} starting against {data_url} (iter_data backend: {backend}, signs in with key {}, env file {env_file})", key_file.display());
+    println!("[engine] {name} {} starting against {data_url} (iter_data backend: {backend}, signs in with key {}, env file {env_file})", iter_core::VERSION, key_file.display());
     rt.run();
 }
 

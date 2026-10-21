@@ -19,6 +19,14 @@ pub mod widget;
 
 pub use waitgraph::{LOCK_LEASE_TTL_SEC, LOCK_RENEW_EVERY_SEC, WaitEdge, WaitKind, find_wait_cycles, live_lock_rows, lock_holders, lock_sk, wait_edges};
 
+/// The release this binary was built as (`v2026.10.21b`): `installers/build.sh --release` sets
+/// ITER_RELEASE for its builds, so iter_data's /health and `iter_engine --version` name the
+/// release; any other build reports `dev-<crate version>`. Cargo rebuilds when it changes.
+pub const VERSION: &str = match option_env!("ITER_RELEASE") {
+    Some(v) => v,
+    None => concat!("dev-", env!("CARGO_PKG_VERSION")),
+};
+
 /// The claim's tag rule, at the root so both claim sites name one thing
 /// (iter_core::claim_tags — see `cluster::claim_tags`).
 pub use cluster::claim_tags;

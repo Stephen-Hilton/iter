@@ -124,7 +124,7 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
             ok(&id, json!({
                 "protocolVersion": v,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "iter_data", "title": "iter data API", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "iter_data", "title": "iter data API", "version": iter_core::VERSION},
                 "instructions": INSTRUCTIONS,
             }))
         }

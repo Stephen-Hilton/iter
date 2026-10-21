@@ -107,6 +107,9 @@ put() {
 }
 
 # ---------------------------------------------------------------- --release checks
+# ITER_RELEASE is the name the binaries report (iter_core::VERSION: /health, iter_engine --version);
+# only --release sets it, so any other build reports dev-<crate version>
+unset ITER_RELEASE
 if [ "$RELEASE" = 1 ]; then
   [ ${#ONLY[@]} -eq 0 ] || die "--release builds every asset; drop --only"
   [ "$SKIP_WIN" = 0 ] || die "--release needs the Windows asset; drop --skip-windows"
@@ -129,6 +132,7 @@ if [ "$RELEASE" = 1 ]; then
   done
   [ -n "$TAG" ] || die "$BASE_TAG already has releases a to z; wait for tomorrow (UTC)"
   echo "    HEAD $HEAD_SHA is on origin; the release tag will be $TAG"
+  export ITER_RELEASE="$TAG"
 fi
 
 [ "$DRY" = 1 ] || mkdir -p "$DIST"
@@ -203,7 +207,7 @@ cargo build --release --locked --target $triple$pkgs"
 cp /target/$triple/release/$prog /out/.$prog-linux-$arch.tmp && mv -f /out/.$prog-linux-$arch.tmp /out/$prog-linux-$arch"
     done
   done
-  if run docker run --rm --platform linux/arm64 \
+  if run docker run --rm --platform linux/arm64 -e ITER_RELEASE \
        -v "$ROOT:/src:ro" -v "$DIST:/out" \
        -v "$VOL_CARGO:/usr/local/cargo/registry" -v "$VOL_TARGET:/target" \
        -w /src "$IMAGE" bash -c "$script"; then
