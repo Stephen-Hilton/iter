@@ -8,7 +8,8 @@
 #   installers/upgrade_iter.sh [options]
 #
 # What it finds and upgrades:
-#   iter_data   the systemd services from installers/iter_data/linux (iter-data + arangodb3)
+#   iter_data   the systemd services from installers/iter_data/linux (iter-data + arangodb3),
+#               or installers/iter_data/linux_aws on Amazon Linux
 #   iter_engine the systemd service from installers/iter_engine/linux (linux_wsl under WSL),
 #               or the launchd agent from installers/iter_engine/macos
 # Docker installs (containers iter / iter-engine) are only reported: rerun their
@@ -88,13 +89,15 @@ trap '[ -z "$KEEPALIVE" ] || kill "$KEEPALIVE" 2>/dev/null; rm -rf "$TMP"' EXIT
 # ------------------------------------------------------------------ this machine
 OS="$(uname -s)"
 case "$(uname -m)" in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; *) die "no iter build for $(uname -m)" ;; esac
-DATA_BIN="" ENGINE_BIN="" ENGINE_DIR="" PORT=8400
+DATA_BIN="" ENGINE_BIN="" ENGINE_DIR="" DATA_DIR=linux PORT=8400
 case "$OS" in
   Linux)
     # each unit's ExecStart starts with the binary (the engine's may be the PATH link)
     if [ -e /etc/systemd/system/iter-data.service ]; then
       DATA_BIN="$(sed -n 's|^ExecStart=\(/[^ ]*\) .*|\1|p' /etc/systemd/system/iter-data.service | head -1)"
       PORT="$(sed -n 's/.*--listen [0-9.]*:\([0-9]*\).*/\1/p' /etc/systemd/system/iter-data.service | head -1)"; PORT="${PORT:-8400}"
+      # Amazon Linux has its own installer (the Debian/Ubuntu/Arch one refuses it)
+      if grep -qs '^ID="\{0,1\}amzn' /etc/os-release; then DATA_DIR=linux_aws; fi
     fi
     if [ -e /etc/systemd/system/iter-engine.service ]; then
       ENGINE_BIN="$(sed -n 's|^ExecStart=\(/[^ ]*\) .*|\1|p' /etc/systemd/system/iter-engine.service | head -1)"
@@ -181,10 +184,10 @@ fetch() { # fetch FOLDER -> $TMP/FOLDER/install.sh
   bash -n "$TMP/$1/install.sh" || die "installers/$1/install.sh at $VERSION does not parse"
   ok "installers/$1/install.sh"
 }
-[ $DO_DATA = 0 ] || fetch iter_data/linux
+[ $DO_DATA = 0 ] || fetch "iter_data/$DATA_DIR"
 [ $DO_ENGINE = 0 ] || fetch "iter_engine/$ENGINE_DIR"
 # piped from curl, our stdin is this script: the installers read the terminal, never it
-ENGINE_SH="$TMP/iter_engine/$ENGINE_DIR/install.sh" DATA_SH="$TMP/iter_data/linux/install.sh"
+ENGINE_SH="$TMP/iter_engine/$ENGINE_DIR/install.sh" DATA_SH="$TMP/iter_data/$DATA_DIR/install.sh"
 
 # ------------------------------------------------------------------ sudo + may the engine restart?
 say "4. before anything changes"
@@ -261,7 +264,7 @@ if [ -n "$DATA_BIN" ]; then
   if curl -fsS --max-time 5 -o /dev/null "https://127.0.0.1:$PORT/health" 2>/dev/null; then trusted=1; ok "https://127.0.0.1:$PORT answers as a trusted site"
   elif curl -fsSk --max-time 5 -o /dev/null "https://127.0.0.1:$PORT/health" 2>/dev/null; then
     warn "https://127.0.0.1:$PORT answers, but this machine does not trust its certificate yet"
-    next "Browsers here do not trust iter_data's certificate: rerun this script with --full (or iter_data/linux/install.sh), then restart the browser."
+    next "Browsers here do not trust iter_data's certificate: rerun this script with --full (or iter_data/$DATA_DIR/install.sh), then restart the browser."
   fi
   # an iter_data from before its local CA keeps its self-signed certificate until it is switched
   local st="${DATA_BIN%/bin/iter_data}/state"

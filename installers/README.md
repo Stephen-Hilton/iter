@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 
 It finds iter_data (`iter-data` systemd unit) and the engine (`iter-engine` unit, or launchd
 `com.iter.engine`), skips a program whose binary already matches the release's `SHA256SUMS`, and fetches each
-program's `install.sh` from that release's tag. It asks for sudo once. Before it changes anything it runs the
+program's `install.sh` from that release's tag (iter_data: `iter_data/linux_aws` on Amazon Linux, else `iter_data/linux`; the engine: `linux_wsl` under WSL). It asks for sudo once. Before it changes anything it runs the
 engine's `update` as a dry run, which refuses while the engine runs work: on a terminal it asks, otherwise
 `--yes` restarts it anyway. Then it backs up iter_data (`install.sh backup`, `--no-backup` skips it), reruns
 iter_data's `install.sh` (secrets, database, TLS certificate, port and memory cap are kept), and runs the
