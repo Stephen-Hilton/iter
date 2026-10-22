@@ -658,6 +658,13 @@ pub(crate) async fn remove_docs(a: &ArangoBackend, project: &str, ids: &[String]
 async fn doc_resummarize(u: AuthUser, State(st): Ctx, Path((name, id)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
     u.require_writer()?;
     let a = arango(st.store.as_ref())?;
+    // an unknown id is a 404, never "0 chunks reset"
+    a.aql("LET d = DOCUMENT(CONCAT('rag_doc/', @k)) FILTER d != null AND d.project == @p RETURN d._key", json!({"k": id, "p": name}))
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| not_found(format!("no GraphRAG document {id}")))?;
     let n = a
         .aql_retry(
             "FOR c IN rag_chunk FILTER c.project == @p AND c.doc == @d
