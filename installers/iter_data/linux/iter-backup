@@ -75,7 +75,11 @@ fi
 
 ts=$(date -u +%Y%m%d-%H%M%SZ)
 check_cert
-arangodump "${ARGS[@]}" --threads 2 --output-directory "$tmp/db"
+# --parallel-dump false (2026-10-22): 3.12's server-side parallel dump buffers batches in a
+# fixed memory reserve; GraphRAG chunks (two 384-float vectors each) filled it on a 4 GB host,
+# so every batch waited ("memory reserve capacity for dump is temporarily exceeded") until the
+# 20-minute request timeout and the backup failed silently. The serial dump has no such reserve.
+arangodump "${ARGS[@]}" --threads 2 --parallel-dump false --output-directory "$tmp/db"
 cp -a "$D/config/data.env" "$tmp/"
 for f in iter_data.secret engine_session.secret tls.crt tls.key custom-tls.crt custom-tls.key .env; do
   if [ -f "$D/state/$f" ]; then cp -a "$D/state/$f" "$tmp/"; fi
