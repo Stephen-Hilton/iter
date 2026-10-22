@@ -25,14 +25,15 @@ ArangoDB Community Edition 3.12, and only ArangoDB. It stores documents (work it
 
 ### How do I install and start iter?
 
-From the root of the repository:
+With the installers in `installers/` of the iter repository: one script per program and platform, each downloading the prebuilt binary from the latest GitHub Release (no compiler needed). For the server:
 
 ```bash
-./deploy.sh docker   # the all-in-one container: ArangoDB CE + iter_data on http://127.0.0.1:8400
-./deploy.sh local    # native iter_data (release build) against a dev ArangoDB container on :8529
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_data/linux/install.sh | bash
 ```
 
-`docker` is the normal way. It builds the Linux iter_data binary, downloads the embedding model (`installers/fetch_model.sh`) and runs `installers/iter_data/docker/install.sh`, which writes `~/.iter/iter.docker.env` with the admin password and token secret from your `.env`, builds the image and starts it with `docker compose`, then waits for `/health` to answer `"ok":true`. `local` builds `iter_data` and `iter_engine` into `bin/`, starts or reuses the `iter-arango-dev` container on 127.0.0.1:8529, and runs iter_data natively — the fast loop for development.
+`iter_data/linux` is Debian, Ubuntu or Arch; `iter_data/linux_aws` is EC2 Amazon Linux 2023; `iter_data/aws` stands up a whole AWS stack (CloudFormation); `iter_data/docker` is the all-in-one container (ArangoDB + iter_data) on any Docker host. Each installs ArangoDB beside iter_data (or uses yours with `--arango-url`), serves HTTPS on port 8400, prints the first admin password and the server certificate's fingerprint once, and takes `--help` and `--dry-run`. `installers/upgrade_iter.sh` later upgrades a machine to a newer release.
+
+For development, from the repository: `./deploy.sh docker` builds and starts the container locally, and `./deploy.sh local` runs a release build of iter_data against a dev ArangoDB on :8529.
 
 ### Which ports does iter use?
 
@@ -58,7 +59,7 @@ The `.env` loader reads plain `KEY=VALUE` lines, never runs them through a shell
 
 ### Where is my data stored?
 
-In the container, one host folder mounted at `/var/lib/iter_data` (`ITER_DATA_DIR`, default `~/.iter/iter_data`): `arango/` (the database), `arango-apps/` (Arango's app folder) and `iter/` (iter_data's secret and .env files). With `./deploy.sh local`: the Docker volume `iter-arango-dev`, plus `run/iter_data.secret`, `run/iter_data.log` and `run/iter_data.pid`.
+In one folder, the **iter dir**: `/opt/iter` by default (`--iter-dir` changes it; the AWS stack uses `/data/iter`, the docker installers `~/iter` under Docker Desktop). iter_data keeps its files in `<iter dir>/iter_data/`: `config/data.env` (secrets), `state/` (its signing secret and TLS certificate), `arango/data/` (the database), `backups/` (a backup every 6 hours) and `models/` (the embedding model). An engine keeps its own in `<iter dir>/iter_engine/`: `config/`, `secrets/` (its key and the account tokens), `models/` and `logs/`.
 
 ### Does the container run the agents?
 
@@ -66,55 +67,34 @@ No. The container runs ArangoDB and iter_data only. Engines — and the Claude C
 
 ### Can I run iter on a server or in the cloud?
 
-Yes. The installers in `installers/iter_data/` (docker, linux, or linux_aws for EC2 Amazon Linux 2023) run on a small VM or an EC2 instance. Engines can run anywhere that can reach the server's URL; `installers/iter_engine/` installs one on a Linux host.
+Yes. The iter_data installers run on a small VM or an EC2 instance (`installers/iter_data/linux_aws`, or `installers/iter_data/aws` for the whole stack), and engines run on any Linux, macOS or Windows machine (native or in WSL2 or Docker) that can reach the server's `https://` URL (`installers/iter_engine/`).
 
 ## Creating a new project
 
 ### How do I create a new project?
 
-1. **Make the project's repository** (or pick an existing one) and clone it onto the machine that will run the engine. A git repository with a remote is expected: the engine pulls before and pushes after every run. Without a remote it commits locally; without `.git` it skips git.
-2. **Run the wizard.** Open the web page, go to **Intro** and choose the new-project wizard (the last slide of either track). It asks for the project (name, description, git URL, checkout path), the Claude accounts and limits, and the engine name and data server URL. An admin's **Create project** creates the project record (state Stopped) and the engine record, then mints the engine's login token and shows it once.
-3. **Scaffold the checkout.** In the checkout, run the `init` command the wizard shows:
-
-   ```bash
-   iter_engine cli init --name my-project --data-url http://127.0.0.1:8400 --engine Engine01 --desc "What the project is"
-   ```
-
-   It writes `main.iter.md`, `.iter/config.json`, `.iter/.gitignore`, `reqs/<slug>.bizreq.iter.md`, `reqs/<slug>.techreq.iter.md`, and the folders `interfaces/` and `usecases/`. Existing files are kept unless you add `--force`. Commit these files.
-4. **Give the engine its secrets.** Create `.env` in the checkout (keep it out of git) with the engine token and one token per Claude account:
-
-   ```bash
-   ITER_ENGINE_TOKEN=<the token the wizard showed>
-   DEV1_TOKEN=<run 'claude setup-token' while logged in to that account>
-   ```
-
-5. **Start the engine** in the checkout: `iter_engine --config .iter/config.json`.
-6. **Start the project.** In the Work queue, press **Running** for the project. The engine only starts work while the project is Running.
+1. **Run the wizard.** In the web page, go to **Intro** and choose **Design a new project**. Give the name, an optional git remote, the file-naming rule and a daily cost cap. It creates a **designed** project (state Stopped) whose project node and default requirements appear in the Project graph.
+2. **Design it** in the Project graph: **+ Node** adds contexts, containers, components, connections, tests, requirements, use cases and actors; draw edges between them. Nothing touches a disk yet.
+3. **Have an engine running** on the machine that will hold the code (once per machine; see "How do I install the engine?"). The wizard shows the install command for each platform and watches for the engine to check in.
+4. **Build.** The Project graph's **Build…** button: pick the engine and a folder. The engine creates the folder, runs `git init`, writes every node file and commits; optionally the **plan** agent is queued to build the project from its design. For a repository that already exists on that machine, draw a **serves** edge from the engine to the project in the Settings graph instead and set its `topdir` (the checkout's folder); `iter_engine cli init --name <project>` in the checkout writes the project node and three empty requirements if it has none.
+5. **Connect accounts.** In the Settings graph, draw a **bills** edge from a Claude account to the project (its switch % and stop % live on that edge). The account's token goes on the engine machine (see "How do Claude accounts and tokens work?").
+6. **Start the project.** In the Work queue, press **Running**. The engine only starts work while the project is Running.
 
 ### Can I create a project without the web page?
 
-Yes, with the API and an admin token. `PUT /api/projects/<name>` with a project record, `PUT /api/engines/<engine>` with an engine record whose `projects` maps the project to `{"dirs":{"topdir":"<checkout path>"}}`, `PUT /api/users/<engine>` with `{"role":"engine"}`, and `POST /api/users/<engine>/token` with `{"ttl_days":365}` for the engine token. The wizard's Review step shows the exact request bodies.
+Yes, with the API and an admin token: `PUT /api/projects/<name>` with a project record (state `Stopped`); the engine's key with `POST /api/keys` `{"public_key":"iter_…","engine":"<engine>"}` (the public key from `iter_engine key show` on that machine; the installers ask for this); the checkout with `POST /api/settings/edges` `{"from":"iter_engine:<engine>","to":"project:<name>","settings":{"topdir":"<checkout path>"}}`; an account with `POST /api/settings/nodes` `{"type":"account","name":"<account>","settings":{"provider":"claude","token_envar":"DEV1_TOKEN"}}` and a bills edge `{"from":"account:<account>","to":"project:<name>","settings":{"order":1,"switch":80,"stop":95}}`. Then set the project's state to `Running`.
 
 ### What does a project record contain?
 
 Name, description, state (Running, Draining or Stopped), git repository, the agent ladder (`maxagents`, for example `{">98%":0,">95%":1,">90%":2,"else":4}`), a daily cost cap (`maxdailycost`), per-agent overrides (`agents`), the failure policy (`failure`: attempts, first retry, backoff), the engines that serve it, the Claude accounts, `commit_extra_paths`, `pinned_tags`, dedup and cluster-restart settings, and `session_chain_max`. Edit it from the gear next to the project in the left panel (admins can save).
 
-### What does `iter init` write in `.iter/config.json`?
+### What does `iter init` write?
 
-```json
-{
-  "data_url": "http://127.0.0.1:8400",
-  "token_envar": "ITER_ENGINE_TOKEN",
-  "engine_name": "Engine01",
-  "env_file": "./.env"
-}
-```
+The project node `global/<slug>.project.iter.md` and three requirement files to fill in, `global/requirements/<slug>_philosophy.philosophy.iter.md`, `…_first_business_requirement.bizreq.iter.md` and `…_first_technical_requirement.techreq.iter.md`, each already in the node-file standard. Existing files are kept unless you add `--force`. It writes no engine configuration: an engine learns its projects, folders and accounts from iter_data (the Settings graph's serves and bills edges).
 
-`data_url` is where iter_data answers; `token_envar` names the environment variable holding the engine token; `env_file` is where the engine reads that token and the account tokens from.
+### What goes in the project node (`*.project.iter.md`)?
 
-### What goes in `main.iter.md`?
-
-The project's root node: `id`, `projectname`, `projectdescription`, `globalscandirs` (where node files are found), `globalinterfacedir`, `globalusecasedir`, `globalcontextfiles` (requirement files every agent reads) and `children.codenodes` (the top-level contexts of the map). Optionally `actorsfile` (the actors file, default `actors.yaml` at the top of the checkout). The body describes the project in prose.
+The project's root node, one per checkout (`global/<slug>.project.iter.md` from `iter init`): `id`, `name`, `desc` (one paragraph on the project), `creator`, `teststate`, `file_naming` (how a new node file is named when its name is taken), `gitrepo`, `scandirs` (where node files are found) and `children`: `codenodes` (the top-level contexts of the map), `tests`, `reqs` (requirement files every agent reads) and `codedirs`. The body describes the project in prose.
 
 ### Why is my project not starting any work?
 
@@ -124,18 +104,20 @@ Check, in order: the project is **Running** (not Stopped or Draining); an engine
 
 ### How do I install the engine?
 
-Build it from the repository: `cargo build --release -p iter_engine` gives `target/release/iter_engine` (`./deploy.sh local` also copies it to `bin/`). The engine machine also needs `git` (with push credentials for your repository), `bash`, and the `claude` command line (Claude Code) on the PATH.
+With its installer, once per machine (one engine serves every project connected to it):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash   # Debian, Ubuntu, Arch
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/macos/install.sh | bash   # macOS
+```
+
+Windows: `installers/iter_engine/windows/install.ps1` (or `linux_wsl` inside WSL2); any Docker host: `installers/iter_engine/docker`. The script asks for the server's `https://` URL and the fingerprint of its certificate (the iter_data installer printed it; the web page's 🔑 Engine keys screen shows it), installs `git`, `jq` and the `claude` command line when missing, downloads the engine and the embedding model, and makes the engine's key: paste the public key it prints into **Engine keys** with the engine's name, and the script starts the engine once the server accepts it. It installs a service (systemd `iter-engine`, launchd `com.iter.engine` on macOS, a logon task on Windows), so the engine runs at boot or login and restarts if it stops.
 
 ### How do I start an engine?
 
-In the project's checkout:
+The installer starts it as a service, and the service starts it again after a reboot or a crash. `install.sh status`, `install.sh logs` and `install.sh update` (in the installer's folder) show its state, follow its log and upgrade it. By hand, `iter_engine --data-url https://<server>:8400` runs one in the foreground (one engine per machine: stop the service first); `--ticks 20` runs 20 ticks, finishes the work it started and exits.
 
-```bash
-iter_engine --config .iter/config.json            # run until stopped
-iter_engine --config .iter/config.json --ticks 20 # run 20 ticks, finish running work, exit
-```
-
-The first log line names the server and its database backend. The server URL comes from `--data-url`, else `ITER_DATA_URL`, else `data_url` in the config. Without an engine token the engine exits with a message saying how to mint one. On a server, run it under systemd with `Restart=always`.
+The first log line names the engine, its version and the server. An engine signs in only with its own key (`<iter dir>/iter_engine/secrets/engine.key`); without a key it says to run `iter_engine key new` and add the public key in Engine keys.
 
 ### What does an engine do?
 
@@ -143,7 +125,7 @@ Every tick (5 seconds by default) the engine: renews the leases on its running i
 
 ### Can several engines serve one project?
 
-Yes. List them in the project's `engines` and give each engine record the project's checkout path. Claims are versioned writes (only one engine wins an item), locks are central, schedules and graph edits are claimed the same way, and engines avoid an account another live engine is using.
+Yes. Draw a serves edge from each engine to the project in the Settings graph, each with that machine's checkout folder (`topdir`). Claims are versioned writes (only one engine wins an item), locks are central, schedules and graph edits are claimed the same way, and engines avoid an account another live engine is using.
 
 ### How many agents run at once?
 
@@ -151,7 +133,7 @@ The project's `maxagents` ladder sets the cap from the current account usage: th
 
 ### How do Claude accounts and tokens work?
 
-The project lists accounts by name and the environment variable that holds each token (`token_envar`), with a `switch` and a `stop` usage percentage. The tokens themselves live in the engine's `.env` (make one with `claude setup-token`). Each session gets its account's token as `CLAUDE_CODE_OAUTH_TOKEN`; `ANTHROPIC_API_KEY` is removed from the session's environment, because it would bill API credits instead. The engine moves to the next account at `switch`, holds at `stop`, never uses an account whose token is missing, and re-reads `.env` without a restart. With no accounts configured, the machine's own Claude login is used.
+An account is a node in the Settings graph: its name, provider and `token_envar` (the environment variable that holds its token, for example `DEV1_TOKEN`). A **bills** edge from the account to a project lets that project use it, with a `switch` and a `stop` usage percentage and an order. The token itself stays on the engine machine: in `<iter dir>/iter_engine/secrets/.env` (make one with `claude setup-token`; the installer's accounts step asks for it), or from a secret store with `--secrets-command`, and environment variables the service is started with win over both. Each session gets its account's token as `CLAUDE_CODE_OAUTH_TOKEN`; `ANTHROPIC_API_KEY` is removed from the session's environment, because it would bill API credits instead. The engine moves to the next account at `switch`, holds at `stop`, never uses an account whose token is missing, and re-reads the tokens every tick.
 
 ### What does "Suspended" mean on an engine?
 
@@ -465,9 +447,9 @@ Only browser-based clients (a page on another site, like the MCP Inspector) are 
 - **Tests:** `runtests --group <label> [--broken|--fixed]`, `sweep [--install-schedule --every 4h]`.
 - **GraphRAG:** `rag sync [--force]`.
 
-### Which engine flags are there besides `--config`?
+### Which engine flags are there?
 
-`--data-url`, `--ticks N`, `--accounts` (which account tokens are set), `--probe` (live usage per account), `--adduser <name>` (an approval key), `--approve <id>` (sign an approval), `--doc <id> --text|--file` and `--question-widget <file>` (check a question widget).
+`--data-url`, `--name` (default: the machine's short hostname), `--key-file`, `--env-file`, `--secrets-command` / `--secrets-every`, `--ticks N`, `--accounts` (which account tokens are set), `--probe` (live usage per account), `--adduser <name>` (an approval key), `--approve <id>` (sign an approval), `--doc <id> --text|--file`, `--question-widget <file>` (check a question widget) and `--version`. Key commands: `iter_engine key new | show | rotate | status | trust`.
 
 ## Settings and customisation
 
@@ -489,9 +471,9 @@ The agent's `promptbody`, then the shared tooling, the capability index, the pro
 
 ## Troubleshooting
 
-### The engine says "no engine token". What do I do?
+### The engine cannot sign in. What do I do?
 
-Mint one as an admin (`POST /api/users/<engine>/token`, or the wizard's Set up step) and put it in the checkout's `.env` as `ITER_ENGINE_TOKEN=<token>`, or in the variable `token_envar` names.
+Engines have no token: each signs in with its own key. "no engine key" means the machine has none yet: run `iter_engine key new` (or the installer), then add the public key it prints (`iter_engine key show`) in the web page's 🔑 Engine keys screen with the engine's name. A key that is not accepted yet, or was revoked, shows in `iter_engine key status`. "the engine saw a TLS certificate that is not iter_data's" means the URL answers with another certificate than the one pinned: use the URL the engine was set up with, or pin the new one with `iter_engine key trust --fingerprint …`.
 
 ### An item keeps bouncing at the close gate. Why?
 
@@ -507,7 +489,7 @@ Run `installers/fetch_model.sh` (or `./deploy.sh docker`, which runs it), or poi
 
 ### Where are the logs?
 
-The container: `docker logs iter`. Native iter_data: `run/iter_data.log`. Engines log to their console (or journal under systemd). Each work item's history in the Work queue holds its runs, questions, verdicts and costs.
+iter_data: `journalctl -u iter-data` on Linux, `docker logs iter` for the container. An engine: `<iter dir>/iter_engine/logs/engine.log` and `engine.err.log` (`install.sh logs` follows them). Each work item's history in the Work queue holds its runs, questions, verdicts and costs.
 
 ## Words you will meet
 

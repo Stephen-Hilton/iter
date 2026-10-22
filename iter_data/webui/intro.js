@@ -134,7 +134,7 @@
       <path class="intro-c-api" d="M586,340 C650,340 700,260 700,130" marker-start="url(#intro-cah-b)" marker-end="url(#intro-cah-b)"/>
       <text x="708" y="222" class="intro-c-wire intro-c-wireb">API</text>
       <text x="708" y="238" class="intro-v-cap">${t ? "" : "work &amp; results"}</text>
-      ${t ? `<text x="708" y="238" class="intro-c-note">HTTPS JSON</text><text x="708" y="252" class="intro-c-note">engine token</text>` : ""}
+      ${t ? `<text x="708" y="238" class="intro-c-note">HTTPS JSON</text><text x="708" y="252" class="intro-c-note">engine key</text>` : ""}
 
       ${b ? tabs(316, 108, 296, ["agent mgmt", "repo mgmt", "account mgmt", "verification"], "intro-c-tab-e") : ""}
       <g class="intro-c-eng"><rect x="420" y="290" width="160" height="106" rx="12"/>
@@ -273,11 +273,11 @@
     return `<div class="intro-arch">
       <div class="intro-node intro-web"><span class="intro-role">the looks</span><h4>Web page</h4>
         <p>${t ? "One page (<code>iter_data/webui/</code>), plain JavaScript, built into the iter_data binary." : "Where people watch the work, answer questions and set limits."}</p></div>
-      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "HTTPS JSON<br>+ bearer token" : "reads &amp;<br>steers"}</div>
+      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "HTTPS JSON<br>+ login token" : "reads &amp;<br>steers"}</div>
       <div class="intro-node intro-data"><span class="intro-role">the brains</span><h4>Data server</h4>
         <p>${t ? "axum HTTP API + MCP. The only thing that touches the database; the lock authority." : "Holds every work item, reservation, agent, schedule, cost record and the map of the program."}</p>
         <div class="intro-db">${t ? "ArangoDB" : "Database"} <small>${t ? "documents, change counters, the map as a graph, GraphRAG vectors" : "in the same container"}</small></div></div>
-      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "same API<br>engine token" : "hands out work,<br>records results"}</div>
+      <div class="intro-wire"><span class="intro-arr">&#8646;</span>${t ? "same API<br>engine key" : "hands out work,<br>records results"}</div>
       <div class="intro-engs">
         ${eng(1, chip("intro-ok", "agent: code") + chip("intro-ok", "agent: plan"))}
         ${eng(2, chip("intro-ok", "agent: code") + chip("intro-d", "free slot"))}
@@ -322,7 +322,7 @@
         </div>
       </div>
       ${t ? `<div class="intro-ctx intro-ctx-ship"><div class="intro-ctx-h"><span class="intro-role">context</span><b>Build, ship and prove</b></div>
-        <div class="intro-small"><code>docker/</code> the all-in-one image (ArangoDB + iter_data) · <code>deploy.sh</code> docker | local · <code>test/e2e.sh</code> a real server and engine end to end</div></div>` : ""}
+        <div class="intro-small"><code>installers/</code> one install script per program and platform, prebuilt binaries from GitHub Releases · <code>deploy.sh</code> docker | local for development · <code>test/e2e.sh</code> a real server and engine end to end</div></div>` : ""}
     </div>`;
   }
 
@@ -604,7 +604,7 @@
       field("engine", "Engine name (optional)", inp("engine", d.engine, 'list="intro-englist" placeholder="defaults to the machine\'s short hostname" autocomplete="off"'),
         `The name the script asks for; used below to watch for its check-in. ${S.engines.length ? "Registered: " + S.engines.map(x => esc(x.id || x.name) + (x.id && x.name && x.name !== x.id ? " (" + esc(x.name) + ")" : "")).join(", ") + "." : "No engine is registered yet."}`) +
       `<datalist id="intro-englist">${S.engines.map(x => `<option value="${esc(x.id || x.name)}">`).join("")}</datalist>`;
-    h += `<p class="intro-dim intro-small">The script installs what is missing, builds the engine and makes its key (<code>iter_engine key new</code>; the private key stays on the machine). Paste the public key it prints into <b>Engine keys</b> with the engine's name; the script sees it accepted and starts the engine.</p>` +
+    h += `<p class="intro-dim intro-small">The script installs what is missing, downloads the engine and makes its key (<code>iter_engine key new</code>; the private key stays on the machine). Paste the public key it prints into <b>Engine keys</b> with the engine's name; the script sees it accepted and starts the engine.</p>` +
       (admin ? `<div class="intro-actions"><button class="intro-btn" data-wkeys="1">Open Engine keys</button></div>` : `<div class="intro-note">An admin adds the public key in Engine keys (the key button in the header).</div>`);
     h += `<h4>Wait for it to check in</h4><div id="intro-engwatch">${watchHtml()}</div>
       <p class="intro-dim intro-small">Then connect it: <b>Build</b> from the Project graph (a new repository), or, for a repository that already exists on that machine, draw a <b>serves</b> edge from the engine to the project in the settings graph and set its <code>topdir</code>.</p>`;
