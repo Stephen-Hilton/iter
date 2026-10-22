@@ -27,3 +27,8 @@ installers/dist/
 
 # personal notes
 \!scratch.md
+
+# local secrets linked in from elsewhere (never commit)
+.pdy-dev.env
+*.env
+!**/*.example.env
