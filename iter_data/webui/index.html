@@ -750,14 +750,18 @@ const acctTitle=a=>`${nameOf("account",a.name)}: 5h ${pct(a.five_hour_pct)} rese
    with POST /api/switch (the server and accounts by an admin, an engine also by its owner). ---- */
 let serverRow={active:true};
 const swOn=r=>!(r&&r.active===false);
-function swHtml(target,on,can,label){
+function swHtml(target,on,can,label,draining){
+  /* switched off with work still running (an engine's last heartbeat): Draining… until it finishes, as a project shows */
+  if(!on&&draining)return `<span class="seg sw" data-sw="${esc(target)}" data-label="${esc(label)}" title="${esc(label)}: finishing ${draining} running item${draining>1?"s":""}; Stopped once drained">`
+    +`<button class="Draining on" disabled>Draining…</button>`
+    +`<button class="Running" data-on="1"${can?"":" disabled"}>Active</button></span>`;
   return `<span class="seg sw" data-sw="${esc(target)}" data-label="${esc(label)}" title="${esc(label)}: ${on?"Active":"Stopped — nothing new starts"}${can?"":" (an admin switches it)"}">`
     +`<button class="Running ${on?"on":""}" data-on="1"${on||!can?" disabled":""}>Active</button>`
     +`<button class="Stopped ${on?"":"on"}" data-on="0"${!on||!can?" disabled":""}>Stopped</button></span>`;
 }
 function projSwHtml(p,can){
   const st=p.state||"Running",pid=esc(rid(p)),d=can?"":" disabled";
-  if(st==="Draining")return `<span class="seg sw" data-psw="${pid}"><button class="Draining on" disabled title="finishing running work; Stopped once drained">Stopping…</button>`
+  if(st==="Draining")return `<span class="seg sw" data-psw="${pid}"><button class="Draining on" disabled title="finishing running work; Stopped once drained">Draining…</button>`
     +`<button class="Running" data-st="Running"${d}>Active</button><button class="Stopped" data-st="Stopped"${d} title="stop now without waiting for running work">force</button></span>`;
   const on=st==="Running";
   return `<span class="seg sw" data-psw="${pid}" title="${esc(rname(p))}: ${on?"Active":"Stopped — nothing new starts"}">`
@@ -907,7 +911,7 @@ async function load(){
     const test=e.test_requested?`<span class="kv" data-testing="${esc(rid(e))}">testing…</span>`
       :t?`<span class="kv" title="${esc(t.error||t.text||"")}">${t.ok?"✓":"✗"} ${esc(fmtTs(t.ts))}${t.ms?" "+(t.ms/1000).toFixed(1)+"s":""}${t.error?" "+esc(String(t.error).slice(0,40)):""}</span>`:"";
     const eOn=swOn(e),canEng=isAdmin()||(!!me&&e.user===me);
-    const sw=`<div class="swrow">${swHtml("iter_engine:"+rid(e),eOn,canEng,"engine "+rname(e))}${eOn&&!srvOn?`<span class="swnote">idle: server is Stopped</span>`:""}</div>`;
+    const sw=`<div class="swrow">${swHtml("iter_engine:"+rid(e),eOn,canEng,"engine "+rname(e),alive?(e.running||0):0)}${eOn&&!srvOn?`<span class="swnote">idle: server is Stopped</span>`:""}</div>`;
     return `<div class="eng"><button class="gear" data-gear="engine" data-name="${esc(rid(e))}" title="engine settings">⚙</button><span class="dot ${alive?"on":"off"}"></span><b title="id: ${esc(rid(e))}">${esc(rname(e))}</b>${holding?` <span title="${esc(e.hold)}">Suspended, ${esc(holdText(e.hold))}</span>`:(e.state&&e.state!=="Running"?" "+esc(e.state):"")}${alive?"":" (offline)"}${acctLabel}${sw}${usage.replace(/^<br>/,"")}
       <br>seen: ${esc(fmtTs(e.last_seen)||"never")}${e.host?" · "+esc(e.host):""}
       <br>serves: ${servesOf(e).map(p=>`<a class="sgl" data-sgraph="project:${esc(p)}">${esc(nameOf("project",p))}</a>`).join(", ")||"—"} <a class="sgl" data-sgraph="iter_engine:${esc(rid(e))}" title="this engine in the settings graph">↗</a>
