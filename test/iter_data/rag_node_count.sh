@@ -21,6 +21,8 @@ url="${ITER_DATA_URL:-https://127.0.0.1:8400}"
 tok="${ITER_ENGINE_TOKEN:-${ITER_TOKEN:-}}"
 name="${ITER_TEST_NODE_NAME:-GraphRAG node-file coverage}"; id="${ITER_TEST_NODE_ID:-}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
+# the answers go through files: a big project's map is too long for the environment
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 not_run() {
   echo "$1"
   printf '{"name":"%s","id":"%s","overall_success":false,"normal":{"total":0,"pass":0,"err":0},"longtail":{"total":0,"pass":0,"err":0},"failure":{"total":0,"pass":0,"err":0}}\n' "$name" "$id"
@@ -31,13 +33,13 @@ not_run() {
 # shellcheck disable=SC2086
 get() { curl -sf ${ITER_CURL_OPTS:-} -H "authorization: Bearer $tok" "$url$1"; }
 enc="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$project")"
-graph="$(get "/api/projects/$enc/graph")" || not_run "could not read the map of '$project' at $url"
-settings="$(get "/api/projects/$enc/rag/settings")" || settings='{}'
-docs="$(get "/api/projects/$enc/rag/docs?kind=node")" || not_run "could not read the GraphRAG documents of '$project'"
+get "/api/projects/$enc/graph" > "$tmp/graph" || not_run "could not read the map of '$project' at $url"
+get "/api/projects/$enc/rag/settings" > "$tmp/settings" || echo '{}' > "$tmp/settings"
+get "/api/projects/$enc/rag/docs?kind=node" > "$tmp/docs" || not_run "could not read the GraphRAG documents of '$project'"
 repo="$(cd "$root" && git ls-files '*.iter.md' 2>/dev/null | wc -l | tr -d ' ')"
-GRAPH="$graph" SETTINGS="$settings" DOCS="$docs" REPO="$repo" NAME="$name" ID="$id" PROJECT="$project" python3 - <<'PY'
+DIR="$tmp" REPO="$repo" NAME="$name" ID="$id" PROJECT="$project" python3 - <<'PY'
 import json, os, sys
-graph, settings, docs = (json.loads(os.environ[k]) for k in ("GRAPH", "SETTINGS", "DOCS"))
+graph, settings, docs = (json.load(open(os.path.join(os.environ["DIR"], k))) for k in ("graph", "settings", "docs"))
 types = settings.get("node_types") or []
 want = sorted({n["path"] for n in graph.get("nodes", [])
                if str(n.get("path", "")).endswith(".iter.md") and (not types or n.get("nodetype") in types)})
