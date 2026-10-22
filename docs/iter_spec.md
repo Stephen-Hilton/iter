@@ -343,7 +343,7 @@ caps (max agents, budget, account choice) stay in the engine and are checked **b
   parent (an agent's own item; for a person, an open item of the project the body names) or else the
   principal; a sent value that is replaced is named in `warnings`. `PUT …/workitems/{id}` keeps the stored
   `createdby` and `requestedby`. Detail rows carry `by` (the token subject) and, for an agent, `by_workid`.
-  `GET …/whoami` returns the principal; `POST …/workitems/{id}/reject {reason}` writes "rejected by
+  `GET …/whoami` returns the principal and the token's end (`token_expires`, UTC; `token_days_left`); `POST …/workitems/{id}/reject {reason}` writes "rejected by
   <principal>: <reason>" and parks the item with `lasterror`. Members still see every item of the project.
 - Errors: every 5xx, and every 401 from token verification, answers `{"error": "<generic>", "error_id":
   "e-<12 hex>"}`; the detail is logged once with that id, the method and the path (`errid.rs`). 4xx messages
@@ -420,8 +420,23 @@ Remove interface nodetypes. Add tools `graph_node_create`, `graph_node_update`, 
 `testlogs`, `settings_graph` (read; admin). Every tool requires a project (arg or `X-Iter-Project`) and goes
 through the same authz.
 
+Tools: 34 for every token, and 13 more for a person's token only (2026-10-21, `mcp_docs::PEOPLE_ONLY`): the
+webui's work queue controls and GraphRAG upkeep, for a person or an agent acting as one (e.g. a claude.ai
+connector signed in as a user) — `workitem_answer` (fills the newest question form, checks each choice is
+one of its options, queues the item and clears `needs_approval`), `workitem_set_state` (`POST …/state`;
+`queued` also clears `needs_approval`, `run_now` sets `run_now`), `workitem_stop` (`stop_requested`),
+`workitem_priority`, `workitem_reopen`, `workitem_edit` (record + request row 0; refused in progress),
+`workitem_clone` (`copy` | `followup` | `run_now`), `workitem_duplicate_of`, `workitem_explain`,
+`workitem_delete`, `rag_delete_document`, `rag_resummarize_document` (404 for an unknown document), `whoami`;
+and `workitem_create` takes `state` (queued | parked | paused) from a person. Engine sessions — iter's own
+agents, who see only their item — get none of them in `tools/list`, and calling one is a JSON-RPC error.
+Every call goes through the same API routes as the webui's controls, so who acted is the person.
+Tokens: `POST /api/users/{name}/token {ttl_days}` mints a long-lived token for an admin (anyone) or for the
+person themself (1–365 days; never for an engine); the webui's own settings form has the button. It carries
+the person's role and ends at `ttl_days` or when their password changes (`tokenver`).
+
 Hardening (2026-10-21, docs/build_plans/mcp_graphrag_hardening.md):
-- **Tool documentation.** Each of the 34 tools' `description` has six labelled parts in order — `Use:`,
+- **Tool documentation.** Each tool's `description` has six labelled parts in order — `Use:`,
   `Arguments:` (generated from the input schema), `Example:` (one complete arguments object), `Returns:`,
   `Errors:`, `Limits:` (`iter_data/src/mcp_docs.rs`). Every input property has a description and, where one
   exists, a JSON Schema `default`; every tool declares an `outputSchema`, and every result is an object sent as

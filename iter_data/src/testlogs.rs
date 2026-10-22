@@ -118,7 +118,7 @@ async fn testresult(user: AuthUser, State(st): Ctx, Path((name, id)): Path<(Stri
                 r.normal.pass, r.normal.total, r.longtail.pass, r.longtail.total, r.failure.pass, r.failure.total, totals.err,
                 failing.join("\n")),
         });
-        let who = AuthUser { sub: user.sub.clone(), role: user.role.clone() };
+        let who = AuthUser { sub: user.sub.clone(), role: user.role.clone(), exp: user.exp };
         if let Ok(Json(v)) = crate::api::workitem_create(who, State(st.clone()), Path(name.clone()), crate::api::WorkidHeader(String::new()), Json(item)).await {
             filed = json!({"id": v["id"], "already_open": v.get("already_open").cloned().unwrap_or(json!(false))});
         }

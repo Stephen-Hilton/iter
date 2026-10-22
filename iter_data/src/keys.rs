@@ -250,7 +250,7 @@ pub(crate) async fn check_session(st: &AppState, claims: &Claims) -> Result<Auth
         return Err(unauthorized("bad engine session"));
     }
     touch(st.store.clone(), &claims.kid);
-    Ok(AuthUser { sub: claims.sub.clone(), role: claims.role.clone() })
+    Ok(AuthUser { sub: claims.sub.clone(), role: claims.role.clone(), exp: claims.exp })
 }
 
 /// Record that a key was used, at most every USED_EVERY_SECS (this process

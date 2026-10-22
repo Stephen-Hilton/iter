@@ -116,6 +116,8 @@ pub(crate) fn forbidden() -> ApiError {
 pub struct AuthUser {
     pub sub: String,
     pub role: String,
+    /// when the token expires (unix seconds; 0 when made in-process)
+    pub exp: u64,
 }
 
 impl AuthUser {
@@ -246,7 +248,7 @@ pub(crate) async fn authenticate_any(state: &AppState, token: &str) -> Result<(A
         return Err(ApiError::Status(StatusCode::UNAUTHORIZED, "token revoked".into()));
     }
     let must_change = row.get("must_change_password").and_then(|v| v.as_bool()).unwrap_or(false);
-    Ok((AuthUser { sub: claims.sub, role: claims.role }, must_change))
+    Ok((AuthUser { sub: claims.sub, role: claims.role, exp: claims.exp }, must_change))
 }
 
 // ---------- router ----------
@@ -631,20 +633,41 @@ struct TokenReq {
     ttl_days: u64,
 }
 fn default_ttl_days() -> u64 { 365 }
+/// The longest token a person mints for themself.
+pub const SELF_TOKEN_MAX_DAYS: u64 = 365;
 
+/// A long-lived token for one person: an admin for anyone, or a person for
+/// themself (2026-10-21: an agent connected as that person, e.g. a claude.ai
+/// connector, needs one; 1–365 days). It acts with that person's role and,
+/// like every token of theirs, ends when their password changes (tokenver).
 async fn user_token(
     user: AuthUser,
     State(st): Ctx,
     Path(name): Path<String>,
     Json(req): Json<TokenReq>,
 ) -> Result<Json<Value>, ApiError> {
-    user.require_admin()?;
+    let own = user.sub == name && user.role != "engine";
+    if !own {
+        user.require_admin()?;
+    }
+    if req.ttl_days == 0 || (user.role != "admin" && req.ttl_days > SELF_TOKEN_MAX_DAYS) {
+        return Err(bad(format!("ttl_days must be 1–{SELF_TOKEN_MAX_DAYS}")));
+    }
     let row = st.store.get("webui_user", &name, NOSK).await?.ok_or_else(notfound)?;
     let role = body_str(&row, "role");
     let tokenver = body_u64(&row, "tokenver").max(1);
     let token = auth::mint_token(&st.secret, &name, &role, tokenver, req.ttl_days * 86400)
         .map_err(|e| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({"token": token, "user": name, "role": role, "ttl_days": req.ttl_days})))
+    let expires = token_expiry(chrono::Utc::now().timestamp().max(0) as u64 + req.ttl_days * 86400);
+    Ok(Json(json!({"token": token, "user": name, "role": role, "ttl_days": req.ttl_days, "expires": expires})))
+}
+
+/// A token's expiry (unix seconds) as UTC text; "" when unknown.
+pub fn token_expiry(exp: u64) -> String {
+    if exp == 0 {
+        return String::new();
+    }
+    chrono::DateTime::from_timestamp(exp as i64, 0).map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default()
 }
 
 #[derive(serde::Deserialize)]
@@ -2305,7 +2328,10 @@ async fn workitem_reject(
 /// The principal this request acts as on the project (MG-12).
 async fn whoami(user: AuthUser, State(st): Ctx, Path(name): Path<String>, WorkidHeader(workid): WorkidHeader) -> Result<Json<Value>, ApiError> {
     let p = principal(&st, &user, &name, &workid).await?;
-    Ok(Json(json!({"requestedby": p.requestedby, "parent": p.parent, "by_workid": p.by_workid, "sub": user.sub, "role": user.role})))
+    // the token's end, so a connected agent can warn its person before it lapses
+    let days_left = (user.exp > 0).then(|| (user.exp as i64 - chrono::Utc::now().timestamp()).max(0) / 86400);
+    Ok(Json(json!({"requestedby": p.requestedby, "parent": p.parent, "by_workid": p.by_workid, "sub": user.sub, "role": user.role,
+                   "token_expires": token_expiry(user.exp), "token_days_left": days_left})))
 }
 
 // ---------- explain (ELI5) ----------
@@ -2916,7 +2942,7 @@ mod tests {
         Arc::new(AppState::for_tests(Arc::new(crate::test_db::store().await.0), b"test"))
     }
     fn admin() -> AuthUser {
-        AuthUser { sub: "tester".into(), role: "admin".into() }
+        AuthUser { sub: "tester".into(), role: "admin".into(), exp: 0 }
     }
     async fn create(st: &Arc<AppState>, body: Value) -> Value {
         match workitem_create(admin(), State(st.clone()), Path("p".into()), WorkidHeader(String::new()), Json(body)).await {
@@ -3186,7 +3212,7 @@ mod tests {
     // ---------- lease-bound locks (CR 2026-09-25) ----------
 
     fn engine_user() -> AuthUser {
-        AuthUser { sub: "e".into(), role: "engine".into() }
+        AuthUser { sub: "e".into(), role: "engine".into(), exp: 0 }
     }
     async fn put_item(st: &Arc<AppState>, body: Value) -> Value {
         let id = body["id"].as_str().unwrap().to_string();
@@ -3341,7 +3367,7 @@ mod tests {
         let Ok(Json(v)) = lock_sweep(engine_user(), State(st.clone()), Path("p".into()), Json(LockSweepReq { dry_run: false })).await else { panic!() };
         assert_eq!(v["removed"].as_array().unwrap().len(), 1);
         assert!(lock_rows(&st).await.is_empty());
-        assert!(matches!(lock_sweep(AuthUser { sub: "u".into(), role: "user".into() }, State(st.clone()), Path("p".into()), Json(LockSweepReq { dry_run: true })).await, Err(ApiError::Status(StatusCode::FORBIDDEN, _))));
+        assert!(matches!(lock_sweep(AuthUser { sub: "u".into(), role: "user".into(), exp: 0 }, State(st.clone()), Path("p".into()), Json(LockSweepReq { dry_run: true })).await, Err(ApiError::Status(StatusCode::FORBIDDEN, _))));
     }
 
     /// F5: a blockedby write that closes a loop through deep edges only

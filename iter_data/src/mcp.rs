@@ -59,6 +59,9 @@ struct Caller {
     project: String,
     workid: String,
     sub: String,
+    /// a person's token (user, admin, viewer), not an engine session: the
+    /// people-only tools (mcp_docs::PEOPLE_ONLY) are listed and callable
+    person: bool,
 }
 
 async fn handle(State(m): State<Mcp>, headers: HeaderMap, Json(msg): Json<Value>) -> Response {
@@ -80,7 +83,7 @@ async fn handle(State(m): State<Mcp>, headers: HeaderMap, Json(msg): Json<Value>
         return (StatusCode::BAD_REQUEST, Json(err(&Value::Null, -32600, &msg))).into_response();
     }
     let version = if version.is_empty() { "2025-03-26".to_string() } else { version };
-    let caller = Caller { auth, project: hdr("x-iter-project"), workid: hdr("x-iter-workid"), sub: user.sub };
+    let caller = Caller { auth, project: hdr("x-iter-project"), workid: hdr("x-iter-workid"), person: user.role != "engine", sub: user.sub };
     match msg {
         // batching was removed in 2025-06-18 (dates compare as strings)
         Value::Array(_) if version.as_str() >= "2025-06-18" => {
@@ -129,12 +132,17 @@ async fn rpc(m: &Mcp, c: &Caller, msg: Value) -> Option<Value> {
             }))
         }
         "ping" => ok(&id, json!({})),
-        "tools/list" => ok(&id, json!({"tools": tools()})),
+        "tools/list" => ok(&id, json!({"tools": crate::mcp_docs::tools_for(c.person)})),
         "tools/call" => {
             let name = params.get("name").and_then(|x| x.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             if !tools().iter().any(|t| t["name"] == name) {
                 return Some(err(&id, -32602, &format!("unknown tool {name:?}")));
+            }
+            // iter's own agents (engine sessions) see a work item's context only:
+            // reordering the queue is for a person, or an agent acting as one (2026-10-21)
+            if !c.person && crate::mcp_docs::PEOPLE_ONLY.contains(&name) {
+                return Some(err(&id, -32602, &format!("{name} is for a person's token: iter's own agents (engine sessions) cannot use it")));
             }
             let started = std::time::Instant::now();
             let (is_error, body) = match call_tool(m, c, name, &args).await {
@@ -172,7 +180,10 @@ testlogs: the test results of test nodes. settings_graph: engines, projects, acc
 GraphRAG: rag_search finds the chunks of the project's documents and node files closest in meaning to a question and returns the FULL chunk text with its summaries and map neighbours — search before reading files blind. \
 Do not upload *.iter.md node files: the iter engine indexes them from the checkout after each map sync. A node edited with graph_node_update reaches search after the engine writes the file and its next sync (about a minute). \
 An uploaded document (rag_add_document) is not searchable at once: an engine must ingest it first (about 5–30 s with a live engine; it stays queued while none is live). Pass wait_sec, or poll rag_doc until searchable is true; summaries follow minutes later. \
-Most tools take `project` (default: the X-Iter-Project header); ask/reject/wait/block act on the calling work item (`workid`, default: the X-Iter-Workid header).";
+Most tools take `project` (default: the X-Iter-Project header); ask/reject/wait/block act on the calling work item (`workid`, default: the X-Iter-Workid header). \
+With a person's token (not an engine session) there are also the webui's queue controls, acting as that person: workitem_answer (answer a question item), workitem_set_state (park, unpark, pause, resume, close, run now), \
+workitem_stop, workitem_priority, workitem_reopen (retry a failed item), workitem_edit, workitem_clone (copy, follow-up, run a schedule now), workitem_duplicate_of, workitem_explain, workitem_delete, \
+rag_delete_document and rag_resummarize_document (re-upload a document under the same filename to update it), and whoami (who you act as, and when your token expires).";
 
 pub fn tools() -> &'static [Value] {
     crate::mcp_docs::tools()
@@ -559,6 +570,66 @@ async fn project_tool(m: &Mcp, c: &Caller, name: &str, args: &Value, project: &s
             m.call(c, "POST", &pp(&["rag", "docs", doc, "links"])?, Some(&body)).await
         }
         "rag_add_document" => add_document(m, c, args, project).await,
+        // ----- people only (mcp_docs::PEOPLE_ONLY): the webui's work queue actions -----
+        "whoami" => m.call(c, "GET", &pp(&["whoami"])?, None).await,
+        "workitem_answer" => answer(m, c, args, project).await,
+        "workitem_set_state" => set_state_tool(m, c, args, project).await,
+        "workitem_stop" => {
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            let mut item = m.call(c, "GET", &pp(&["workitems", &id])?, None).await?;
+            if item["state"] != "in-progress" {
+                return Err(format!("the item is {}, not in-progress: nothing runs to stop", item["state"].as_str().unwrap_or("?")));
+            }
+            let ver = item["version"].as_u64().unwrap_or(1).to_string();
+            item["stop_requested"] = json!(true);
+            m.call(c, "PUT", &ppq(&["workitems", &id], &[("expect_version", &ver)])?, Some(&item)).await?;
+            Ok(json!({"id": id, "ok": true, "message": "stop requested: the engine ends the agent session on its next tick and parks the item with a note; work already committed stays in git"}))
+        }
+        "workitem_priority" => {
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            let p = args.get("priority").and_then(|p| p.as_i64()).ok_or("priority is required (0–99)")?;
+            if !(0..=99).contains(&p) {
+                return Err("priority must be 0–99".into());
+            }
+            let r = m.call(c, "POST", &pp(&["workitems", &id, "priority"])?, Some(&json!({"priority": p}))).await?;
+            Ok(json!({"id": id, "priority": p, "changed": r.get("changed").cloned().unwrap_or(json!([id]))}))
+        }
+        "workitem_reopen" => {
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            let item = m.call(c, "POST", &pp(&["workitems", &id, "reopen"])?, Some(&json!({"reason": a(args, "reason")}))).await?;
+            Ok(json!({"id": id, "state": item["state"], "message": "reopened: queued again with its bounce count reset; items waiting on it are blocked again until it closes"}))
+        }
+        "workitem_edit" => edit(m, c, args, project).await,
+        "workitem_clone" => clone_item(m, c, args, project).await,
+        "workitem_duplicate_of" => {
+            let all = m.items(c, project).await?;
+            let id = m.resolve(c, project, need(args, "id")?, Some(&all)).await?;
+            let survivor = m.resolve(c, project, need(args, "survivor")?, Some(&all)).await?;
+            let r = m.call(c, "POST", &pp(&["workitems", &id, "duplicate_of"])?, Some(&json!({"survivor": survivor, "reason": a(args, "reason")}))).await?;
+            Ok(json!({"id": id, "state": r["duplicate"]["state"], "survivor": survivor, "survivor_repeats": r["survivor"]["repeats"],
+                      "message": "closed complete as a duplicate; its request is recorded on the survivor"}))
+        }
+        "workitem_explain" => {
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            m.call(c, "POST", &pp(&["workitems", &id, "explain"])?, Some(&json!({}))).await?;
+            Ok(json!({"id": id, "ok": true, "message": "explanation requested: an engine serving the project writes it as an \"explained\" row (workitem_details) within a minute or two"}))
+        }
+        "workitem_delete" => {
+            let id = m.resolve(c, project, need(args, "id")?, None).await?;
+            let r = m.call(c, "DELETE", &pp(&["workitems", &id])?, None).await?;
+            Ok(json!({"id": id, "deleted": r.get("deleted").cloned().unwrap_or(json!(true))}))
+        }
+        "rag_delete_document" => {
+            let id = need(args, "id")?;
+            let rm = if args.get("remove_file").and_then(|b| b.as_bool()).unwrap_or(false) { "true" } else { "false" };
+            let r = m.call(c, "DELETE", &ppq(&["rag", "docs", id], &[("remove_file", rm)])?, None).await?;
+            Ok(json!({"id": id, "removed": r.get("removed").cloned().unwrap_or(json!(id)), "file_removal": r.get("file_removal").cloned().unwrap_or(Value::Null)}))
+        }
+        "rag_resummarize_document" => {
+            let id = need(args, "id")?;
+            let r = m.call(c, "POST", &pp(&["rag", "docs", id, "resummarize"])?, None).await?;
+            Ok(json!({"id": id, "result": r, "message": "its summaries are queued again: an engine's Summary agent redoes them (see rag_status waiting)"}))
+        }
         other => Err(format!("unknown tool {other}")),
     }
 }
@@ -678,6 +749,13 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Valu
         };
         over.or(def).filter(|x| !x.is_empty()).unwrap_or_else(|| "queued".into())
     };
+    // a person may file it queued, parked or paused (engine sessions: the agent's childstate)
+    let state = match a(args, "state") {
+        "" => state,
+        s if !c.person => return Err(format!("state {s:?}: only a person's token chooses the state of a new item")),
+        s if question.is_empty() && ["queued", "parked", "paused"].contains(&s) => s.to_string(),
+        s => return Err(format!("state {s:?}: a new item is queued, parked or paused (a `question` files it as a question)")),
+    };
     let tags: Vec<Value> = arr(args, "tags")
         .iter()
         .map(|t| match t.rsplit_once(':') {
@@ -713,6 +791,286 @@ async fn create(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Valu
               "requestedby": created["requestedby"], "createdby": created["createdby"],
               "already_open": already, "warnings": created.get("warnings").cloned().unwrap_or(json!([])),
               "message": if already { "already open: the same check and container is filed; your request text was recorded on it. Do not file it again." } else { "added" }}))
+}
+
+// ---------- the people-only work queue tools (2026-10-21) ----------
+// Each does what the webui's control of the same name does, with the same
+// calls in the same order, so the API's rules apply unchanged.
+
+/// The tags of an `iter add`-style list: "text" or "text:#color".
+fn tag_values(texts: &[String]) -> Vec<Value> {
+    texts
+        .iter()
+        .map(|t| match t.rsplit_once(':') {
+            Some((text, color)) if color.starts_with('#') => json!({"text": text.trim(), "color": color}),
+            _ => json!({"text": t, "color": ""}),
+        })
+        .collect()
+}
+
+/// The text of an item's request row (detail 0), "" when it has none.
+async fn request_text(m: &Mcp, c: &Caller, project: &str, id: &str) -> Result<String, String> {
+    let d = m.call(c, "GET", &api_path(&["projects", project, "workitems", id, "details"], &[])?, None).await?;
+    Ok(d.as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["key"] == "request")
+        .map(|r| r["value"].as_str().map(String::from).unwrap_or_else(|| serde_json::to_string_pretty(&r["value"]).unwrap_or_default()))
+        .unwrap_or_default())
+}
+
+/// `workitem_answer`: the webui's "Submit answer" — fill the newest question
+/// form's fields, then queue the item again (which also clears a needed approval).
+async fn answer(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    let id = m.resolve(c, project, need(args, "id")?, None).await?;
+    let item_path = api_path(&["projects", project, "workitems", &id], &[])?;
+    let item = m.call(c, "GET", &item_path, None).await?;
+    let state = item["state"].as_str().unwrap_or("").to_string();
+    if crate::api::is_closed(&state) {
+        return Err(format!("the item is {state}: a closed item takes no answer (workitem_reopen it first)"));
+    }
+    if state == "in-progress" {
+        return Err("the item is in progress: answer once its run ends".into());
+    }
+    let details = m.call(c, "GET", &api_path(&["projects", project, "workitems", &id, "details"], &[])?, None).await?;
+    let row = details
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rfind(|d| d["valuetype"] == "json" && d["value"]["fields"].is_array())
+        .cloned()
+        .ok_or("the item has no question to answer (none of its details is a question form)")?;
+    let mut w = row["value"].clone();
+    let keys: Vec<String> = w["fields"].as_array().into_iter().flatten().filter_map(|f| f["key"].as_str().map(String::from)).collect();
+    let mut given = args.get("answers").and_then(|a| a.as_object()).cloned().unwrap_or_default();
+    let text = args.get("answer").and_then(|t| t.as_str()).map(str::trim).unwrap_or("");
+    if !text.is_empty() {
+        // one free answer: the form's only field, or its "answer" field
+        let k = if keys.len() == 1 {
+            keys[0].clone()
+        } else if keys.iter().any(|k| k == "answer") {
+            "answer".to_string()
+        } else {
+            return Err(format!("this form has several fields: pass `answers` keyed by {}", keys.join(", ")));
+        };
+        given.entry(k).or_insert(json!(text));
+    }
+    if given.is_empty() {
+        return Err(format!("give `answer` (one text) or `answers` keyed by {}", keys.join(", ")));
+    }
+    if let Some(k) = given.keys().find(|k| !keys.contains(k)) {
+        return Err(format!("the form has no field {k:?} (its fields: {})", keys.join(", ")));
+    }
+    for f in w["fields"].as_array_mut().into_iter().flatten() {
+        let Some(v) = f["key"].as_str().and_then(|k| given.get(k)) else { continue };
+        let ty = f["type"].as_str().unwrap_or("text").to_string();
+        let value = match (ty.as_str(), v) {
+            ("checkbox", Value::Array(_)) => v.clone(),
+            ("checkbox", x) => json!([x]),
+            ("int", Value::String(s)) => json!(s.trim().parse::<i64>().map_err(|_| format!("field {}: {s:?} is not a whole number", f["key"]))?),
+            (_, x) => x.clone(),
+        };
+        // a choice is one of the form's options, as the webui's controls allow
+        if ["checkbox", "radio", "combo"].contains(&ty.as_str()) {
+            let opts: Vec<&str> = f["options"].as_array().into_iter().flatten().filter_map(|o| o["value"].as_str()).collect();
+            let picked: Vec<&Value> = match &value {
+                Value::Array(a) => a.iter().collect(),
+                x => vec![x],
+            };
+            if let Some(bad) = picked.iter().find(|p| !p.as_str().is_some_and(|s| opts.contains(&s))) {
+                return Err(format!("field {}: {bad} is not one of its options ({})", f["key"], opts.join(", ")));
+            }
+        }
+        f["value"] = value;
+    }
+    let problems = iter_core::widget::validate(&w);
+    if !problems.is_empty() {
+        return Err(format!("the answer does not fit the form: {}", problems.join("; ")));
+    }
+    // the record keeps what the person was asked, whatever the title becomes
+    if w["gate"] == "close" {
+        w["answered_question"] = w["title"].clone();
+    }
+    let order = row["order"].as_i64().unwrap_or(0).to_string();
+    m.call(c, "PUT", &api_path(&["projects", project, "workitems", &id, "details", &order], &[])?,
+           Some(&json!({"key": row["key"], "valuetype": "json", "value": w}))).await?;
+    let mut fresh = m.call(c, "GET", &item_path, None).await?;
+    let ver = fresh["version"].as_u64().unwrap_or(1).to_string();
+    fresh["state"] = json!("queued");
+    fresh["needs_approval"] = json!(false);
+    m.call(c, "PUT", &api_path(&["projects", project, "workitems", &id], &[("expect_version", &ver)])?, Some(&fresh)).await?;
+    let answered: serde_json::Map<String, Value> =
+        w["fields"].as_array().into_iter().flatten().filter_map(|f| Some((f["key"].as_str()?.to_string(), f["value"].clone()))).collect();
+    Ok(json!({"id": id, "state": "queued", "question": w["title"], "answers": answered, "message": "answered: the item is queued again"}))
+}
+
+/// `workitem_set_state`: the webui's "Change to…" (any state, with the reason
+/// recorded), plus its Queue / Run now: queueing clears a needed approval,
+/// and `run_now` starts it even while the agent cap is full.
+async fn set_state_tool(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    let id = m.resolve(c, project, need(args, "id")?, None).await?;
+    let to = need(args, "state")?;
+    if !iter_core::STATES.contains(&to) {
+        return Err(format!("unknown state '{to}' (one of {})", iter_core::STATES.join(", ")));
+    }
+    let run_now = args.get("run_now").and_then(|b| b.as_bool()).unwrap_or(false);
+    if run_now && to != "queued" {
+        return Err("run_now goes with state queued".into());
+    }
+    let path = api_path(&["projects", project, "workitems", &id], &[])?;
+    let item = m.call(c, "GET", &path, None).await?;
+    let was = item["state"].as_str().unwrap_or("").to_string();
+    if was != to {
+        m.call(c, "POST", &api_path(&["projects", project, "workitems", &id, "state"], &[])?, Some(&json!({"state": to, "reason": a(args, "reason")}))).await?;
+    }
+    if to == "queued" {
+        let mut fresh = m.call(c, "GET", &path, None).await?;
+        if fresh["needs_approval"] == true || run_now {
+            let ver = fresh["version"].as_u64().unwrap_or(1).to_string();
+            fresh["needs_approval"] = json!(false);
+            if run_now {
+                fresh["run_now"] = json!(true);
+            }
+            m.call(c, "PUT", &api_path(&["projects", project, "workitems", &id], &[("expect_version", &ver)])?, Some(&fresh)).await?;
+        }
+    }
+    let note = match (was == to, to) {
+        (true, _) if !run_now => format!("already {to}: nothing changed"),
+        (_, "in-progress") => "set in-progress: no agent session starts from this, and the engine may overwrite it".into(),
+        (_, t) if crate::api::is_closed(t) => format!("closed as {t}: the record is frozen now (notes, tags and reopen only); items waiting on it may run"),
+        _ if was == "in-progress" => format!("{was} -> {to}: this does not stop the running session (workitem_stop does)"),
+        _ => format!("{was} -> {to}{}", if run_now { ", run now (starts even while the agent cap is full)" } else { "" }),
+    };
+    Ok(json!({"id": id, "was": was, "state": to, "run_now": run_now, "message": note}))
+}
+
+/// `workitem_edit`: the webui's edit form — the fields given change, the rest
+/// stay; the request text is detail row 0. A running item is refused (the
+/// webui pauses it first); a closed one takes tag changes only.
+async fn edit(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    let all = m.items(c, project).await?;
+    let id = m.resolve(c, project, need(args, "id")?, Some(&all)).await?;
+    let path = api_path(&["projects", project, "workitems", &id], &[])?;
+    let mut item = m.call(c, "GET", &path, None).await?;
+    if item["state"] == "in-progress" {
+        return Err("the item is in progress: workitem_stop it (or wait for its run to end) before editing".into());
+    }
+    let mut changed: Vec<&str> = Vec::new();
+    for (arg, field) in [("name", "name"), ("title", "name"), ("agent", "agent"), ("model", "model"), ("exec_shell", "exec_shell")] {
+        if let Some(v) = args.get(arg).and_then(|v| v.as_str()) {
+            item[field] = json!(v.trim());
+            changed.push(field);
+        }
+    }
+    if args.get("codepaths").is_some() {
+        item["lockdirs"] = json!(arr(args, "codepaths").iter().map(|p| lockdir(p)).collect::<Vec<_>>());
+        changed.push("lockdirs");
+    }
+    if args.get("context").is_some() {
+        item["context"] = json!(arr(args, "context"));
+        changed.push("context");
+    }
+    if args.get("depends_on").is_some() {
+        let mut ids = Vec::new();
+        for d in arr(args, "depends_on") {
+            let d = m.resolve(c, project, &d, Some(&all)).await?;
+            if d == id {
+                return Err("an item cannot depend on itself".into());
+            }
+            ids.push(d);
+        }
+        item["blockedby"] = json!(ids);
+        changed.push("blockedby");
+    }
+    if let Some(b) = args.get("depends_on_shallow").and_then(|b| b.as_bool()) {
+        item["blockedby_shallow"] = json!(b);
+        changed.push("blockedby_shallow");
+    }
+    // tags: `tags` replaces the list; add_tags / remove_tags edit it
+    let mut tags: Vec<Value> = item["tags"].as_array().cloned().unwrap_or_default();
+    let text_of = |t: &Value| t["text"].as_str().unwrap_or("").to_string();
+    let mut tags_changed = false;
+    if args.get("tags").is_some() {
+        tags = tag_values(&arr(args, "tags"));
+        tags_changed = true;
+    }
+    for t in tag_values(&arr(args, "add_tags")) {
+        if !tags.iter().any(|x| text_of(x) == text_of(&t)) {
+            tags.push(t);
+            tags_changed = true;
+        }
+    }
+    let drop = arr(args, "remove_tags");
+    if !drop.is_empty() {
+        let before = tags.len();
+        tags.retain(|t| !drop.contains(&text_of(t)));
+        tags_changed |= tags.len() != before;
+    }
+    if tags_changed {
+        item["tags"] = json!(tags);
+        changed.push("tags");
+    }
+    let request = args.get("request").and_then(|r| r.as_str()).map(str::trim);
+    if changed.is_empty() && request.is_none() {
+        return Err("nothing to change: pass at least one of name, request, agent, codepaths, depends_on, tags, add_tags, remove_tags, context, model".into());
+    }
+    if !changed.is_empty() {
+        let ver = item["version"].as_u64().unwrap_or(1).to_string();
+        m.call(c, "PUT", &api_path(&["projects", project, "workitems", &id], &[("expect_version", &ver)])?, Some(&item)).await?;
+    }
+    if let Some(r) = request {
+        if r.is_empty() {
+            return Err("the request cannot be emptied".into());
+        }
+        m.call(c, "PUT", &api_path(&["projects", project, "workitems", &id, "details", "0"], &[])?, Some(&json!({"key": "request", "valuetype": "text", "value": r}))).await?;
+        changed.push("request");
+    }
+    Ok(json!({"id": id, "changed": changed, "message": "saved"}))
+}
+
+/// `workitem_clone`: the webui's Clone / Follow-up / Run now (of a schedule) —
+/// a new queued item built from this one.
+async fn clone_item(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value, String> {
+    let id = m.resolve(c, project, need(args, "id")?, None).await?;
+    let src = m.call(c, "GET", &api_path(&["projects", project, "workitems", &id], &[])?, None).await?;
+    let how = if a(args, "as").is_empty() { "copy" } else { a(args, "as") };
+    let original = request_text(m, c, project, &id).await?;
+    let given = args.get("request").and_then(|r| r.as_str()).map(str::trim).unwrap_or("");
+    let name = src["name"].as_str().unwrap_or("");
+    // the webui's cloneBody: a field the source never had starts empty
+    let list = |k: &str| if src[k].is_array() { src[k].clone() } else { json!([]) };
+    let mut body = json!({
+        "name": name, "agent": src["agent"], "exec_shell": src["exec_shell"].as_str().unwrap_or(""), "priority": src["priority"],
+        "lockdirs": list("lockdirs"), "blockedby": list("blockedby"), "tags": list("tags"), "prework": list("prework"), "postwork": list("postwork"),
+        "context": list("context"), "model": src["model"].as_str().unwrap_or(""), "state": "queued",
+        "request": if given.is_empty() { original.clone() } else { given.to_string() },
+    });
+    match how {
+        "copy" => {}
+        "followup" => {
+            if given.is_empty() {
+                return Err("a follow-up needs `request`: what to do now".into());
+            }
+            body["name"] = json!(format!("Follow-up: {name}"));
+            body["blockedby"] = json!([id]);
+            body["tags"] = json!([]);
+            body["request"] = json!(format!("Follow-up to workitem {id} (\"{name}\").\n\nOriginal request:\n{original}\n\n---\nWhat to do now:\n{given}"));
+        }
+        "run_now" => {
+            if src["state"] != "scheduled" {
+                return Err("run_now clones a scheduled item (a schedule) into one queued run".into());
+            }
+            body["source_schedule"] = json!(id);
+        }
+        other => return Err(format!("`as` is copy, followup or run_now, not {other:?}")),
+    }
+    if !a(args, "name").is_empty() {
+        body["name"] = json!(a(args, "name"));
+    }
+    let created = m.call(c, "POST", &api_path(&["projects", project, "workitems"], &[])?, Some(&body)).await?;
+    Ok(json!({"id": created["id"], "from": id, "as": how, "state": created["state"], "requestedby": created["requestedby"],
+              "already_open": created.get("already_open").and_then(|b| b.as_bool()).unwrap_or(false),
+              "warnings": created.get("warnings").cloned().unwrap_or(json!([]))}))
 }
 
 /// `iter block --cluster-restart`.
@@ -757,14 +1115,17 @@ async fn block(m: &Mcp, c: &Caller, args: &Value, project: &str) -> Result<Value
 mod tests {
     use super::*;
 
-    /// The tools of the hardening plan's §2.1, in order.
-    const TOOL_NAMES: [&str; 34] = [
+    /// The tools of the hardening plan's §2.1, then the people-only ones (2026-10-21), in order.
+    const TOOL_NAMES: [&str; 47] = [
         "status", "workitem_list", "workitem_get", "workitem_details", "workitem_create", "workitem_ask", "workitem_reject",
         "workitem_wait", "workitem_doc", "workitem_block", "capability", "locks_list",
         "graph_stats", "graph_lookup", "graph_node", "graph_neighbors", "graph_owner", "graph_usecase",
         "graph_node_create", "graph_node_update", "graph_edge_add", "graph_edge_remove",
         "req_create", "req_update", "req_move", "req_delete", "testlogs", "settings_graph",
         "rag_search", "rag_status", "rag_docs", "rag_doc", "rag_link_document", "rag_add_document",
+        "whoami", "workitem_answer", "workitem_set_state", "workitem_stop", "workitem_priority", "workitem_reopen",
+        "workitem_edit", "workitem_clone", "workitem_duplicate_of", "workitem_explain", "workitem_delete",
+        "rag_delete_document", "rag_resummarize_document",
     ];
 
     #[test]
@@ -814,7 +1175,7 @@ mod tests {
     #[test]
     fn instructions_state_the_rules() {
         assert!(INSTRUCTIONS.contains("Do not upload *.iter.md node files: the iter engine indexes them from the checkout after each map sync."));
-        for want in ["searchable", "next_cursor", "set by the server"] {
+        for want in ["searchable", "next_cursor", "set by the server", "person's token", "workitem_answer", "whoami"] {
             assert!(INSTRUCTIONS.contains(want), "{want}");
         }
     }

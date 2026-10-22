@@ -4,7 +4,7 @@
 use super::*;
 
 /// One MCP `tools/call` as `who`; returns (isError, structuredContent or the error text).
-async fn tool(t: &T, who: &str, name: &str, args: Value) -> (bool, Value) {
+pub(super) async fn tool(t: &T, who: &str, name: &str, args: Value) -> (bool, Value) {
     tool_h(t, who, name, args, &[]).await
 }
 
@@ -90,6 +90,20 @@ async fn hostile_ids_never_change_the_route() {
         ("req_delete", "id", json!({"reason": "r"}), vec![base("/graph/reqs/{id}")]),
         ("rag_doc", "id", json!({}), vec![base("/rag/docs/{id}")]),
         ("rag_link_document", "doc", json!({"node": "n"}), vec![base("/rag/docs/{id}/links")]),
+        // the people-only tools
+        ("workitem_answer", "id", json!({"answer": "a"}), wi.clone()),
+        ("workitem_set_state", "id", json!({"state": "parked"}), wi.clone()),
+        ("workitem_stop", "id", json!({}), wi.clone()),
+        ("workitem_priority", "id", json!({"priority": 1}), wi.clone()),
+        ("workitem_reopen", "id", json!({}), wi.clone()),
+        ("workitem_edit", "id", json!({"name": "x"}), wi.clone()),
+        ("workitem_clone", "id", json!({}), wi.clone()),
+        ("workitem_duplicate_of", "id", json!({"survivor": real}), wi.clone()),
+        ("workitem_duplicate_of", "survivor", json!({"id": real}), wi.clone()),
+        ("workitem_explain", "id", json!({}), wi.clone()),
+        ("workitem_delete", "id", json!({}), wi.clone()),
+        ("rag_delete_document", "id", json!({}), vec![base("/rag/docs/{id}")]),
+        ("rag_resummarize_document", "id", json!({}), vec![base("/rag/docs/{id}/resummarize")]),
     ];
     for (name, arg, extra, allowed) in &tools {
         for h in &hostile {
@@ -665,6 +679,13 @@ async fn seed_examples(t: &T, project: &str) -> Vec<(String, String)> {
     t.ok("adm", "POST", "/api/settings/edges", Some(json!({"from": "user:alice", "to": format!("project:{project}")}))).await;
     t.item(project, json!({"id": EX_ITEM, "name": "export retry", "state": "in-progress", "engine": "e1"})).await;
     t.item(project, json!({"id": EX_ITEM2, "name": "gateway client"})).await;
+    // the people-only tools' items
+    t.item(project, json!({"id": EX_QUESTION, "name": "retry on 502?", "state": "question", "needs_approval": true})).await;
+    let form = json!({"title": "Retry on 502 too?", "summary": "", "detail": "The gateway also answers 502.", "fields": [{"key": "answer", "label": "Answer", "type": "text", "value": ""}]});
+    t.ok("alice", "POST", &format!("/api/projects/{project}/workitems/{EX_QUESTION}/details"), Some(json!({"key": "question", "valuetype": "json", "value": form}))).await;
+    t.item(project, json!({"id": EX_FAILED, "name": "export run", "state": "failed", "lasterror": "gateway 401"})).await;
+    t.item(project, json!({"id": EX_DUP, "name": "gateway client again"})).await;
+    t.item(project, json!({"id": EX_OLD, "name": "obsolete cleanup", "state": "parked"})).await;
     t.store().put("agent_tooling", "aws", NOSK, &json!({"name": "aws", "kind": "capability", "desc": "AWS access", "body": "use the deployer role"})).await.unwrap();
     let node = |b: Value| {
         let mut b = b;
@@ -716,9 +737,12 @@ async fn examples_run_and_match_output_schema() {
         run(d.name, example_of(d, &read_map)).await;
     }
     // the write tools on the scratch project, in dependency order
-    let order = ["workitem_create", "workitem_doc", "workitem_wait", "workitem_block", "workitem_ask", "workitem_reject",
+    let order = ["workitem_stop", "workitem_create", "workitem_doc", "workitem_wait", "workitem_block", "workitem_ask", "workitem_reject",
+                 "workitem_answer", "workitem_set_state", "workitem_priority", "workitem_edit", "workitem_explain", "workitem_clone",
+                 "workitem_duplicate_of", "workitem_reopen", "workitem_delete",
                  "graph_node_create", "graph_node_update", "graph_edge_add", "graph_edge_remove",
-                 "req_create", "req_update", "req_move", "req_delete", "rag_add_document", "rag_link_document"];
+                 "req_create", "req_update", "req_move", "req_delete", "rag_add_document", "rag_link_document",
+                 "rag_resummarize_document", "rag_delete_document"];
     let writes: Vec<&str> = docs.iter().filter(|d| !d.read_only).map(|d| d.name).collect();
     let mut sorted = writes.clone();
     sorted.sort();

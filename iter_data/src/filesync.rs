@@ -708,7 +708,7 @@ async fn build_done(user: AuthUser, State(st): Ctx, Path(name): Path<String>, Js
             "request": format!("The project was designed in the Project graph and its repo was just created from the design (commit {}). \
 Plan the build: read the project node, its global requirements and philosophy, and every node of the design; file the work items that build it, \
 in dependency order.{}", req.commit, if note.is_empty() { String::new() } else { format!("\n\nNote from the designer: {note}") })});
-        let who = AuthUser { sub: user.sub.clone(), role: user.role.clone() };
+        let who = AuthUser { sub: user.sub.clone(), role: user.role.clone(), exp: user.exp };
         // the person who asked for the build requested its plan, not the engine reporting it
         let by = b["by"].as_str().filter(|u| !u.is_empty()).map(|u| format!("user:{u}"));
         let Json(v) = match by {

@@ -56,6 +56,30 @@ test.describe('user form', () => {
       expect(await form(page).locator('.frow > label').allTextContents()).toEqual(['id', 'name', 'role']);
       await shot(page, 'userform-someone-else');
     });
+
+    // a long-lived token for an agent acting as them (2026-10-21): minted on
+    // their own form, shown once, works as them
+    test('they mint their own long-lived token', async ({ page, admin, state }) => {
+      const who = 'ltuser' + crypto.randomBytes(3).toString('hex');
+      const first = 'first-password-' + crypto.randomBytes(4).toString('hex');
+      const mine = 'my-own-password-' + crypto.randomBytes(4).toString('hex');
+      await admin.put('/api/users/' + who, { role: 'user', password: first, email: '', settings: {}, authz: {} });
+      const l = await Api.login(state.base, who, first);
+      const { token } = await l.api.post(`/api/users/${who}/password`, { current_password: first, new_password: mine });
+      await page.addInitScript(([t, u]) => { localStorage.setItem('iter.token', t); localStorage.setItem('iter.user', u); localStorage.setItem('iter.role', 'user'); }, [token, who]);
+
+      await page.goto('/');
+      await page.locator('#user-gear').click();
+      await expect(form(page).locator('#lt-box')).toBeHidden();
+      await form(page).locator('#lt-days').fill('30');
+      await form(page).locator('#lt-go').click();
+      await expect(form(page).locator('#lt-box')).toBeVisible();
+      await expect(form(page).locator('#lt-note')).toContainText('expires');
+      const minted = await form(page).locator('#lt-out').inputValue();
+      expect(minted.length).toBeGreaterThan(40);
+      expect((await new Api(state.base, minted).get('/api/users/' + who)).role).toBe('user');
+      await shot(page, 'userform-long-lived-token');
+    });
   });
 });
 

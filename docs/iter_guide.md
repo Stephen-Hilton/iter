@@ -176,7 +176,7 @@ As an admin: the gear at the top right → All users → a name, password and ro
 
 ### How do I get an API token?
 
-Log in with `POST /auth/login` and `{"user":"…","password":"…"}` for a 24-hour token, or have an admin mint a long-lived one with `POST /api/users/<name>/token` and `{"ttl_days":365}`. Send it as `Authorization: Bearer <token>` on every `/api/` call and on `/mcp`.
+Log in with `POST /auth/login` and `{"user":"…","password":"…"}` for a 24-hour token. For a long-lived one (an agent or a connector that acts as you), open your settings (the gear at the top right) → **Long-lived token**, choose 1–365 days and copy the token: it is shown once. The same as a call: `POST /api/users/<you>/token` with `{"ttl_days":90}`; an admin may mint one for anyone. Send it as `Authorization: Bearer <token>` on every `/api/` call and on `/mcp`. It has your role, and it ends on its date or when your password changes; the MCP tool `whoami` (or `GET /api/projects/<p>/whoami`) says when.
 
 ### How do I revoke a token?
 
@@ -424,6 +424,7 @@ Who filed or changed a work item is set by the server from the token and the cal
 - **Requirements:** `req_create`, `req_update`, `req_move`, `req_delete` (one `## ` section of a bizreq or techreq file each).
 - **Other:** `testlogs` (test results of the test nodes), `settings_graph` (engines, projects, accounts, agents and their edges).
 - **GraphRAG:** `rag_search`, `rag_status`, `rag_docs`, `rag_doc`, `rag_add_document`, `rag_link_document`.
+- **With a person's token only** (the webui's queue controls, for you or an agent acting as you): `workitem_answer` (answer a question item; it queues again), `workitem_set_state` (park, unpark, pause, resume, close, run now), `workitem_stop`, `workitem_priority`, `workitem_reopen` (retry a failed item), `workitem_edit`, `workitem_clone` (copy, follow-up, run a schedule now), `workitem_duplicate_of`, `workitem_explain`, `workitem_delete`, `rag_delete_document`, `rag_resummarize_document`, and `whoami`. The agents iter runs itself (engine sessions) see only the item they work on, so they neither list nor call these. To update a document, upload it again under the same filename.
 
 `workitem_list` reaches every item of a project, closed ones included: filter on any field (`{"field": "ts.receive", "op": "gte", "value": "2026-10-01"}`; a missing field reads as false or empty), sort on any field (newest first by default), and page with `limit` (up to 500) by passing each reply's `next_cursor` back as `cursor` until it is `null`.
 
@@ -433,7 +434,11 @@ The checkout verbs (validate, runtests, teststate, usecase, markers, critreview)
 
 ### How do I connect an agent to the MCP server?
 
-Every agent session an engine starts gets it automatically, with its calling work item in `X-Iter-Workid`. For your own Claude Code session, add to `.mcp.json`:
+Every agent session an engine starts gets it automatically, with its calling work item in `X-Iter-Workid`.
+
+For a claude.ai chat, add a custom connector: the URL is `https://<your iter_data>/mcp`, Authentication **No sign-in**, and one request header, `Authorization` = `Bearer <your long-lived token>` (see "How do I get an API token?"). The agent then acts as you, with your role and the people-only tools.
+
+For your own Claude Code session, add to `.mcp.json`:
 
 ```json
 {"mcpServers": {"iter": {"type": "http", "url": "https://127.0.0.1:8400/mcp",

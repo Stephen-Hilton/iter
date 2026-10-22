@@ -1856,7 +1856,13 @@ async function userSettings(name){
   if(self)extra=`<h3>Change my password</h3>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="mp-cur" type="password" placeholder="current password" autocomplete="current-password" style="width:150px">
       <input id="mp-new" type="password" placeholder="new (12+ characters)" autocomplete="new-password" style="width:170px"><input id="mp-new2" type="password" placeholder="new again" autocomplete="new-password" style="width:130px">
-      <button class="sm" id="mp-go">change password</button></div><div class="help">Every other session signed in as you ends.</div><div class="kv" id="mp-note"></div>`+extra;
+      <button class="sm" id="mp-go">change password</button></div><div class="help">Every other session signed in as you ends.</div><div class="kv" id="mp-note"></div>
+      <h3>Long-lived token</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="lt-days" type="number" min="1" max="365" value="90" style="width:80px"> days
+      <button class="sm" id="lt-go">create token</button></div>
+      <div class="help">For an agent that acts as you, e.g. a claude.ai connector to <code>${esc(location.origin)}/mcp</code> with the request header <code>Authorization</code> = <code>Bearer &lt;token&gt;</code>. It has your role, is shown once, and ends on its date or when your password changes.</div>
+      <div id="lt-box" hidden><textarea id="lt-out" readonly rows="3" style="width:100%;font-family:monospace"></textarea>
+      <button class="sm" id="lt-copy">copy</button> <span class="kv" id="lt-note"></span></div>`+extra;
   extra=`<div style="margin-top:14px"><button class="ghost sm" data-sgopen="user:${esc(name)}">${self?"Me":"This user"} in the settings graph ↗</button></div>`+extra;
   const note=mode==="self"?"your profile and password; role and project access are set by an admin":mode==="view"?"another person's name and role; they and the admins see the rest":"";
   settingsBox(self?`My settings — ${rname(rec)}`:`User — ${rname(rec)}`,userFields(mode,self),rec,async(vals)=>{
@@ -1879,6 +1885,22 @@ async function userSettings(name){
       sdlg.querySelectorAll("#mp-cur,#mp-new,#mp-new2").forEach(i=>i.value="");
       sdlg.querySelector("#mp-note").textContent="password changed; other sessions signed out";
     }catch(e){sdlg.querySelector("#sf-err").textContent="password change failed: "+e.message;}
+  };
+  const lt=sdlg.querySelector("#lt-go");
+  if(lt)lt.onclick=async()=>{
+    sdlg.querySelector("#sf-err").textContent="";
+    const days=parseInt(sdlg.querySelector("#lt-days").value,10);
+    if(!Number.isInteger(days)||days<1||days>365){sdlg.querySelector("#sf-err").textContent="days must be 1–365";return;}
+    try{
+      const r=await api("/api/users/"+encodeURIComponent(me)+"/token",{method:"POST",body:JSON.stringify({ttl_days:days})});
+      const out=sdlg.querySelector("#lt-out");out.value=r.token;sdlg.querySelector("#lt-box").hidden=false;out.select();
+      sdlg.querySelector("#lt-note").textContent=`expires ${fmtTs(r.expires)} — copy it now; it is not shown again`;
+    }catch(e){sdlg.querySelector("#sf-err").textContent="token failed: "+e.message;}
+  };
+  const ltc=sdlg.querySelector("#lt-copy");
+  if(ltc)ltc.onclick=async()=>{
+    const out=sdlg.querySelector("#lt-out");
+    try{await navigator.clipboard.writeText(out.value);ltc.textContent="copied ✓";}catch(e){out.select();document.execCommand("copy");ltc.textContent="copied ✓";}
   };
   const add=sdlg.querySelector("#nu-add");
   if(add)add.onclick=async()=>{

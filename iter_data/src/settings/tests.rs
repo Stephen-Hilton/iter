@@ -107,6 +107,7 @@ impl T {
 }
 
 mod hardening;
+mod people;
 
 // ---------- settings graph ----------
 

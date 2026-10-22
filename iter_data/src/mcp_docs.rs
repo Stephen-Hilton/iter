@@ -70,7 +70,8 @@ impl ToolDoc {
     }
 
     pub fn description(&self) -> String {
-        let parts = [self.use_.to_string(), self.arguments(), self.example.to_string(), self.returns.to_string(), self.errors.clone(), self.limits.to_string()];
+        let limits = if PEOPLE_ONLY.contains(&self.name) { format!("{}{PEOPLE}", self.limits) } else { self.limits.to_string() };
+        let parts = [self.use_.to_string(), self.arguments(), self.example.to_string(), self.returns.to_string(), self.errors.clone(), limits];
         LABELS.iter().zip(parts).map(|(l, p)| format!("{l} {p}")).collect::<Vec<_>>().join("\n")
     }
 
@@ -80,7 +81,7 @@ impl ToolDoc {
             "name": self.name, "title": self.title, "description": self.description(),
             "inputSchema": {"type": "object", "properties": props, "required": self.required},
             "outputSchema": self.output,
-            "annotations": {"readOnlyHint": self.read_only, "destructiveHint": false, "idempotentHint": self.read_only, "openWorldHint": false},
+            "annotations": {"readOnlyHint": self.read_only, "destructiveHint": DESTRUCTIVE.contains(&self.name), "idempotentHint": self.read_only, "openWorldHint": false},
         })
     }
 }
@@ -156,6 +157,15 @@ fn brief() -> Value {
 pub const EX_ITEM: &str = "3f2a9c1e-5b7d-4e8a-9c0f-6f1c2a9b04de";
 #[cfg(test)]
 pub const EX_ITEM2: &str = "8d4e2b6a-1c3f-4a5e-b7d9-0e2f4a6c8b1d";
+/// the people-only tools' items: a question, a failed item, a duplicate, one to delete
+#[cfg(test)]
+pub const EX_QUESTION: &str = "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f";
+#[cfg(test)]
+pub const EX_FAILED: &str = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+#[cfg(test)]
+pub const EX_DUP: &str = "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70";
+#[cfg(test)]
+pub const EX_OLD: &str = "e5f6a7b8-c9d0-4e1f-9a2b-3c4d5e6f7a81";
 pub const EX_NODE: &str = "dd366398-147d-450e-a792-59ef7ae020bc";
 pub const EX_NODE2: &str = "f0ecfa98-f3cd-43f7-888b-64b9d3b53d81";
 pub const EX_USECASE: &str = "5f31ed6e-34c6-4a3f-a37e-5e04d0a6b44d";
@@ -176,13 +186,37 @@ pub fn docs() -> Vec<ToolDoc> {
         graph_node_create(), graph_node_update(), graph_edge_add(), graph_edge_remove(),
         req_create(), req_update(), req_move(), req_delete(), testlogs(), settings_graph(),
         rag_search(), rag_status(), rag_docs(), rag_doc(), rag_link_document(), rag_add_document(),
+        // people only (PEOPLE_ONLY)
+        whoami(), workitem_answer(), workitem_set_state(), workitem_stop(), workitem_priority(), workitem_reopen(),
+        workitem_edit(), workitem_clone(), workitem_duplicate_of(), workitem_explain(), workitem_delete(),
+        rag_delete_document(), rag_resummarize_document(),
     ]
 }
 
-/// The rendered `tools/list` entries (built once).
+/// The tools for a person's token only (2026-10-21): the webui's work queue
+/// controls and GraphRAG document upkeep, for a person or an agent acting as
+/// one (e.g. a claude.ai connector signed in as a user). Engine sessions —
+/// iter's own agents, who see only the item they work on — neither list nor
+/// call them.
+pub const PEOPLE_ONLY: &[&str] = &[
+    "whoami", "workitem_answer", "workitem_set_state", "workitem_stop", "workitem_priority", "workitem_reopen",
+    "workitem_edit", "workitem_clone", "workitem_duplicate_of", "workitem_explain", "workitem_delete",
+    "rag_delete_document", "rag_resummarize_document",
+];
+
+/// Tools that remove something for good (annotation destructiveHint).
+pub const DESTRUCTIVE: &[&str] = &["workitem_delete", "rag_delete_document", "req_delete", "graph_edge_remove"];
+
+/// Every rendered `tools/list` entry (built once).
 pub fn tools() -> &'static [Value] {
     static TOOLS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
     TOOLS.get_or_init(|| docs().iter().map(ToolDoc::render).collect())
+}
+
+/// The entries one caller sees: everything for a person's token, the
+/// people-only tools left out for an engine session.
+pub fn tools_for(person: bool) -> Vec<Value> {
+    tools().iter().filter(|t| person || !PEOPLE_ONLY.iter().any(|n| t["name"] == *n)).cloned().collect()
 }
 
 // ----- work queue -----
@@ -755,6 +789,216 @@ fn rag_add_document() -> ToolDoc {
         errors: errs("\"node files are indexed by the iter engine from the checkout; change the node with graph_node_update (or edit the file) instead\" — for *.iter.md; \"give `text` or `content_b64`\"; 400 too large (25 MB) or not a supported type; "),
         limits: "nothing is searchable until an engine has ingested it: one engine tick (5 s) plus extraction and embedding, ~5–30 s for a text under 1 MB; summaries follow minutes later. With live_engines 0 it stays queued until an engine serving the project checks in. A re-upload of the same filename replaces the document.",
         output: out(&[("id", t("string")), ("state", t("string")), ("searchable", t("boolean")), ("live_engines", t("integer")), ("waited_sec", t("integer")), ("message", t("string"))]),
+    }
+}
+
+// ----- people only (PEOPLE_ONLY) -----
+
+/// The note every people-only tool's Limits ends with.
+const PEOPLE: &str = "a person's token only (engine sessions — iter's own agents — cannot list or call it); it acts as that person, and the item's history names them.";
+
+fn people_errs(own: &str) -> String {
+    errs(&format!("{own}403 when your role cannot write (a viewer); "))
+}
+
+fn whoami() -> ToolDoc {
+    ToolDoc {
+        name: "whoami", title: "Who am I", read_only: true,
+        use_: "who this connection acts as on the project, and when its token expires — check it at the start of a session, and tell your person when token_days_left is under 14 (they mint a new token on their Settings page and replace it in the connector).",
+        props: vec![project()],
+        required: &[],
+        example: json!({"project": "pdy-dev"}),
+        returns: "{requestedby: string (user:<you>), sub: string, role: string (user|admin|viewer), token_expires: string (UTC, \"\" when unknown), token_days_left: integer|null, parent: null, by_workid: null}",
+        errors: COMMON_ERRORS.into(),
+        limits: "read at call time. ",
+        output: out(&[("requestedby", t("string")), ("sub", t("string")), ("role", t("string")), ("token_expires", t("string")), ("token_days_left", opt("integer"))]),
+    }
+}
+
+fn workitem_answer() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_answer", title: "Answer a question item", read_only: false,
+        use_: "answer a work item waiting on a person (state question, or one needing approval): fills its newest question form and queues the item again, exactly as the webui's Submit answer. Read the question first with workitem_details (the row whose value has `fields`).",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix")),
+                    ("answer", string("one free-text answer, for a form with a single field (or an `answer` field); no default")),
+                    ("answers", object("field key → value, for a form with several fields: text/combo a string, radio one option's value, checkbox a list of option values, int a whole number; no default"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "0a1b2c3d4e5f", "answer": "Retry on 502 and 504, twice each, then park with the gateway's response body."}),
+        returns: "{id: string, state: \"queued\", question: string (the form's title), answers: {key: value} (every field as saved), message: string}",
+        errors: people_errs("\"the item has no question to answer\"; \"this form has several fields: pass `answers` keyed by …\"; \"the form has no field X\"; \"the item is complete/failed: a closed item takes no answer (workitem_reopen it first)\"; \"the item is in progress\"; 400 when a value is not one of the field's options; 409 when the item changed meanwhile — read it again; "),
+        limits: "the newest question form only; answering requeues the item and clears a needed approval. ",
+        output: out(&[("id", t("string")), ("state", t("string")), ("answers", t("object")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_set_state() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_set_state", title: "Change a work item's state", read_only: false,
+        use_: "move one item to any state, as the webui's state menu: park or unpark (queued), pause or resume, close as complete or failed, or requeue; queueing also clears a needed approval, and run_now starts it even while the agent cap is full. To reopen a closed item use workitem_reopen; to stop a running one, workitem_stop.",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix")),
+                    ("state", one_of("the new state", &["queued", "parked", "paused", "question", "scheduled", "complete", "failed", "in-progress"], None)),
+                    ("reason", string("why, recorded on the item's history; no default")),
+                    ("run_now", boolean("with state queued: start it on the engine's next tick even when the agent cap is full", false))],
+        required: &["id", "state"],
+        example: json!({"project": "pdy-dev", "id": "0e2f4a6c8b1d", "state": "parked", "reason": "waiting for the gateway vendor's answer"}),
+        returns: "{id: string, was: string, state: string, run_now: boolean, message: string (what the change means: e.g. closing freezes the record, leaving in-progress does not stop the session)}",
+        errors: people_errs("\"unknown state X\"; \"run_now goes with state queued\"; 409 when the item changed meanwhile — read it again; "),
+        limits: "one item; closed states are complete and failed (frozen afterwards except notes, tags and reopen); in-progress is the engine's own state and starts no session. ",
+        output: out(&[("id", t("string")), ("was", t("string")), ("state", t("string")), ("run_now", t("boolean")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_stop() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_stop", title: "Stop a running item", read_only: false,
+        use_: "stop a work item mid-run, as the webui's Stop: the engine ends the agent session on its next tick and parks the item with a note.",
+        props: vec![project(), ("id", string("the running item: full id or a unique suffix"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "6f1c2a9b04de"}),
+        returns: "{id: string, ok: boolean, message: string}",
+        errors: people_errs("\"the item is X, not in-progress: nothing runs to stop\"; 409 when the item changed meanwhile — read it again; "),
+        limits: "takes effect on the engine's next tick (seconds); work the agent already committed stays in git. ",
+        output: out(&[("id", t("string")), ("ok", t("boolean")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_priority() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_priority", title: "Re-prioritise a work item", read_only: false,
+        use_: "set an open item's priority in place, as the webui's Set priority: lower runs sooner (0–9 do now, 10–39 use cases, 40–49 human, 50+ maintenance); the items it created follow it (children inherit exactly).",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix")), ("priority", integer("the new priority; no default", None, 0, 99))],
+        required: &["id", "priority"],
+        example: json!({"project": "pdy-dev", "id": "0e2f4a6c8b1d", "priority": 5}),
+        returns: "{id: string, priority: integer, changed: [string] (every item of the lineage that moved)}",
+        errors: people_errs("\"priority must be 0–99\"; 400 the item is closed; "),
+        limits: "open items only; the whole lineage this item created moves with it. ",
+        output: out(&[("id", t("string")), ("priority", t("integer")), ("changed", list(t("string")))]),
+    }
+}
+
+fn workitem_reopen() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_reopen", title: "Reopen a closed item", read_only: false,
+        use_: "send a failed or complete item back to the queue (resolve a failure and retry it), as the webui's Reopen: queued again with its gate bounces and last error cleared, the reason recorded.",
+        props: vec![project(), ("id", string("the closed item: full id or a unique suffix")), ("reason", string("why it is retried; recorded on its history; no default"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "1f2a3b4c5d6e", "reason": "the gateway credentials were rotated; retry"}),
+        returns: "{id: string, state: \"queued\", message: string}",
+        errors: people_errs("400 \"workitem is not closed\" — use workitem_set_state for open items; "),
+        limits: "closed items only; items that wait on it are blocked again until it closes. ",
+        output: out(&[("id", t("string")), ("state", t("string")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_edit() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_edit", title: "Edit a work item", read_only: false,
+        use_: "change an item's request text, name, agent, code paths, dependencies, tags, context or model, as the webui's edit form: only the arguments given change. State and priority have their own tools.",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix")),
+                    ("name", string("the new one-line name; no default")), ("request", string("the new instructions (replaces the request text); no default")),
+                    ("agent", string("the agent that runs it (code | plan | test | usecase | …); no default")),
+                    ("codepaths", strings("the lock scope, replacing it: {topdir}/… or repo-relative paths; no default")),
+                    ("depends_on", strings("ids or unique suffixes it waits for, replacing the list ([] clears it); no default")),
+                    ("depends_on_shallow", boolean("wait only for the named items, not their children", false)),
+                    ("tags", strings("the whole tag list, replacing it: text or text:#color; no default")),
+                    ("add_tags", strings("tags to add: text or text:#color; no default")), ("remove_tags", strings("tag texts to remove; no default")),
+                    ("context", strings("files or notes the agent reads first, replacing the list; no default")),
+                    ("model", string("model override for its runs (\"\" = the agent's); no default"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "0e2f4a6c8b1d", "request": "Add a gateway client with a 10 s timeout and two retries. Done when its unit tests pass.", "add_tags": ["gateway"]}),
+        returns: "{id: string, changed: [string] (the fields saved), message: string}",
+        errors: people_errs("\"nothing to change\"; \"the item is in progress: workitem_stop it … before editing\"; \"an item cannot depend on itself\"; 400 dependency cycle; 409 the item is closed (tags only) or changed meanwhile — read it again; "),
+        limits: "not while in progress; a closed item takes tag changes only. ",
+        output: out(&[("id", t("string")), ("changed", list(t("string"))), ("message", t("string"))]),
+    }
+}
+
+fn workitem_clone() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_clone", title: "Clone, follow up or run a schedule now", read_only: false,
+        use_: "file a new queued item from an existing one, as the webui's Clone, Follow-up and Run now: `copy` repeats it, `followup` files new work that waits for it (with the original request quoted), `run_now` starts one run of a schedule.",
+        props: vec![project(), ("id", string("the source item: full id or a unique suffix")),
+                    ("as", one_of("what to make", &["copy", "followup", "run_now"], Some("copy"))),
+                    ("request", string("the new request text: required for followup (what to do now); for copy it replaces the original; no default")),
+                    ("name", string("the new item's name; no default (the source's, or \"Follow-up: …\")"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "0e2f4a6c8b1d", "as": "followup", "request": "Use the new gateway client in the clearing export."}),
+        returns: "{id: string (the new item), from: string, as: string, state: string, requestedby: string, already_open: boolean, warnings: [string]}",
+        errors: people_errs("\"a follow-up needs `request`\"; \"run_now clones a scheduled item\"; \"`as` is copy, followup or run_now\"; "),
+        limits: "the new item is queued with the source's agent, priority, code paths, tags and context; a repeat of an open item is returned as already_open. ",
+        output: out(&[("id", t("string")), ("from", t("string")), ("as", t("string")), ("already_open", t("boolean"))]),
+    }
+}
+
+fn workitem_duplicate_of() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_duplicate_of", title: "Close an item as a duplicate", read_only: false,
+        use_: "close one open item as a duplicate of another (the survivor): it closes complete, and the survivor records it as seen again, with its request as evidence.",
+        props: vec![project(), ("id", string("the duplicate: full id or a unique suffix")), ("survivor", string("the item that stays: full id or a unique suffix")),
+                    ("reason", string("one sentence: why they are the same; no default"))],
+        required: &["id", "survivor"],
+        example: json!({"project": "pdy-dev", "id": "2b3c4d5e6f70", "survivor": "0e2f4a6c8b1d", "reason": "both add the same gateway client"}),
+        returns: "{id: string, state: \"complete\", survivor: string, survivor_repeats: integer, message: string}",
+        errors: people_errs("409 \"the duplicate is …\" / \"the survivor is …\" (closed or in progress); 400 \"survivor must name another workitem\"; "),
+        limits: "both open and not in progress; the survivor's priority is raised as for any repeat. ",
+        output: out(&[("id", t("string")), ("survivor", t("string")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_explain() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_explain", title: "Explain an item simply", read_only: false,
+        use_: "ask for a plain-language explanation of an item (the webui's ELI5): a read-only agent writes it as an \"explained\" row on the item's history; read it with workitem_details.",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "0e2f4a6c8b1d"}),
+        returns: "{id: string, ok: boolean, message: string}",
+        errors: people_errs(""),
+        limits: "any state; needs a live engine serving the project; usually 30–60 s. ",
+        output: out(&[("id", t("string")), ("ok", t("boolean")), ("message", t("string"))]),
+    }
+}
+
+fn workitem_delete() -> ToolDoc {
+    ToolDoc {
+        name: "workitem_delete", title: "Delete a work item", read_only: false,
+        use_: "remove an unwanted item for good, as the webui's Delete. To keep a record instead, close it with workitem_set_state (failed or complete) or workitem_duplicate_of.",
+        props: vec![project(), ("id", string("the item: full id or a unique suffix"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": "3c4d5e6f7a81"}),
+        returns: "{id: string, deleted: boolean}",
+        errors: people_errs("409 \"the test sweep cannot be deleted: pause it to turn it off\"; "),
+        limits: "cannot be undone; items that waited on it no longer do. ",
+        output: out(&[("id", t("string")), ("deleted", t("boolean"))]),
+    }
+}
+
+fn rag_delete_document() -> ToolDoc {
+    ToolDoc {
+        name: "rag_delete_document", title: "Delete a GraphRAG document", read_only: false,
+        use_: "remove an uploaded document from the project's GraphRAG index (its chunks and links go too). To update a document instead, upload it again under the same filename with rag_add_document: that replaces it.",
+        props: vec![project(), ("id", string("the document id (rag_docs lists them)")),
+                    ("remove_file", boolean("also remove its stored original from the project's docs directory", false))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": EX_DOC}),
+        returns: "{id: string, removed: string, file_removal: object|null}",
+        errors: people_errs("404 \"no GraphRAG document <id>\"; "),
+        limits: "cannot be undone; node files (*.iter.md) come back on the engine's next sync — change the node instead. ",
+        output: out(&[("id", t("string")), ("removed", t("string"))]),
+    }
+}
+
+fn rag_resummarize_document() -> ToolDoc {
+    ToolDoc {
+        name: "rag_resummarize_document", title: "Redo a document's summaries", read_only: false,
+        use_: "queue a document's chunk and document summaries to be written again (e.g. after the summary agent's prompt improved); its text and keyword search stay as they are meanwhile.",
+        props: vec![project(), ("id", string("the document id (rag_docs lists them)"))],
+        required: &["id"],
+        example: json!({"project": "pdy-dev", "id": EX_DOC}),
+        returns: "{id: string, result: {doc: string, chunks_reset: integer}, message: string}",
+        errors: people_errs("404 \"no GraphRAG document <id>\"; "),
+        limits: "an engine's Summary agent does the work (Haiku, billed to its account); rag_status shows the backlog. ",
+        output: out(&[("id", t("string")), ("result", t("object")), ("message", t("string"))]),
     }
 }
 
