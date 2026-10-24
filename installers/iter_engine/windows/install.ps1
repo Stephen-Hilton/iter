@@ -7,6 +7,11 @@ for the embedding model. A Linux engine inside a WSL2 distro is
 installers/iter_engine/linux_wsl instead.
 
   .\install.cmd [mode] [options]      (or: powershell -ExecutionPolicy Bypass -File .\install.ps1 ...)
+  .\install.cmd -Join CODE
+
+The join code (the webui's Engine keys -> Add an engine) is all this machine
+needs: it names iter_data's URL and certificate, and its one-time secret
+registers this machine's key, so nothing is pasted back into the webui.
 
 Modes:
   install     (default) set up or repair; safe to run again
@@ -19,6 +24,9 @@ Modes:
   uninstall   stop the engine, remove its logon task, binary and PATH entry (keeps the key, tokens, model)
 
 Options:
+  -Join CODE       a join code from the webui (Engine keys -> Add an engine; also
+                   $env:ITER_JOIN): the iter_data URL, the certificate to trust and the
+                   key's registration in one; the engine name too, when it names one
   -IterDir DIR     the folder that holds everything iter puts on this machine [C:\iter];
                    always ends in \iter: C:\my\dir\iter\, C:\my\dir\iter and C:\my\dir all give
                    C:\my\dir\iter (also $env:ITER_DIR; later runs find it from the logon task)
@@ -26,10 +34,10 @@ Options:
   -Name NAME       this engine's name, unique per machine (default: the hostname)
   -Version TAG     release to download, e.g. v2026.10.17 (else $env:ITER_VERSION, else latest)
   -Binary PATH     install this iter_engine.exe instead of downloading one
-  -Fingerprint FP  iter_data's certificate fingerprint (sha256:..., from the iter_data
-                   installer or the webui's Engine keys screen): pinned before sign-in
-  -TrustCa         iter_data is behind a TLS proxy with a real certificate: check it
-                   against certificate authorities instead of pinning
+  -Fingerprint FP  without a join code: iter_data's certificate fingerprint (sha256:...,
+                   from the iter_data installer or the webui's Engine keys screen)
+  -TrustCa         without a join code: iter_data is behind a TLS proxy with a public
+                   certificate (also chosen by itself when that is what it meets)
   -SecretsCommand CMD  a command (run by cmd /C) printing KEY=value lines: the account
                    tokens, from a secret store (aws ssm / secretsmanager, op, ...); the
                    engine runs it at startup and every -SecretsEvery minutes and keeps the
@@ -45,9 +53,10 @@ The steps of `install`: tools (Git for Windows, whose bash runs the shell
 steps; the claude CLI; asks before winget) -> iter_data URL + engine name
 (config\engine.conf) -> iter_engine.exe into bin\ (the asset next to this
 script, else the GitHub Release, sha256-checked; bin\ goes on the user PATH)
--> the embedding model into models\ -> the engine key (`iter_engine key new`:
-paste its public key into the webui's Engine keys screen; the script waits
-until iter_data accepts it) -> iter_data's local CA into the Windows certificate
+-> the embedding model into models\ -> the engine key (-Join: `iter_engine
+key join` trusts iter_data, makes the key and registers it; else `iter_engine
+key new`: paste its public key into the webui's Engine keys screen; the script
+waits until iter_data accepts it) -> iter_data's local CA into the Windows certificate
 store (browsers here trust the webui) -> a laptop: no sleep on AC power (asks) -> the
 logon task "iter engine" (runs bin\iter-engine.ps1 start, a copy of this
 script) -> account tokens and project checkouts.
@@ -81,6 +90,7 @@ does not know go to old-dot-iter\, and ~\.iter is removed only when empty.
 param(
     [ValidateSet('install', 'status', 'update', 'accounts', 'projects', 'start', 'stop', 'logs', 'uninstall')]
     [string]$Mode = 'install',
+    [string]$Join = $env:ITER_JOIN,
     [Alias('Iter_Dir')]
     [string]$IterDir = '',
     [string]$DataUrl = '',
@@ -224,6 +234,17 @@ function ConvertTo-WinArg([string]$a) {
     $b = $a -replace '(\\*)"', '$1$1\"'
     $b = $b -replace '(\\+)$', '$1$1'
     return '"' + $b + '"'
+}
+
+# a join code (iterjoin1_ + base64url of {"u": url, "s": secret, "p": [pins],
+# "n": engine name or "", "x": expiry unix seconds}) as an object; $null when it
+# is not one or is cut short
+function ConvertFrom-JoinCode([string]$code) {
+    $code = "$code".Trim()
+    if (-not $code.StartsWith('iterjoin1_')) { return $null }
+    $b = $code.Substring(10).Replace('-', '+').Replace('_', '/')
+    while ($b.Length % 4 -ne 0) { $b += '=' }
+    try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) | ConvertFrom-Json } catch { return $null }
 }
 
 function Load-Conf {
@@ -592,11 +613,34 @@ function Step-Tools {
     if (-not (Get-Command pdftoppm -ErrorAction SilentlyContinue)) { Warn 'pdftoppm (poppler) not found: GraphRAG skips PDF pages until it is on PATH' }
 }
 
+# config\engine.conf from the iter_data URL, the engine name and the secrets command
+function Write-Conf {
+    $lines = @("DATA_URL=$($script:DataUrl)", "ENGINE=$($script:Engine)")
+    if ($script:SecretsCmd) { $lines += "SECRETS_COMMAND=$($script:SecretsCmd)" }
+    if ($script:SecretsEvery) { $lines += "SECRETS_EVERY=$($script:SecretsEvery)" }
+    Step "write $Conf ($($lines -join ', '))" {
+        New-Item -ItemType Directory -Force $ConfDir | Out-Null
+        [IO.File]::WriteAllLines($Conf, [string[]]$lines)
+    }
+}
+
 function Step-Settings {
     $ErrorActionPreference = 'Continue'
     Say '2/8 iter_data and this engine''s name'
     $prior = Get-Conf DATA_URL
-    $url = if ($DataUrl) { $DataUrl } else { Ask "iter_data URL [$(if ($prior) { $prior } else { 'https://iter.example.com' })]:" $prior }
+    $joinName = ''
+    if ($Join) {
+        if (-not "$Join".Trim().StartsWith('iterjoin1_')) { throw '-Join: that is not a join code (iterjoin1_...): copy the whole line from the webui (Engine keys -> Add an engine)' }
+        $j = ConvertFrom-JoinCode $Join
+        if (-not $j -or -not $j.u) { throw '-Join: the code is cut short or mistyped: copy the whole line again' }
+        $url = "$($j.u)"
+        if (-not ($j.x -as [long]) -or [long]$j.x -lt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { throw '-Join: this join code has expired: make a new one in the webui (Engine keys -> Add an engine)' }
+        if ($DataUrl -and $DataUrl.TrimEnd('/') -ne $url.TrimEnd('/')) { Warn "-DataUrl $DataUrl ignored: the join code is for $url" }
+        if ($j.n) { $joinName = "$($j.n)" }
+        Ok "join code for $url$(if ($joinName) { ', engine "' + $joinName + '"' })"
+    } else {
+        $url = if ($DataUrl) { $DataUrl } else { Ask "iter_data URL [$(if ($prior) { $prior } else { 'https://iter.example.com' })]:" $prior }
+    }
     $url = "$url".TrimEnd('/')
     if (-not $url) {
         if (-not $DryRun) { throw 'the iter_data URL is required (-DataUrl URL)' }
@@ -612,20 +656,14 @@ function Step-Settings {
     # hostname keeps its case; $env:COMPUTERNAME is upper-cased and would register a second engine
     $priorName = Get-Conf ENGINE
     $def = if ($priorName) { $priorName } else { hostname }
-    $n = if ($Name) { $Name } else { Ask "engine name [$def]:" $def }
+    $n = if ($joinName) { $joinName } elseif ($Name) { $Name } else { Ask "engine name [$def]:" $def }
     if ($n -notmatch '^[A-Za-z0-9_.-]+$') { throw "engine name '$n': letters, digits, - _ . only" }
     Load-Secrets
-    $lines = @("DATA_URL=$url", "ENGINE=$n")
     if ($script:SecretsCmd) {
-        $lines += "SECRETS_COMMAND=$($script:SecretsCmd)"
         Ok "account tokens: from the secrets command, every $(if ($script:SecretsEvery) { $script:SecretsEvery } else { 5 }) min (values stay in the engine's memory)"
     }
-    if ($script:SecretsEvery) { $lines += "SECRETS_EVERY=$($script:SecretsEvery)" }
-    Step "write $Conf ($($lines -join ', '))" {
-        New-Item -ItemType Directory -Force $ConfDir | Out-Null
-        [IO.File]::WriteAllLines($Conf, [string[]]$lines)
-    }
     $script:DataUrl = $url; $script:Engine = $n
+    Write-Conf
     Ok "engine '$n' -> $url (in $Conf)"
     if (Get-ScheduledTask -TaskName 'iter startup' -ErrorAction SilentlyContinue) {
         Warn "the logon task 'iter startup' (deploy.ps1 startup) also starts a Windows engine from the repo; with this install, let it start only the WSL server distro"
@@ -641,11 +679,20 @@ function Step-Binary {
 # iter_data's certificate, before the first sign-in: -Fingerprint (or the one pasted
 # here) pins it now and stops when the server presents another one; -TrustCa checks
 # it against certificate authorities (a TLS proxy with a real certificate); else the
-# first sign-in trusts what it sees (trust on first use).
+# first sign-in trusts what it sees (trust on first use). -Join: the code says which
+# certificate to trust, and `key join` (step 5) pins it.
 function Step-Trust {
     $ErrorActionPreference = 'Continue'
     Say '3b/8 iter_data''s certificate'
     if ($script:DataUrl -notmatch '^https://') { Ok "$($script:DataUrl) is plain http to this machine: no certificate to trust"; return }
+    if ($Join) {
+        Ok 'the join code says which certificate to trust (step 5)'
+        if (-not $DryRun) {
+            & $Exe key join --help *> $null
+            if ($LASTEXITCODE -ne 0) { throw "this iter_engine ($Exe) is older than join codes: install a newer release (-Version), or run without -Join" }
+        }
+        return
+    }
     if ($TrustCa) {
         Invoke-Native "$Exe key trust --data-url $($script:DataUrl) --ca" { & $Exe key trust --data-url $script:DataUrl --ca }
         return
@@ -693,12 +740,14 @@ function Step-Model {
 function Step-Key {
     $ErrorActionPreference = 'Continue'
     Say '5/8 engine key'
+    if ($DryRun -and $Join) { Dry "$Exe key join <code> --name $($script:Engine) --key-file $KeyFile (trust iter_data as the code says, make the key, register it, sign in)"; return }
     if ($DryRun) {
         if (Test-Path $KeyFile) { Ok "$KeyFile exists" } else { Dry "$Exe key new --key-file $KeyFile --name $($script:Engine)" }
         Dry "wait until iter_data accepts it ($Exe key status)"; return
     }
     New-Item -ItemType Directory -Force $SecretsDir | Out-Null
     if (-not (Test-Path $EnvFile)) { New-Item -ItemType File $EnvFile | Out-Null }
+    if ($Join) { Invoke-JoinCode; return }
     if (-not (Test-Path $KeyFile)) { & $Exe key new --key-file $KeyFile --name $script:Engine | Out-Null }
     while ($true) {
         $out = & $Exe key status --key-file $KeyFile --data-url $script:DataUrl
@@ -717,6 +766,23 @@ function Step-Key {
     }
 }
 
+# the join code: trust, the key and its registration in one step; the engine name
+# iter_data recorded (another machine may have the name already) goes into engine.conf
+function Invoke-JoinCode {
+    if (Test-Path $KeyFile) {
+        $out = @(& $Exe key status --key-file $KeyFile --data-url $script:DataUrl 2>&1)
+        if ($LASTEXITCODE -eq 0) { $out | ForEach-Object { "    $_" } | Out-Host; Ok "iter_data accepts this engine's key already: the join code is not needed"; return }
+    }
+    $out = @(& $Exe key join $Join --name $script:Engine --key-file $KeyFile 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { $out | ForEach-Object { "    $_" } | Out-Host; throw 'the join code did not work (above)' }
+    $out | Where-Object { $_ -notmatch '^engine=' } | ForEach-Object { "    $_" } | Out-Host
+    $got = $out | Where-Object { $_ -match '^engine=' } | ForEach-Object { ($_ -replace '^engine=', '').Trim() } | Select-Object -Last 1
+    if ($got -and $got -ne $script:Engine) {
+        $script:Engine = $got; Write-Conf; Ok "engine name `"$got`" (in $Conf)"
+    }
+    Ok "iter_data accepts this engine's key"
+}
+
 # iter_data (--tls auto) signs its certificate with a local certificate
 # authority of its own, limited by name constraints to that server's names, local
 # DNS suffixes (.local .lan .internal .home.arpa) and loopback / private addresses:
@@ -729,7 +795,8 @@ function Step-Browsers {
     $ErrorActionPreference = 'Continue'
     Say '5b/8 browsers here trust iter_data'
     if ($script:DataUrl -notmatch '^https://') { Ok "$($script:DataUrl) is plain http: nothing to trust"; return }
-    if ($TrustCa) { Ok 'iter_data has a certificate from a public authority: browsers trust it already'; return }
+    $t = Get-TrustEntry $script:DataUrl
+    if ($TrustCa -or ($t -and $t.mode -eq 'ca')) { Ok 'iter_data has a certificate from a public authority: browsers trust it already'; return }
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $store = if ($admin) { 'Cert:\LocalMachine\Root' } else { 'Cert:\CurrentUser\Root' }
     if ($DryRun) { Dry "$Exe key ca --data-url $($script:DataUrl), then Import-Certificate into $store (Windows asks to confirm)"; return }
@@ -765,7 +832,8 @@ function Show-KeyHelp($status) {
     elseif ($why -match 'not reachable') { Write-Host "    (this machine cannot reach $($script:DataUrl): check the URL and that iter_data is running)" }
     Write-Host "`n    Paste this one line, this engine's public key (nothing else on this screen):`n`n      $pub`n"
     Write-Host "    Where: open $($script:DataUrl), sign in as an admin, click Engine keys (the key button) in the header, then Add."
-    Write-Host "    Paste the line above as the public key and type $($script:Engine) as the engine name. The list then shows key id ${id}.`n"
+    Write-Host "    Paste the line above as the public key and type $($script:Engine) as the engine name. The list then shows key id ${id}."
+    Write-Host "    (Or: Add an engine there makes a join code; run this script again with -Join CODE and nothing is pasted.)`n"
 }
 
 function Step-Power {

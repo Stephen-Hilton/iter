@@ -19,7 +19,16 @@
 //!   certificate and, during a rotation, the next one), and the pins follow
 //!   them, so a certificate change reaches the engine before the switch.
 //! - **mode `ca`** (`key trust --ca`): ordinary certificate-authority checks,
-//!   for iter_data behind a proxy with a real certificate.
+//!   for iter_data behind a proxy with a real certificate. Chosen by itself
+//!   whenever the certificate the engine first meets is one a public
+//!   authority issued for the URL's host (a TLS front, or iter_data with a
+//!   certificate of your own): it then keeps working when that certificate
+//!   is renewed. iter_data accepts such a front only under its own names
+//!   (iter_data keys.rs `check_seen`).
+//! - **A join code** (`key join`, iter_core::enginekey::JoinCode) says which
+//!   certificates iter_data serves itself: the engine pins them when it meets
+//!   one, takes mode ca when it meets a public certificate for the host, and
+//!   trusts nothing else.
 //! - **plain `http://`** only to this machine (127.0.0.1, ::1, localhost).
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -151,6 +160,8 @@ pub struct PinState {
     pub pins: RwLock<Vec<String>>,
     /// the fingerprint of the last certificate a handshake presented
     pub seen: Mutex<String>,
+    /// that handshake's certificates (DER, the server's first)
+    pub chain: Mutex<Vec<Vec<u8>>>,
 }
 
 impl PinState {
@@ -161,6 +172,14 @@ impl PinState {
     pub fn seen(&self) -> String {
         self.seen.lock().map(|s| s.clone()).unwrap_or_default()
     }
+    pub fn chain(&self) -> Vec<Vec<u8>> {
+        self.chain.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+}
+
+/// Does a public certificate authority vouch for `chain` as `url`'s host?
+pub fn publicly_valid(url: &str, chain: &[Vec<u8>]) -> bool {
+    iter_core::enginekey::public_chain_valid(chain, &host(url), &[]).is_ok()
 }
 
 #[derive(Debug)]
@@ -177,6 +196,9 @@ impl ServerCertVerifier for PinVerifier {
         let fp = iter_core::enginekey::fingerprint_der(end_entity.as_ref());
         if let Ok(mut s) = self.state.seen.lock() {
             *s = fp.clone();
+        }
+        if let Ok(mut c) = self.state.chain.lock() {
+            *c = std::iter::once(end_entity).chain(intermediates).map(|d| d.as_ref().to_vec()).collect();
         }
         if let Some(ca) = &self.ca {
             return ca.verify_server_cert(end_entity, intermediates, name, ocsp, now);
@@ -237,7 +259,7 @@ pub fn client(base: &str, timeout: Duration) -> Result<(reqwest::blocking::Clien
     } else {
         (None, Check::Pin)
     };
-    let state = Arc::new(PinState { pins: RwLock::new(if check == Check::Pin { entry.pins } else { Vec::new() }), seen: Mutex::new(String::new()) });
+    let state = Arc::new(PinState { pins: RwLock::new(if check == Check::Pin { entry.pins } else { Vec::new() }), ..Default::default() });
     let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
@@ -247,13 +269,45 @@ pub fn client(base: &str, timeout: Duration) -> Result<(reqwest::blocking::Clien
     Ok((b.use_preconfigured_tls(cfg).build().map_err(|e| e.to_string())?, Some(state), check))
 }
 
-/// After a signed sign-in over `state`'s connection: the fingerprint the
-/// engine saw must be one iter_data says it serves; then the pins become
-/// what it announced (or the one seen, when it announced none: it sits
-/// behind a TLS proxy). Saved when they changed.
+/// What `base` presents now, met with nothing pinned and nothing saved: its
+/// certificate's fingerprint and the chain (for `key trust` and `key join`,
+/// which decide what to trust from it).
+pub fn probe(base: &str) -> Result<(String, Vec<Vec<u8>>), String> {
+    if let Some(why) = refuse_reason(base) {
+        return Err(why);
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let state = Arc::new(PinState::default());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerifier { state: state.clone(), provider, ca: None }))
+        .with_no_client_auth();
+    let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).use_preconfigured_tls(cfg).build().map_err(|e| e.to_string())?;
+    let resp = http.get(format!("{}/health", base.trim_end_matches('/'))).send().map_err(|e| format!("could not reach {base}: {e}"))?;
+    let _ = resp.text();
+    Ok((state.seen(), state.chain()))
+}
+
+/// After a signed sign-in over `state`'s connection, on first contact or
+/// later: a certificate a public authority issued for the URL's host means
+/// mode ca from now on (a TLS front, or a certificate of your own; it may be
+/// renewed); otherwise the fingerprint the engine saw must be one iter_data
+/// says it serves, and the pins become what it announced (or the one seen,
+/// when it announced none: iter_data runs without TLS behind a front). Saved
+/// when they changed.
 pub fn adopt_announced(base: &str, state: &PinState, announced: &[String]) -> Result<(), String> {
     let seen = state.seen();
     if seen.is_empty() {
+        return Ok(());
+    }
+    if !state.pinned() && publicly_valid(base, &state.chain()) {
+        save(base, &Entry { mode: "ca".into(), pins: Vec::new() })?;
+        if let Ok(mut p) = state.pins.write() {
+            *p = vec![seen.clone()];
+        }
+        eprintln!("[engine] {base} presents a certificate a public authority issued for {}: checked against certificate authorities from now on", host(base));
         return Ok(());
     }
     if !announced.is_empty() && !announced.contains(&seen) {

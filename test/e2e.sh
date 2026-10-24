@@ -167,7 +167,7 @@ ok "iter_data up on :$PORT ($(curl -sf "$BASE/health" | jq -r .backend))"
 check "Arango: root made iter_data's own user, which holds rw on its database only" bash -c \
   "grep -q \"as user '$ARANGO_USER_E2E' ready\" '$SCRATCH/iter_data.log' && [ \"\$(curl -s -u 'root:$ARANGO_PW_E2E' '$ARANGO_URL_E2E/_api/user/$ARANGO_USER_E2E/database' | jq -c '[.result | to_entries[] | select(.value != \"none\")]')\" = '[{\"key\":\"$ARANGO_DB_E2E\",\"value\":\"rw\"}]' ]"
 if [ "$E2E_TLS" != off ]; then
-  check "TLS: a self-signed certificate made, key owner-only" bash -c "[ -f '$SCRATCH/tls.crt' ] && [ \"\$(stat -f %Lp '$SCRATCH/tls.key' 2>/dev/null || stat -c %a '$SCRATCH/tls.key')\" = 600 ]"
+  check "TLS: a self-signed certificate made, key owner-only" bash -c "[ -f '$SCRATCH/tls.crt' ] && [ \"\$(stat -c %a '$SCRATCH/tls.key' 2>/dev/null || stat -f %Lp '$SCRATCH/tls.key')\" = 600 ]"
   check "TLS: plain http is not served" bash -c "! curl -s -m 3 http://127.0.0.1:$PORT/health | grep -q ok"
 fi
 
@@ -206,11 +206,25 @@ api PUT /api/users/e2euser '{"role":"user","password":"e2e-user-pw-123","email":
 if [ "$E2E_TLS" != off ]; then
   FP=$(curl -sf -H "authorization: Bearer $TOKEN" "$BASE/api/server/tls" | jq -r .fingerprint)
   check "TLS: the first signed sign-in pinned iter_data's certificate" bash -c "jq -e --arg u 'https://127.0.0.1:$PORT' --arg f '$FP' '.servers[\$u].pins==[\$f]' '$ITER_HOME/config/server_trust.json'"
-  check "TLS: the trust file is owner-only" bash -c "[ \"\$(stat -f %Lp '$ITER_HOME/config/server_trust.json' 2>/dev/null || stat -c %a '$ITER_HOME/config/server_trust.json')\" = 600 ]"
+  check "TLS: the trust file is owner-only" bash -c "[ \"\$(stat -c %a '$ITER_HOME/config/server_trust.json' 2>/dev/null || stat -f %Lp '$ITER_HOME/config/server_trust.json')\" = 600 ]"
   check "TLS: key trust with the right fingerprint" "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "sha256:$FP"
   check "TLS: key trust with a wrong fingerprint refuses" bash -c "! '$ENGINE_BIN' key trust --data-url '$BASE' --fingerprint $(printf 'ab%.0s' $(seq 32))"
   "$ENGINE_BIN" key trust --data-url "$BASE" --fingerprint "$FP" >/dev/null
   check "plain http to another machine is refused" bash -c "'$ENGINE_BIN' key status --key-file '$SCRATCH/e2e.key' --data-url http://192.0.2.1:8400 2>&1 | grep -q 'must be reached over https'"
+  # a join code (2026-10-23): one line from the webui sets a new machine up,
+  # trust and key together; a second machine here is a second ITER_HOME
+  JOIN=$(curl -sf -X POST "$BASE/api/keys/join" -H "authorization: Bearer $TOKEN" -H content-type:application/json -d "{\"url\":\"$BASE\"}" | jq -r .code)
+  JH="$SCRATCH/joinhome"
+  jtamper() { # the code with its pins replaced: a code naming another server's certificate
+    local j; j="$(printf '%s' "${1#iterjoin1_}" | tr '_-' '/+')"; while [ $(( ${#j} % 4 )) != 0 ]; do j="$j="; done
+    printf 'iterjoin1_%s' "$(printf '%s' "$j" | base64 -d | jq -c '.p=["'"$(printf 'ab%.0s' $(seq 32))"'"]' | base64 | tr -d '\n=' | tr '/+' '_-')"
+  }
+  check "join: a code naming another certificate trusts and registers nothing" bash -c "! ITER_HOME='$JH' '$ENGINE_BIN' key join '$(jtamper "$JOIN")' --name Joined --key-file '$JH/secrets/engine.key' && [ ! -f '$JH/config/server_trust.json' ]"
+  check "join: the code sets a new machine up (trust, key, sign-in)" bash -c "ITER_HOME='$JH' '$ENGINE_BIN' key join '$JOIN' --name Joined --key-file '$JH/secrets/engine.key' | tail -1 | grep -qx engine=Joined"
+  check "join: it pinned iter_data's own certificate" bash -c "jq -e --arg u 'https://127.0.0.1:$PORT' --arg f '$FP' '.servers[\$u].mode==\"pin\" and (.servers[\$u].pins|index(\$f))' '$JH/config/server_trust.json'"
+  check "join: the joined key signs in" env ITER_HOME="$JH" "$ENGINE_BIN" key status --key-file "$JH/secrets/engine.key" --data-url "$BASE"
+  check "join: run again on the machine it set up, the used code is not needed" bash -c "ITER_HOME='$JH' '$ENGINE_BIN' key join '$JOIN' --key-file '$JH/secrets/engine.key' | tail -1 | grep -qx engine=Joined"
+  check "join: a used code registers no other machine" bash -c "! ITER_HOME='$JH-2' '$ENGINE_BIN' key join '$JOIN' --name Other --key-file '$JH-2/secrets/engine.key'"
 fi
 
 # agents first: a project created afterwards gets a `runs` edge per agent

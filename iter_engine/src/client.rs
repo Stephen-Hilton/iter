@@ -206,11 +206,46 @@ impl Api {
         Ok(body)
     }
 
+    /// The certificates the last handshake presented, base64 DER (sent with a
+    /// sign-in, so iter_data can check a TLS front's certificate).
+    fn seen_chain_b64(&self) -> Vec<String> {
+        use base64::Engine as _;
+        self.pin.as_ref().map(|p| p.chain().iter().map(|d| base64::engine::general_purpose::STANDARD.encode(d)).collect()).unwrap_or_default()
+    }
+
+    /// Register this machine's `key` with a join code's `secret`, as engine
+    /// `engine` (when the code names none): (the engine name iter_data
+    /// recorded, whether the key was registered already). Only over a trusted
+    /// connection: the secret never goes to a server this engine does not trust.
+    pub fn join(&self, secret: &str, key: &SigningKey, engine: &str) -> Result<(String, bool), ApiError> {
+        if let Some(e) = self.untrusted() {
+            return Err(e);
+        }
+        let tls_fp = self.seen_fingerprint()?;
+        let resp = self
+            .http
+            .post(format!("{}/auth/engine/join", self.base))
+            .json(&json!({
+                "secret": secret, "public_key": iter_core::enginekey::format_public(&key.verifying_key().to_bytes()),
+                "engine": engine, "tls_fp": tls_fp, "tls_chain": self.seen_chain_b64(),
+            }))
+            .send()
+            .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
+        let v = Self::handle(resp)?;
+        Ok((v["engine"].as_str().unwrap_or(engine).to_string(), v["already"].as_bool().unwrap_or(false)))
+    }
+
     /// One signed login with `key`: (session token, its expiry). It signs the
     /// certificate fingerprint it sees, so iter_data refuses it when relayed
     /// through anything else, and it pins (or re-pins) what iter_data
     /// confirms it serves.
     pub fn login_with(&self, key: &SigningKey) -> Result<(String, i64), ApiError> {
+        let v = self.login_answer(key)?;
+        Ok((v["token"].as_str().unwrap_or_default().to_string(), v["expires_at"].as_i64().unwrap_or(0)))
+    }
+
+    /// `login_with`, answering with iter_data's whole reply (token, engine, tls).
+    pub fn login_answer(&self, key: &SigningKey) -> Result<Value, ApiError> {
         let kid = iter_core::enginekey::key_id(&key.verifying_key().to_bytes());
         let tls_fp = self.seen_fingerprint()?;
         let (ts, nonce) = (now_secs(), uuid::Uuid::new_v4().simple().to_string());
@@ -218,13 +253,12 @@ impl Api {
         let resp = self
             .http
             .post(format!("{}/auth/engine", self.base))
-            .json(&json!({"key_id": kid, "ts": ts, "nonce": nonce, "tls_fp": tls_fp, "signature": sig}))
+            .json(&json!({"key_id": kid, "ts": ts, "nonce": nonce, "tls_fp": tls_fp, "tls_chain": self.seen_chain_b64(), "signature": sig}))
             .send()
             .map_err(|e| ApiError { status: 0, body: e.to_string() })?;
         let v = Self::handle(resp)?;
         self.adopt_tls(&v)?;
-        let token = v["token"].as_str().unwrap_or_default().to_string();
-        Ok((token, v["expires_at"].as_i64().unwrap_or(0)))
+        Ok(v)
     }
 
     /// Pin what a sign-in answer says iter_data serves (pin mode only).

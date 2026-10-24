@@ -331,6 +331,11 @@ impl TlsState {
         self.current.read().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// The names on iter_data's own certificate (none without TLS of its own).
+    pub fn names(&self) -> Vec<String> {
+        if self.mode == Mode::Off { Vec::new() } else { self.names.clone() }
+    }
+
     pub fn next_fingerprint(&self) -> String {
         self.next.read().map(|s| s.clone()).unwrap_or_default()
     }

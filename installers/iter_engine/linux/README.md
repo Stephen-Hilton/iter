@@ -6,9 +6,13 @@ For a distro inside WSL2 on Windows, use `../linux_wsl` instead.
 
 ## Install
 
+In the webui, open 🔑 Engine keys → **Add an engine** and make a join code. It shows this line with the code in it; run it on the machine:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash -s -- --version v2026.10.17
+curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash -s -- --join iterjoin1_…
 ```
+
+The code carries iter_data's URL, which certificate to trust and a one-time secret that registers this machine's key, so nothing is pasted back into the webui. It works once and expires (24 hours by default). The engine name is the hostname unless the code names one; when another engine has the name already, iter_data gives this one `<name>-2` (the script writes the name it got into `config/engine.conf`). Without a code the script asks for the URL and prints a public key to paste, as below. Add `--version TAG` for a given release.
 
 From a downloaded copy of this folder: `./install.sh`. It uses the `iter_engine-linux-<arch>` file next to it when one is there. Otherwise it downloads that file and `SHA256SUMS` from the GitHub Release (`--version`, else the latest) and checks the sha256.
 
@@ -49,13 +53,14 @@ Only links live outside the folder: `/etc/systemd/system/iter-engine.service` an
 
 | | |
 |---|---|
+| `--join CODE` | a join code from the webui (Engine keys → Add an engine; also `$ITER_JOIN`): the URL, the certificate to trust and the key's registration in one |
 | `--iter-dir DIR` | the one folder everything goes in (default `/opt/iter`; later runs: where it is installed); always ends in `iter` |
 | `--data-url URL` | the iter_data URL, `https://` (otherwise it asks) |
 | `--name NAME` | the engine name, unique per machine (default: the hostname) |
 | `--version TAG` | the release to download (else `$ITER_VERSION`, else the latest) |
 | `--binary PATH` | install this iter_engine file instead of downloading one |
-| `--fingerprint FP` | iter_data's certificate fingerprint (`sha256:…`), pinned before the first sign-in |
-| `--trust-ca` | iter_data is behind a TLS proxy with a real certificate: check it against certificate authorities |
+| `--fingerprint FP` | without a join code: iter_data's certificate fingerprint (`sha256:…`), pinned before the first sign-in |
+| `--trust-ca` | without a join code: iter_data is behind a TLS proxy with a public certificate: check it against certificate authorities (also chosen by itself when the engine meets such a certificate) |
 | `--secrets-command CMD` | a command printing the account tokens as `KEY=value` lines, from a secret store ([below](#account-tokens-from-a-secret-store)); `none` removes it |
 | `--secrets-every N` | minutes between its runs (default 5) |
 | `--yes` | answer yes to every question |
@@ -96,13 +101,14 @@ The iter_data URL must be `https://`. iter_data serves HTTPS by default, and the
 
 iter_data's certificate is usually its own (signed by a local certificate authority iter_data makes, not a public one), so the engine does not ask a certificate authority about it. It pins the certificate's **fingerprint** (`sha256:` + 64 hex) in `config/server_trust.json`, one entry per server:
 
-- **Given up front** (recommended): `--fingerprint sha256:…`, or paste it when the script asks. The iter_data installer prints it, and the webui shows it in the 🔑 Engine keys screen. Right after the binary is installed, the script runs `iter_engine key trust --data-url URL --fingerprint …`, which pins it only if the server presents that same certificate. If it does not, the script stops: something else answers at that URL.
+- **From a join code** (recommended): `--join CODE`. The code names the certificates iter_data serves itself. `iter_engine key join` pins them when the server presents one; when it presents a certificate a public certificate authority issued for the URL's host instead (a TLS proxy or load balancer in front of iter_data), it checks with certificate authorities from then on. Anything else is refused and nothing is registered. iter_data accepts such a front only under its own names: its certificate's and the URL of every join code made.
+- **Given up front**: `--fingerprint sha256:…`, or paste it when the script asks. The iter_data installer prints it, and the webui shows it in the 🔑 Engine keys screen. Right after the binary is installed, the script runs `iter_engine key trust --data-url URL --fingerprint …`, which pins it only if the server presents that same certificate. If it does not, the script stops: something else answers at that URL.
 - **Trust on first use**: press Enter at the question, and the first signed sign-in pins the certificate it sees. Compare it afterwards with `iter_engine key status`, which prints the trusted certificate.
-- **A TLS proxy with a real certificate** in front of iter_data: `--trust-ca` (`iter_engine key trust --ca`) checks it against certificate authorities instead.
+- **A TLS proxy with a public certificate** in front of iter_data: `--trust-ca` (`iter_engine key trust --ca`) checks it against certificate authorities instead. Trust on first use and `iter_engine key trust` choose this by themselves when that is the certificate they meet.
 
 When iter_data's certificate changes on purpose, iter_data announces the next fingerprint at each sign-in, so the engine follows it. A certificate replaced by hand (for example `--tls-cert` on the server) needs `iter_engine key trust --data-url URL --fingerprint …` again; `iter_engine key trust --forget` drops the entry.
 
-**Browsers on this machine.** iter_data (`--tls auto`) signs its certificate with a local certificate authority of its own, name-constrained to that server's names, `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. Once iter_data accepts the key, the script fetches that CA over the pinned connection (`iter_engine key ca --data-url URL`) and adds it to the system store (`update-ca-certificates` or `update-ca-trust`) and, when a browser is installed, to the NSS databases Chrome, Chromium and Firefox read (`~/.pki/nssdb`, snap and flatpak copies, Firefox profiles; `certutil` from libnss3-tools/nss-tools). The webui then opens as secure here after a browser restart. Skipped for plain `http://` and `--trust-ca`; a failure is only a warning.
+**Browsers on this machine.** iter_data (`--tls auto`) signs its certificate with a local certificate authority of its own, name-constrained to that server's names, `.local`/`.lan`/`.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site. Once iter_data accepts the key, the script fetches that CA over the pinned connection (`iter_engine key ca --data-url URL`) and adds it to the system store (`update-ca-certificates` or `update-ca-trust`) and, when a browser is installed, to the NSS databases Chrome, Chromium and Firefox read (`~/.pki/nssdb`, snap and flatpak copies, Firefox profiles; `certutil` from libnss3-tools/nss-tools). The webui then opens as secure here after a browser restart. Skipped for plain `http://` and when the certificate is checked against certificate authorities; a failure is only a warning.
 
 Key commands: `iter_engine key show` prints this engine's public key (never the private one), `iter_engine key status` checks the key and the trusted certificate, and `iter_engine key rotate --data-url URL` replaces the key: the current key signs the new one, so no webui step is needed (a revoked key cannot rotate). The engine signs in only with its key.
 

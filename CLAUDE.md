@@ -62,8 +62,14 @@ committed) and one self-contained install script per program and platform. Insta
 
 - Engines sign in only with their own Ed25519 key (`iter_engine key new|show|rotate`); never add a user-token
   path for engines. Engine sessions and people's tokens use separate signing secrets.
+- Join codes (`iter_engine key join`, iter_data keys.rs) only register one engine key, once: admin-made,
+  expiring, iter_data keeps only the secret's hash, the secret goes only over a connection the engine already
+  trusts, and a code that names no engine never takes a name an engine with a live key has. Never make a code a
+  sign-in or reusable.
 - iter_data serves HTTPS (`--tls auto` by default); engines pin its certificate fingerprint (`iter_engine/config/server_trust.json`,
-  `iter_engine key trust`) and refuse plain `http://` except to this machine. Tests and the local dev loop use `--tls off`
+  `iter_engine key trust`) and refuse plain `http://` except to this machine. A TLS front (proxy, load balancer) is
+  accepted only with a certificate a public authority issued for one of iter_data's names (its own and every join
+  code's URL host; `check_seen`); keep the sign-in's signed fingerprint check for everything else. Tests and the local dev loop use `--tls off`
   on 127.0.0.1 only.
 - Browsers: `--tls auto` signs iter_data's certificate with a local CA of its own (`state/tls-ca.crt`), which the
   installers add to each machine's trust stores. Keep that CA name-constrained to the server's names, local

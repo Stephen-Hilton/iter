@@ -1,4 +1,4 @@
-//! `iter_engine key new | show | rotate | trust | status | session`
+//! `iter_engine key join | new | show | rotate | trust | status | session`
 //! (2026-10-11, rotate/show/trust 2026-10-17): the engine machine's own
 //! Ed25519 key, the way it proves who it is to iter_data (shapes and the
 //! sign-in: iter_core::enginekey), and the server certificate it trusts
@@ -17,6 +17,11 @@
 //! for a server behind a TLS proxy); `status` signs in with each key and
 //! shows the trusted certificate; `session` prints a session token for a
 //! script's own API calls.
+//!
+//! `join <code>` (2026-10-23) sets a machine up from a join code made in the
+//! webui (iter_core::enginekey::JoinCode): it trusts iter_data as the code
+//! says, makes the key when there is none, registers it with the code's
+//! one-time secret and signs in once, so nothing is pasted into the webui.
 
 use crate::client::{Api, load_key, next_key_file};
 use ed25519_dalek::SigningKey;
@@ -32,6 +37,19 @@ pub struct KeyArgs {
 
 #[derive(clap::Subcommand, Debug)]
 enum Action {
+    /// set this machine up from a join code (the webui's Engine keys → Add
+    /// engine): trust iter_data as the code says, make the key when there is
+    /// none, register it, sign in. Prints `engine=<name>` last
+    Join {
+        /// the join code (iterjoin1_…)
+        code: String,
+        /// this engine's name, when the code names none [this machine's short hostname]
+        #[arg(long)]
+        name: Option<String>,
+        /// key file [<iter dir>/iter_engine/secrets/engine.key]
+        #[arg(long)]
+        key_file: Option<String>,
+    },
     /// make this machine's engine key (the next key when one exists) and
     /// print its public key, to add in the webui's Engine keys screen
     New {
@@ -165,6 +183,16 @@ pub fn default_key_file() -> PathBuf {
 
 pub fn run(args: KeyArgs) {
     match args.action {
+        Action::Join { code, name, key_file } => {
+            let file = key_file.map(PathBuf::from).unwrap_or_else(default_key_file);
+            std::process::exit(match join(&code, name.as_deref(), &file) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            })
+        }
         Action::New { key_file, name } => {
             let file = key_file.map(PathBuf::from).unwrap_or_else(default_key_file);
             std::process::exit(match new(&file, &name.unwrap_or_else(crate::short_hostname)) {
@@ -321,6 +349,83 @@ fn rotate(file: &Path, url: &str) -> Result<(), String> {
     }
 }
 
+/// `key join`: trust, key, registration and a first sign-in from one code.
+fn join(code: &str, name: Option<&str>, file: &Path) -> Result<(), String> {
+    let c = enginekey::decode_join(code).ok_or("that is not a join code: copy the whole iterjoin1_… line from the webui (🔑 Engine keys → Add engine)")?;
+    if c.expires < chrono::Utc::now().timestamp() {
+        return Err("this join code has expired: make a new one in the webui (🔑 Engine keys → Add engine)".into());
+    }
+    let url = c.url.trim_end_matches('/').to_string();
+    trust_from_code(&url, &c.pins)?;
+    let engine = if !c.engine.is_empty() {
+        if name.is_some_and(|n| n != c.engine) {
+            println!("the join code is for engine \"{}\": that name is used", c.engine);
+        }
+        c.engine.clone()
+    } else {
+        name.map(String::from).unwrap_or_else(crate::short_hostname)
+    };
+    let api = Api::new(&url, "");
+    let key = if file.exists() {
+        let k = load_key(file)?;
+        // set up already (an installer run again): the code is not needed
+        if let Ok(v) = api.login_answer(&k) {
+            let got = v["engine"].as_str().unwrap_or(&engine).to_string();
+            println!("this machine's key (id {}) signs in to {url} already, as engine \"{got}\": the join code was not needed", public(&k).1);
+            println!("engine={got}");
+            return Ok(());
+        }
+        k
+    } else {
+        let k = write_key(file)?;
+        println!("made this machine's engine key (id {}): {}", public(&k).1, file.display());
+        k
+    };
+    let (got, already) = api.join(&c.secret, &key, &engine).map_err(|e| format!("iter_data refused the join code: {}", e.body.trim()))?;
+    let id = public(&key).1;
+    if already {
+        println!("iter_data has this machine's key already (id {id}, engine \"{got}\"): the code was not needed and stays unused");
+    } else {
+        println!("iter_data registered this machine's key (id {id}) as engine \"{got}\"");
+    }
+    if got != engine {
+        println!("(an engine named \"{engine}\" exists already, so this one is \"{got}\")");
+    }
+    api.login_with(&key).map_err(|e| format!("registered, but the first sign-in failed: {e}"))?;
+    println!("signed in to {url}");
+    println!("engine={got}");
+    Ok(())
+}
+
+/// Trust `url` as a join code says: one of `pins` (iter_data's own
+/// certificates) is pinned; a certificate a public authority issued for the
+/// host (a TLS front) means mode ca; anything else is refused and nothing
+/// is saved.
+fn trust_from_code(url: &str, pins: &[String]) -> Result<(), String> {
+    use crate::trust;
+    if let Some(why) = trust::refuse_reason(url) {
+        return Err(why);
+    }
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return Ok(());
+    }
+    let (seen, chain) = trust::probe(url)?;
+    if pins.contains(&seen) {
+        trust::save(url, &trust::Entry { mode: "pin".into(), pins: pins.to_vec() })?;
+        println!("trusted: {url} presents iter_data's own certificate sha256:{seen}, as the join code says");
+    } else if trust::publicly_valid(url, &chain) {
+        trust::save(url, &trust::Entry { mode: "ca".into(), pins: Vec::new() })?;
+        println!("trusted: {url} presents a certificate a public authority issued for {} (a TLS front before iter_data)", trust::host(url));
+    } else {
+        return Err(format!(
+            "{url} presents certificate sha256:{seen}, which is neither one the join code names ({}) nor one a public certificate authority issued for {}: NOT trusted, nothing was registered. Something else answers at that URL, or the code is from another iter_data",
+            if pins.is_empty() { "none".to_string() } else { pins.iter().map(|p| format!("sha256:{p}")).collect::<Vec<_>>().join(", ") },
+            trust::host(url)
+        ));
+    }
+    Ok(())
+}
+
 /// Make, check or drop the trust in iter_data's certificate.
 /// `key ca`: iter_data's local CA, fetched over the trusted connection.
 fn server_ca(url: &str, out: Option<&str>) -> Result<(), String> {
@@ -367,13 +472,22 @@ fn trust(url: &str, fingerprint: Option<&str>, ca: bool, forget: bool) -> Result
         None => None,
     };
     // a fresh connection with nothing pinned, to see what the server presents
-    trust::forget(url)?;
-    let api = Api::new(url, "");
-    let seen = api.seen_fingerprint().map_err(|e| format!("could not reach {url}: {e}"))?;
+    let (seen, chain) = trust::probe(url)?;
     if let Some(w) = &want {
         if *w != seen {
-            return Err(format!("{url} presents certificate sha256:{seen}, not the sha256:{w} you gave: NOT trusted (something may be in between)"));
+            return Err(format!(
+                "{url} presents certificate sha256:{seen}, not the sha256:{w} you gave: NOT trusted (something may be in between){}",
+                if trust::publicly_valid(url, &chain) {
+                    format!(". It is a certificate a public authority issued for {}, so iter_data is probably behind a TLS proxy: run this again without --fingerprint (or use a join code)", trust::host(url))
+                } else {
+                    String::new()
+                }
+            ));
         }
+    } else if trust::publicly_valid(url, &chain) {
+        trust::save(url, &trust::Entry { mode: "ca".into(), pins: Vec::new() })?;
+        println!("trusted: {url} presents a certificate a public authority issued for {}: checked against certificate authorities (it may be renewed)", trust::host(url));
+        return Ok(());
     }
     trust::save(url, &trust::Entry { mode: "pin".into(), pins: vec![seen.clone()] })?;
     if want.is_some() {

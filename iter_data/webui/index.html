@@ -194,6 +194,10 @@ input,select,textarea{background:var(--bg);color:var(--text);border:1px solid va
 .keys .ktable td.kact{text-align:right;white-space:nowrap}
 .keys .ks-active{color:var(--ok)}.keys .ks-expiring{color:var(--warn)}.keys .ks-revoked{color:var(--dim)}
 .keys tr.krevoked td{color:var(--dim)}
+.keys .kjoin{margin:8px 0;padding:8px 10px;border:1px solid var(--line);border-radius:6px}
+.keys .kcmd{display:flex;gap:6px;align-items:flex-start;margin:4px 0}
+.keys .kcmd .kcl{flex:0 0 120px;color:var(--dim);font-size:11.5px;padding-top:4px}
+.keys .kcmd pre{flex:1 1 auto;min-width:0;margin:0;padding:4px 6px;background:#23272e;border-radius:4px;font-size:11.5px;white-space:pre-wrap;word-break:break-all}
 .keys .krot td{background:var(--panel)}
 .keys .kwrap{overflow-x:auto}
 @media (max-width:760px){.projrow .gear{padding:4px 8px}}
@@ -1918,16 +1922,31 @@ async function userSettings(name){
    (`iter_engine key new`); the private key stays on the machine and only its
    public key is pasted here. Rotate takes a new public key from the same
    machine (the engine switches to it by itself once it is accepted); Revoke
-   stops a key, and every session signed in with it, at once. */
-async function keysScreen(note){
+   stops a key, and every session signed in with it, at once.
+   Add engine (2026-10-23): a one-time join code for a new machine, the only
+   thing carried to it; its installer (--join) trusts this server and
+   registers the machine's key by itself (iter_core enginekey::JoinCode). */
+const INSTALLERS="https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine";
+function joinCommands(code){
+  return [
+    ["Linux",`curl -fsSL ${INSTALLERS}/linux/install.sh | bash -s -- --join ${code}`],
+    ["macOS",`curl -fsSL ${INSTALLERS}/macos/install.sh | bash -s -- --join ${code}`],
+    ["Windows (PowerShell)",`irm ${INSTALLERS}/windows/install.ps1 -OutFile $env:TEMP\\iter-install.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\\iter-install.ps1 -Join ${code}`],
+    ["WSL2",`curl -fsSL ${INSTALLERS}/linux_wsl/install.sh | bash -s -- --join ${code}`],
+    ["Docker",`curl -fsSL ${INSTALLERS}/docker/install.sh | bash -s -- --join ${code}`],
+    ["engine installed already",`iter_engine key join ${code}`],
+  ];
+}
+async function keysScreen(note,joined){
   const r=await api("/api/keys");
-  const keys=r.keys||[],tls=r.tls||{};
+  const keys=r.keys||[],tls=r.tls||{},joins=r.joins||[],names=r.public_names||[];
   const fp=f=>f?`sha256:${esc(f)}`:"";
+  const fronts=names.length?` Behind a TLS proxy or load balancer with a public certificate, engines check that certificate with certificate authorities instead; this server accepts it for ${names.map(n=>`<code>${esc(n)}</code>`).join(", ")} (the URLs of join codes made here).`:"";
   const tlsBox=tls.mode==="off"||!tls.mode
     ?`<div class="kv" id="k-tls">This server speaks plain HTTP (<code>--tls off</code>): fine on one machine or behind a TLS proxy, never across a network.</div>`
-    :`<div class="kv" id="k-tls">Engines reach this server over HTTPS and trust exactly this certificate (${tls.mode==="auto"?"made by iter_data":"the one given with --tls-cert"}):
+    :`<div class="kv" id="k-tls">Engines that reach this server directly trust exactly this certificate (${tls.mode==="auto"?"made by iter_data":"the one given with --tls-cert"}):
         <div class="kid" style="margin:4px 0;word-break:break-all"><b>${fp(tls.fingerprint)}</b></div>
-        An engine pins it at its first signed sign-in; compare it with <code>iter_engine key status</code> on the machine, or give it up front with <code>iter_engine key trust --fingerprint …</code>.
+        A join code carries it, so nothing needs comparing.${fronts}
         ${tls.mode==="auto"?`<div style="margin-top:6px">Browsers: the certificate is signed by this server's own certificate authority, which can vouch only for this server (its names, local names and private addresses). The installers add it to each machine they install on, so the webui opens as secure there; on any other machine, <a href="/tls/ca.crt" download="iter_data-ca.crt">download the CA certificate</a> and add it to that machine's trusted certificate authorities.${tls.ca_fingerprint?` <span class="kv">(CA sha256:${esc(tls.ca_fingerprint)})</span>`:""}</div>`:""}
         ${tls.next_fingerprint?`<div style="margin-top:6px">Next certificate, announced to engines since ${esc(fmtTs(tls.next_created))} ${esc(tzAbbrev())} (each picks it up at its next sign-in, within 12 hours): <span class="kid" style="word-break:break-all">${fp(tls.next_fingerprint)}</span></div>`:""}
         ${tls.rotatable?`<div style="margin-top:6px">${tls.next_fingerprint?`<button class="ghost sm" id="k-tls-promote">switch to the next certificate</button> `:""}<button class="ghost sm" id="k-tls-next">${tls.next_fingerprint?"make another next certificate":"prepare a new certificate"}</button></div>`:""}
@@ -1941,7 +1960,16 @@ async function keysScreen(note){
         :`${t.status==="active"?`<button class="ghost sm" data-krot="${esc(t.id)}">rotate…</button> `:""}<button class="ghost sm" data-krev="${esc(t.id)}">revoke</button>`}</td></tr>`;
   sdlg.innerHTML=`<div class="sf keys" style="padding:16px">
     <div class="dlghead"><h2>Engine keys</h2><button class="ghost sm" id="sf-close">close</button></div>
-    <div class="kv" style="margin:6px 0 10px">An engine proves who it is with a key of its own. On the engine machine, <code>iter_engine key new</code> makes it and <code>iter_engine key show</code> prints its public key (<code>iter_…</code>): paste that here. The private key never leaves the machine, so nothing secret is copied. An engine replaces its own key with <code>iter_engine key rotate</code> (no step here; the old key keeps working an hour). <b>Rotate…</b> below does the same from this screen with a key made by <code>iter_engine key new</code>. <b>Revoke</b> stops a key at once, along with every session it signed in; a revoked key can never rotate itself, so that engine is set up again.</div>
+    <div class="kv" style="margin:6px 0 10px">An engine proves who it is with a key of its own, made on its machine; the private key never leaves it. <b>Add an engine</b> makes a one-time join code: run the installer line it shows on the new machine and it sets itself up, trusting this server and registering its key; nothing comes back here. (By hand: <code>iter_engine key new</code> makes the key and <code>iter_engine key show</code> prints its public key, <code>iter_…</code>, to paste under <b>Add a key</b>.) An engine replaces its own key with <code>iter_engine key rotate</code> (no step here; the old key keeps working an hour). <b>Rotate…</b> below does the same from this screen with a key made by <code>iter_engine key new</code>. <b>Revoke</b> stops a key at once, along with every session it signed in; a revoked key can never rotate itself, so that engine is set up again.</div>
+    <h3>Add an engine</h3>
+    <div class="kadd"><input name="tok" id="kj-url" value="${esc(location.origin)}" title="this server's URL as the new engine machine reaches it" autocomplete="off" spellcheck="false">
+      <input name="eng" id="kj-eng" placeholder="engine name (optional)" title="empty: the machine's own hostname (made unique)" autocomplete="off">
+      <select id="kj-hours" title="how long the code works"><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select>
+      <button class="sm" id="kj-make">make a join code</button></div>
+    <div class="help">The URL is this server as the new machine reaches it (the address in this browser, unless that machine uses another). The code works once, until it expires.</div>
+    ${joined?`<div class="kjoin" id="kj-out"><div class="kv">Join code for ${joined.engine?`engine <b>${esc(joined.engine)}</b>`:"the machine's own name"}, until ${esc(fmtTs(joined.expires))} ${esc(tzAbbrev())}. On the new machine, run the line for its system:</div>
+      ${joinCommands(joined.code).map(([l,c],i)=>`<div class="kcmd"><span class="kcl">${esc(l)}</span><pre>${esc(c)}</pre><button class="ghost sm" data-kjcopy="${i}">copy</button></div>`).join("")}</div>`:""}
+    ${joins.length?`<div class="kv" style="margin-top:6px">Unused join codes: ${joins.map(j=>`<span class="kid">${esc(j.join_id.slice(0,8))}</span> (${j.engine?esc(j.engine):"any name"}, until ${esc(fmtTs(j.expires))}) <button class="ghost sm" data-kjcancel="${esc(j.join_id)}">cancel</button>`).join(" · ")}</div>`:""}
     <h3>Server certificate</h3>
     ${tlsBox}
     <h3>Add a key</h3>
@@ -1956,6 +1984,17 @@ async function keysScreen(note){
   const err=m=>{sdlg.querySelector("#sf-err").textContent=m;};
   const run=async(fn,done)=>{err("");try{await fn();await keysScreen(done);}catch(e){err(e.message);}};
   sdlg.querySelector("#sf-close").onclick=()=>sdlg.close();
+  sdlg.querySelector("#kj-make").onclick=async()=>{
+    err("");
+    const url=sdlg.querySelector("#kj-url").value.trim(),engine=sdlg.querySelector("#kj-eng").value.trim(),hours=+sdlg.querySelector("#kj-hours").value;
+    try{const j=await api("/api/keys/join",{method:"POST",body:JSON.stringify({url,engine,hours})});await keysScreen("",j);}catch(e){err(e.message);}
+  };
+  if(joined)sdlg.querySelectorAll("[data-kjcopy]").forEach(b=>b.onclick=async()=>{
+    const text=joinCommands(joined.code)[+b.dataset.kjcopy][1];
+    try{await navigator.clipboard.writeText(text);}catch(e){const t=document.createElement("textarea");t.value=text;document.body.appendChild(t);t.select();document.execCommand("copy");t.remove();}
+    b.textContent="copied ✓";
+  });
+  sdlg.querySelectorAll("[data-kjcancel]").forEach(b=>b.onclick=()=>run(()=>api(`/api/keys/join/${encodeURIComponent(b.dataset.kjcancel)}`,{method:"DELETE"}),"join code cancelled"));
   sdlg.querySelector("#k-add").onclick=()=>{
     const public_key=sdlg.querySelector("#k-pub").value.trim(),engine=sdlg.querySelector("#k-eng").value.trim(),label=sdlg.querySelector("#k-label").value.trim();
     if(!public_key||!engine)return err("paste a public key and name its engine");

@@ -150,13 +150,21 @@ Engines never accept plain `http://` across a network: an engine installer stops
 unless iter_data runs on that same machine (127.0.0.1, localhost, ::1). Each engine pins iter_data's
 fingerprint in `iter_engine/config/server_trust.json`:
 
-1. Install iter_data and copy the fingerprint it prints.
+1. Easiest, a **join code** (2026-10-23): in the webui, 🔑 Engine keys → Add an engine makes a one-time
+   code and shows the install line for each platform with it (`--join CODE`, Windows `-Join CODE`). The
+   code carries the URL, the fingerprints of iter_data's own certificates and a secret that registers
+   the machine's key once (`iter_engine key join`), so nothing else is copied either way. When the URL
+   presents a certificate a public authority issued for its host instead (a TLS proxy or load balancer
+   in front, `--tls auto` behind it is fine), the engine checks it with certificate authorities, and
+   iter_data accepts that front for its own names and every join code's URL host only.
 2. Install each engine with `--data-url https://<host>:8400 --fingerprint sha256:…` (Windows:
    `-DataUrl … -Fingerprint …`), or paste the fingerprint when the script asks. The script runs
    `iter_engine key trust --data-url URL --fingerprint …` right after the binary is installed. If the
    server presents a different certificate it stops, because something else answers at that URL.
 3. Or press Enter at that question: the engine trusts the certificate at its first sign-in. Compare it
-   afterwards with `iter_engine key status`, which prints the trusted certificate.
+   afterwards with `iter_engine key status`, which prints the trusted certificate. A publicly trusted
+   certificate for the URL's host is checked against certificate authorities instead of pinned, so it
+   may be renewed.
 
 Browsers: the local CA is name-constrained to iter_data's names (with every `--tls-name`), `.local`/`.lan`/
 `.internal`/`.home.arpa` and loopback/private addresses, so it cannot vouch for any public site; iter_data
@@ -171,8 +179,9 @@ a certificate of your own or an engine's `--trust-ca`, and a failure is only a w
 installer opens `<data url>/tls/ca.crt` and trusts it as a certificate authority. The iter_data installers take
 `--tls-cert PATH --tls-key PATH` to serve a certificate of your own (copied into iter_data's folder, key mode
 600), `--tls-name NAME` (repeatable) to add names to iter_data's own, and `--tls off` for iter_data behind a TLS proxy on the
-same host. An engine that reaches iter_data through a proxy with a real certificate uses `--trust-ca`
-(`iter_engine key trust --ca`) instead of a fingerprint.
+same host. An engine that reaches iter_data through a proxy with a public certificate checks it against
+certificate authorities (a join code, `--trust-ca` or `iter_engine key trust --ca`; trust on first use
+chooses it by itself) instead of a fingerprint.
 
 Engine key commands: `iter_engine key show` prints the public key; `iter_engine key rotate --data-url URL`
 replaces the key, signed by the current one, with no webui step (a revoked key cannot rotate);

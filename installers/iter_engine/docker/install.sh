@@ -5,8 +5,12 @@
 # run inside the container, so a project whose steps need tools from the host
 # wants a native engine instead (installers/iter_engine/linux, macos, windows).
 #
-#   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/docker/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/docker/install.sh | bash -s -- --join CODE
 #   ./install.sh [verb] [options]
+#
+# The join code (the webui's Engine keys -> Add an engine) is all this machine
+# needs: it names iter_data's URL and certificate, and its one-time secret
+# registers this engine's key, so nothing is pasted back into the webui.
 #
 # Verbs:
 #   install     (default) set up or repair; safe to run again
@@ -19,6 +23,9 @@
 #   uninstall   stop and remove the container and its image (keeps <iter dir>/iter_engine and the checkouts)
 #
 # Options:
+#   --join CODE       a join code from the webui (Engine keys -> Add an engine; also
+#                     $ITER_JOIN): the iter_data URL, the certificate to trust and the
+#                     key's registration in one; the engine name too, when it names one
 #   --iter-dir DIR    the folder that holds everything iter installs [/opt/iter, under
 #                     Docker Desktop ~/iter; $ITER_DIR;
 #                     later runs: where it is installed]. Forgiving: /my/dir/iter/, /my/dir/iter
@@ -32,10 +39,10 @@
 #                     same path; every serves edge's topdir must be inside it
 #   --version TAG     release to download, e.g. v2026.10.17 (else $ITER_VERSION, else latest)
 #   --binary PATH     put this iter_engine-linux-<arch> file in the image instead
-#   --fingerprint FP  iter_data's certificate fingerprint (sha256:..., from the iter_data
-#                     installer or the webui's Engine keys screen): pinned before sign-in
-#   --trust-ca        iter_data is behind a TLS proxy with a real certificate: check it
-#                     against certificate authorities instead of pinning
+#   --fingerprint FP  without a join code: iter_data's certificate fingerprint (sha256:...,
+#                     from the iter_data installer or the webui's Engine keys screen)
+#   --trust-ca        without a join code: iter_data is behind a TLS proxy with a public
+#                     certificate (also chosen by itself when that is what it meets)
 #   --secrets-command CMD  a shell command printing KEY=value lines (the account tokens,
 #                     from a secret store); it runs INSIDE the container (add the CLI it
 #                     needs to the Dockerfile), at startup and every --secrets-every
@@ -68,8 +75,9 @@
 # HTTPS: iter_data must be https:// (it serves HTTPS by default); plain http://
 # is refused, because from inside the container iter_data is always across a
 # network, even on this host. The engine pins iter_data's certificate
-# fingerprint in config/server_trust.json: --fingerprint (or the fingerprint
-# pasted when asked) runs `iter_engine key trust` in the image right after it
+# fingerprint in config/server_trust.json: a join code (--join) says which
+# certificate to trust and registers the key (`iter_engine key join`, in the
+# image); without one, --fingerprint (or the fingerprint pasted when asked) runs `iter_engine key trust` in the image right after it
 # is built and stops if the server presents another certificate; without one,
 # the first sign-in trusts the certificate it sees (compare: install.sh status).
 # Browsers: iter_data signs its certificate with a local CA of its own (name-
@@ -90,10 +98,13 @@ IHOME="$HOME/.iter"
 ITER_DIR_OPT="${ITER_DIR:-}"
 
 VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_CHECKOUTS="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
+JOIN="${ITER_JOIN:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|update|accounts|projects|logs|uninstall) VERB="$1" ;;
     --iter-dir|--iter_dir) ITER_DIR_OPT="${2:?--iter-dir needs a folder}"; shift ;;
+    --join) JOIN="${2:?--join needs the code from the webui (Engine keys -> Add an engine)}"; shift ;;
+    --join=*) JOIN="${1#*=}" ;;
     --data-url) OPT_URL="${2:?--data-url needs a URL}"; shift ;;
     --name) OPT_NAME="${2:?--name needs a name}"; shift ;;
     --checkouts) OPT_CHECKOUTS="${2:?--checkouts needs a folder}"; shift ;;
@@ -136,6 +147,25 @@ confval() { [ -f "$CONF" ] && grep -E "^$1=" "$CONF" | tail -1 | cut -d= -f2- ||
 envval() { [ -f "$2" ] && grep -E "^[[:space:]]*$1=" "$2" | tail -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//' | tr -d '\r' || true; }
 # shellcheck disable=SC2088  # the topdir arrives as text with a literal ~
 expand() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
+# b64d: base64 from stdin (GNU and macOS base64, else openssl)
+b64d() {
+  local b; b="$(cat)"
+  if command -v base64 >/dev/null 2>&1 && printf '%s' "$b" | base64 --decode 2>/dev/null; then return 0; fi
+  command -v openssl >/dev/null 2>&1 && printf '%s' "$b" | openssl base64 -d -A 2>/dev/null
+}
+# join_field KEY: one field of the join code (u url, n engine name, x expiry);
+# jq when the host has it, else the code's compact JSON read with sed
+join_field() {
+  local b j="${JOIN#iterjoin1_}"
+  b="$(printf '%s' "$j" | tr -d " \t\r\n\"'" | tr '_-' '/+')"
+  while [ $(( ${#b} % 4 )) != 0 ]; do b="$b="; done
+  j="$(printf '%s' "$b" | b64d)" || true
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$j" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null || true
+  else
+    printf '%s' "$j" | sed -n -e "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" -e "t" -e "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p" | head -1
+  fi
+}
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 [ "$(id -u)" != 0 ] || die "run this as your own user, not root (the container runs as you)"
@@ -274,6 +304,11 @@ check_url() {
         || die "$1 is plain http: iter_data must be reached over https:// (iter_data serves HTTPS by default), so the engine's session token and the work never cross the network unencrypted; plain http:// is only for iter_data on this machine (127.0.0.1, localhost, ::1). Try https://${1#http://}" ;;
     *) die "$1: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" ;;
   esac
+}
+# how config/server_trust.json trusts this URL: pin, ca, or "" (not yet / no jq on the host)
+trust_mode() {
+  [ -f "$TRUSTF" ] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg o "$(trust_origin "$DATA_URL")" '.servers[$o].mode // empty' "$TRUSTF" 2>/dev/null || true
 }
 # does config/server_trust.json have an entry for this URL yet?
 has_trust() { [ -f "$TRUSTF" ] && grep -qF "\"$(trust_origin "$1")\"" "$TRUSTF"; }
@@ -429,7 +464,23 @@ settings() {
   say "2/8 iter_data, this engine's name, the checkouts folder"
   load_conf
   local url name host
-  url="${OPT_URL:-$(ask "iter_data URL [${DATA_URL:-https://iter.example.com}]:" "${DATA_URL:-}")}"
+  if [ -n "$JOIN" ]; then
+    JOIN="$(printf '%s' "$JOIN" | tr -d " \t\r\n\"'")"
+    case "$JOIN" in iterjoin1_*) ;; *) die "--join: that is not a join code (iterjoin1_...): copy the whole line from the webui (Engine keys -> Add an engine)" ;; esac
+    url="$(join_field u)"
+    [ -n "$url" ] || die "--join: the code is cut short or mistyped (or this host has neither base64 nor openssl): copy the whole line again"
+    [ "$(join_field x)" -ge "$(date +%s)" ] 2>/dev/null || die "--join: this join code has expired: make a new one in the webui (Engine keys -> Add an engine)"
+    url="${url%/}"
+    # the engine in the container reaches the URL in the code, as it is
+    case "$(url_host "$url")" in
+      127.*|localhost|::1) die "--join: the code is for $url, which inside the container is the container itself. Make the code in the webui opened at an address this host's containers reach (e.g. https://host.docker.internal:<port> or the host's name), or run without --join (--data-url https://host.docker.internal:<port>)" ;;
+    esac
+    [ -z "$OPT_URL" ] || [ "${OPT_URL%/}" = "$url" ] || warn "--data-url $OPT_URL ignored: the join code is for $url"
+    [ -z "$(join_field n)" ] || OPT_NAME="$(join_field n)"
+    ok "join code for $url${OPT_NAME:+, engine \"$OPT_NAME\"}"
+  else
+    url="${OPT_URL:-$(ask "iter_data URL [${DATA_URL:-https://iter.example.com}]:" "${DATA_URL:-}")}"
+  fi
   url="${url%/}"
   if [ -z "$url" ]; then
     [ $DRY = 1 ] || die "the iter_data URL is required (--data-url URL)"
@@ -578,6 +629,12 @@ image() {
 trust() {
   say "5b/8 iter_data's certificate"
   case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http to this machine: no certificate to trust"; return ;; esac
+  if [ -n "$JOIN" ]; then
+    ok "the join code says which certificate to trust (step 6)"
+    [ $DRY = 1 ] || in_image iter_engine key join --help >/dev/null 2>&1 \
+      || die "the iter_engine in the image is older than join codes: install a newer release (--version, then install.sh update), or run without --join"
+    return
+  fi
   if [ $TRUST_CA = 1 ]; then
     run in_image iter_engine key trust --data-url "$DATA_URL" --ca || die "could not reach $DATA_URL with a certificate-authority check"
     return
@@ -600,6 +657,10 @@ key() {
   say "6/8 engine key"
   [ -f "$ENVF" ] || run touch "$ENVF"
   run chmod 600 "$ENVF"
+  if [ $DRY = 1 ] && [ -n "$JOIN" ]; then
+    printf '    [dry-run] (in the image) iter_engine key join <code> --name %s --key-file %s (trust iter_data as the code says, make the key, register it, sign in)\n' "$ENGINE" "$KEYF"; return
+  fi
+  if [ -n "$JOIN" ]; then join_code; return; fi
   if [ $DRY = 1 ]; then
     if [ -f "$KEYF" ]; then ok "$KEYF exists"; else printf '    [dry-run] (in the image) iter_engine key new --key-file %s --name %s\n' "$KEYF" "$ENGINE"; fi
     printf '    [dry-run] wait until iter_data accepts it (iter_engine key status)\n'; return
@@ -618,6 +679,25 @@ key() {
          printf '    checking again...\n' ;;
     esac
   done
+}
+
+# the join code, in the image (so config/server_trust.json and the key land in
+# the mounted folder the container reads): trust, the key and its registration
+# in one step; the engine name iter_data recorded (another machine may have the
+# name already) goes into engine.conf and the compose .env
+join_code() {
+  local out got
+  if [ -f "$KEYF" ] && in_image iter_engine key status --key-file "$KEYF" --data-url "$DATA_URL" > "$TMPF" 2>&1; then
+    sed 's/^/    /' "$TMPF"; ok "iter_data accepts this engine's key already: the join code is not needed"; return
+  fi
+  out="$(in_image iter_engine key join "$JOIN" --name "$ENGINE" --key-file "$KEYF" 2>&1 </dev/null)" \
+    || { printf '%s\n' "$out" | sed 's/^/    /' >&2; die "the join code did not work (above)"; }
+  printf '%s\n' "$out" | grep -v '^engine=' | sed 's/^/    /'
+  got="$(printf '%s\n' "$out" | sed -n 's/^engine=//p' | tail -1 | tr -d '\r')"
+  if [ -n "$got" ] && [ "$got" != "$ENGINE" ]; then
+    ENGINE="$got"; conf_text | write_file "$CONF"; compose_settings; ok "engine name \"$ENGINE\" (in $CONF and $CTX/.env)"
+  fi
+  ok "iter_data accepts this engine's key"
 }
 
 # ------------------------------------------------------------------ browsers trust iter_data
@@ -727,7 +807,7 @@ host_trust() {
 browsers() {
   say "6b/8 browsers on this host trust iter_data"
   case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http: nothing to trust"; return ;; esac
-  [ $TRUST_CA = 0 ] || { ok "iter_data has a certificate from a public authority: browsers trust it already"; return; }
+  if [ $TRUST_CA = 1 ] || [ "$(trust_mode)" = ca ]; then ok "iter_data has a certificate from a public authority: browsers trust it already"; return; fi
   if [ $DRY = 1 ]; then
     printf '    [dry-run] (in the image) iter_engine key ca --data-url %s, then add it to this host'"'"'s trust stores (%s)\n' "$DATA_URL" "$(uname -s)"
     return
@@ -755,7 +835,8 @@ key_help() {
   esac
   printf "\n    Paste this one line, this engine's public key (nothing else on this screen):\n\n      %s\n\n" "$pub"
   printf '    Where: open %s, sign in as an admin, click 🔑 Engine keys in the header, then Add.\n' "$DATA_URL"
-  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n\n' "$ENGINE" "$id"
+  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n' "$ENGINE" "$id"
+  printf '    (Or: Add an engine there makes a join code; run this script again with --join CODE and nothing is pasted.)\n\n'
 }
 
 up() {

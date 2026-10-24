@@ -70,4 +70,42 @@ test.describe('engine keys', () => {
       await expect(rowOf(page, k.id)).toHaveCount(0);
     }
   });
+
+  // Add an engine (2026-10-23): a one-time join code, shown with the install
+  // line per platform; the machine registers its own key with it
+  test('a join code registers one engine key, once', async ({ page, state }) => {
+    const engine = 'pwjoin' + crypto.randomBytes(3).toString('hex');
+    const k = newKey();
+    await page.goto('/');
+    await page.locator('#keys-btn').click();
+    await expect(keys(page)).toBeVisible();
+    await expect(keys(page).locator('#kj-url')).toHaveValue(state.base);
+    await keys(page).locator('#kj-eng').fill(engine);
+    await keys(page).locator('#kj-make').click();
+    const out = keys(page).locator('#kj-out');
+    await expect(out).toContainText(engine);
+    await expect(out.locator('pre').first()).toContainText('install.sh | bash -s -- --join iterjoin1_');
+    await expect(out).toContainText('-Join iterjoin1_');
+    await shot(page, 'keys-join');
+    const line = await out.locator('pre').last().textContent();
+    const code = line.match(/iterjoin1_[A-Za-z0-9_-]+/)[0];
+    const c = JSON.parse(Buffer.from(code.slice('iterjoin1_'.length), 'base64url').toString());
+    expect([c.u, c.n]).toEqual([state.base, engine]);
+    // the unused code is listed; the machine uses it with its own public key
+    await expect(keys(page)).toContainText('Unused join codes');
+    const api = new Api(state.base);
+    const r = await api.call('POST', '/auth/engine/join', { secret: c.s, public_key: k.pub, engine: 'whatever', tls_fp: '' });
+    expect(r.status).toBe(200);
+    expect(await signsIn(state, k)).toBe(true);
+    expect((await api.call('POST', '/auth/engine/join', { secret: c.s, public_key: newKey().pub, engine: 'other', tls_fp: '' }, [401])).status).toBe(401);
+    await page.locator('#sf-close').click();
+    await page.locator('#keys-btn').click();
+    await expect(rowOf(page, k.id)).toContainText(engine);
+    await expect(rowOf(page, k.id)).toContainText('joined with a code');
+    // a code made and cancelled registers nothing
+    await keys(page).locator('#kj-make').click();
+    await expect(keys(page).locator('[data-kjcancel]')).toHaveCount(1);
+    await keys(page).locator('[data-kjcancel]').click();
+    await expect(keys(page).locator('[data-kjcancel]')).toHaveCount(0);
+  });
 });

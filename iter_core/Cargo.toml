@@ -12,6 +12,10 @@ uuid = { version = "1", features = ["v4"] }
 serde_yaml = "0.9"
 glob = "0.3.4"
 sha2 = "0.10"
+# enginekey: join codes (base64url) and the public-certificate check both programs make
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
 # rag/ (GraphRAG text extraction, chunking, embedding; was the iter_rag crate)
 candle-core = "0.11.0"
 candle-nn = "0.11.0"

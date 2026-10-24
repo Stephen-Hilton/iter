@@ -15,6 +15,22 @@
 //! id is the first 12 hex of the key's SHA-256. The `iter_` prefix on a
 //! session token lets a proxy in front of iter_data (an ALB rule) tell an
 //! engine's requests from a browser's.
+//!
+//! Join codes (decided 2026-10-23): the one thing a person carries from
+//! iter_data to a new engine machine. An admin makes one in the Engine keys
+//! screen (Add engine); it holds iter_data's URL, the fingerprints of the
+//! certificates iter_data serves itself, the engine name chosen (or none) and
+//! a one-time secret, and expires within hours. `iter_engine key join <code>`
+//! (the installers' `--join`) trusts iter_data from it, makes the engine's
+//! key and registers that key with the secret (`POST /auth/engine/join`), so
+//! nothing is pasted back. The secret only ever registers one engine key,
+//! once; the engine still signs in only with its own key.
+//!
+//! A TLS front (a proxy or load balancer with its own certificate before
+//! iter_data): the engine sees the front's certificate, not one of
+//! iter_data's. Both sides accept it only when a public certificate authority
+//! vouches for it under one of iter_data's own names (`public_chain_valid`),
+//! the same bar a browser sets; anything else in between is still refused.
 
 use sha2::{Digest, Sha256};
 
@@ -81,6 +97,72 @@ pub fn normalize_fingerprint(s: &str) -> Option<String> {
     (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
 }
 
+/// What a join code carries (short keys: the code is pasted whole).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct JoinCode {
+    /// iter_data's URL, as engines reach it
+    #[serde(rename = "u")]
+    pub url: String,
+    /// the one-time secret, 64 hex; iter_data keeps only its `join_id`
+    #[serde(rename = "s")]
+    pub secret: String,
+    /// the certificates iter_data serves itself (fingerprints); [] without TLS of its own
+    #[serde(rename = "p", default)]
+    pub pins: Vec<String>,
+    /// the engine name the admin chose ("" = the machine's own name)
+    #[serde(rename = "n", default)]
+    pub engine: String,
+    /// when the code stops working (unix seconds)
+    #[serde(rename = "x")]
+    pub expires: i64,
+}
+
+pub const JOIN_PREFIX: &str = "iterjoin1_";
+
+/// The code as it is shown and pasted: `iterjoin1_` + base64url of its JSON.
+pub fn encode_join(code: &JoinCode) -> String {
+    use base64::Engine as _;
+    let json = serde_json::to_vec(code).unwrap_or_default();
+    format!("{JOIN_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+}
+
+/// A pasted join code (surrounding space and quotes ignored); None when it is not one.
+pub fn decode_join(s: &str) -> Option<JoinCode> {
+    use base64::Engine as _;
+    let b = s.trim().trim_matches(|c| c == '"' || c == '\'').strip_prefix(JOIN_PREFIX)?;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b.trim_end_matches('=')).ok()?;
+    let c: JoinCode = serde_json::from_slice(&json).ok()?;
+    (c.secret.len() == 64 && unhex(&c.secret).is_some() && !c.url.is_empty()).then_some(c)
+}
+
+/// A join secret's id, the only form iter_data keeps: the first 24 hex of its SHA-256.
+pub fn join_id(secret: &str) -> String {
+    hex(&Sha256::digest(secret.as_bytes()))[..24].to_string()
+}
+
+/// A fresh join secret: 32 random bytes as 64 hex.
+pub fn new_join_secret() -> String {
+    hex(&uuid::Uuid::new_v4().into_bytes().into_iter().chain(uuid::Uuid::new_v4().into_bytes()).collect::<Vec<u8>>())
+}
+
+/// Does a public certificate authority (the Mozilla roots browsers ship, plus
+/// `extra_roots` for tests) vouch for `chain` (DER: the server's certificate,
+/// then its intermediates) as a TLS server certificate for `name`, now?
+pub fn public_chain_valid(chain: &[Vec<u8>], name: &str, extra_roots: &[Vec<u8>]) -> Result<(), String> {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    let (leaf, rest) = chain.split_first().ok_or("no certificate")?;
+    let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    for r in extra_roots {
+        roots.add(CertificateDer::from(r.clone())).map_err(|e| e.to_string())?;
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let v = rustls::client::WebPkiServerVerifier::builder_with_provider(std::sync::Arc::new(roots), provider).build().map_err(|e| e.to_string())?;
+    let sn = ServerName::try_from(name.trim_start_matches('[').trim_end_matches(']').to_string()).map_err(|e| format!("{name}: {e}"))?;
+    let inter: Vec<CertificateDer> = rest.iter().map(|d| CertificateDer::from(d.clone())).collect();
+    v.verify_server_cert(&CertificateDer::from(leaf.clone()), &inter, &sn, &[], UnixTime::now()).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// The JWT inside an engine session token, if `bearer` is one.
 pub fn session_jwt(bearer: &str) -> Option<&str> {
     bearer.strip_prefix(SESSION_PREFIX).filter(|j| j.contains('.'))
@@ -120,5 +202,26 @@ mod tests {
         assert_eq!(normalize_fingerprint(&"zz".repeat(32)), None);
         assert_eq!(fingerprint_der(b"x").len(), 64);
         assert_eq!(unhex("0g"), None);
+    }
+
+    #[test]
+    fn join_codes_round_trip_and_keep_only_an_id_of_the_secret() {
+        let c = JoinCode { url: "https://iter.example.com".into(), secret: new_join_secret(), pins: vec!["ab".repeat(32)], engine: "lap1".into(), expires: 1_900_000_000 };
+        let s = encode_join(&c);
+        assert!(s.starts_with(JOIN_PREFIX) && !s.contains(['+', '/', '=', ' ']), "{s}");
+        assert_eq!(decode_join(&format!("  '{s}'\n")), Some(c.clone()));
+        assert_eq!(decode_join(&s[..s.len() - 4]), None);
+        assert_eq!(decode_join("iter_abc"), None);
+        assert_eq!(join_id(&c.secret).len(), 24);
+        assert_ne!(new_join_secret(), new_join_secret());
+        // no pins and no name: still a code (iter_data behind a front, --tls off)
+        let bare = JoinCode { pins: vec![], engine: String::new(), ..c };
+        assert_eq!(decode_join(&encode_join(&bare)), Some(bare));
+    }
+
+    #[test]
+    fn a_chain_no_public_authority_signed_is_not_valid() {
+        assert!(public_chain_valid(&[], "iter.example.com", &[]).is_err());
+        assert!(public_chain_valid(&[b"not a certificate".to_vec()], "iter.example.com", &[]).is_err());
     }
 }

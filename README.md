@@ -34,8 +34,11 @@ irm https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_e
 ```
 
 Add `--version vYYYY.MM.DD` (`-Version` on Windows) for a fixed release; without it the latest is used.
-Every script takes `--help` and `--dry-run`. The engine installers ask for the iter_data URL and a name
-unique to the machine, make the engine key and wait while you register it in the Engine keys screen, then
+Every script takes `--help` and `--dry-run`. For an engine, first make a join code in the webui (🔑 Engine
+keys → Add an engine): it shows the install line with the code in it (`--join CODE`, `-Join CODE` on
+Windows), and the installer then trusts iter_data, makes the machine's key and registers it by itself.
+Without a code the engine installers ask for the iter_data URL and a name unique to the machine, make the
+engine key and wait while you register it in the Engine keys screen. Either way they then
 start the engine as a service (systemd `iter-engine`, launchd `com.iter.engine`, the Windows logon task
 `iter engine`, or the `iter-engine` container). Projects go beside each other: give the engine's `serves`
 edge the topdir `~/dev/<project>`, then run the installer's `projects` verb to clone them. Other verbs:
@@ -114,7 +117,8 @@ On Windows the server runs in a WSL2 distro, and each engine runs where its proj
 By hand:
 
 ```bash
-iter_engine key new [--name Engine01]                      # once: makes this machine's key; add its public key in Engine keys
+iter_engine key join iterjoin1_… [--name Engine01]         # once: a join code from Engine keys → Add an engine: trust, key, registration
+iter_engine key new [--name Engine01]                      # or: makes this machine's key; add its public key in Engine keys
 iter_engine key trust --data-url https://iter.example:8400 --fingerprint sha256:…   # optional: pin the server's certificate up front
 iter_engine --data-url https://iter.example:8400 [--name Engine01] [--secrets-command '…']
 ```

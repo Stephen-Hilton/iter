@@ -111,7 +111,11 @@ curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers
 curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/macos/install.sh | bash   # macOS
 ```
 
-Windows: `installers/iter_engine/windows/install.ps1` (or `linux_wsl` inside WSL2); any Docker host: `installers/iter_engine/docker`. The script asks for the server's `https://` URL and the fingerprint of its certificate (the iter_data installer printed it; the web page's 🔑 Engine keys screen shows it), installs `git`, `jq` and the `claude` command line when missing, downloads the engine and the embedding model, and makes the engine's key: paste the public key it prints into **Engine keys** with the engine's name, and the script starts the engine once the server accepts it. It installs a service (systemd `iter-engine`, launchd `com.iter.engine` on macOS, a logon task on Windows), so the engine runs at boot or login and restarts if it stops.
+Windows: `installers/iter_engine/windows/install.ps1` (or `linux_wsl` inside WSL2); any Docker host: `installers/iter_engine/docker`.
+
+Easiest: in the web page, 🔑 Engine keys → **Add an engine** makes a one-time join code and shows the install line for each platform with the code in it (`… | bash -s -- --join iterjoin1_…`, `-Join …` on Windows). Run that line on the machine and nothing else is copied: the code carries the server's URL, which certificate to trust and a secret that registers the machine's key once. The engine's name is the machine's short hostname unless the code names one (`<name>-2` when another engine has it already). It works behind a TLS proxy or load balancer with a public certificate too. Without a code, the script asks for the server's `https://` URL and the fingerprint of its certificate (the iter_data installer printed it; Engine keys shows it) and, after making the key, waits while you paste the public key it prints into **Engine keys** with the engine's name.
+
+Either way the script installs `git`, `jq` and the `claude` command line when missing, downloads the engine and the embedding model, makes the engine's key and starts the engine once the server accepts it. It installs a service (systemd `iter-engine`, launchd `com.iter.engine` on macOS, a logon task on Windows), so the engine runs at boot or login and restarts if it stops.
 
 ### How do I start an engine?
 
@@ -449,7 +453,7 @@ Only browser-based clients (a page on another site, like the MCP Inspector) are 
 
 ### Which engine flags are there?
 
-`--data-url`, `--name` (default: the machine's short hostname), `--key-file`, `--env-file`, `--secrets-command` / `--secrets-every`, `--ticks N`, `--accounts` (which account tokens are set), `--probe` (live usage per account), `--adduser <name>` (an approval key), `--approve <id>` (sign an approval), `--doc <id> --text|--file`, `--question-widget <file>` (check a question widget) and `--version`. Key commands: `iter_engine key new | show | rotate | status | trust`.
+`--data-url`, `--name` (default: the machine's short hostname), `--key-file`, `--env-file`, `--secrets-command` / `--secrets-every`, `--ticks N`, `--accounts` (which account tokens are set), `--probe` (live usage per account), `--adduser <name>` (an approval key), `--approve <id>` (sign an approval), `--doc <id> --text|--file`, `--question-widget <file>` (check a question widget) and `--version`. Key commands: `iter_engine key join | new | show | rotate | status | trust`.
 
 ## Settings and customisation
 
@@ -473,7 +477,7 @@ The agent's `promptbody`, then the shared tooling, the capability index, the pro
 
 ### The engine cannot sign in. What do I do?
 
-Engines have no token: each signs in with its own key. "no engine key" means the machine has none yet: run `iter_engine key new` (or the installer), then add the public key it prints (`iter_engine key show`) in the web page's 🔑 Engine keys screen with the engine's name. A key that is not accepted yet, or was revoked, shows in `iter_engine key status`. "the engine saw a TLS certificate that is not iter_data's" means the URL answers with another certificate than the one pinned: use the URL the engine was set up with, or pin the new one with `iter_engine key trust --fingerprint …`.
+Engines have no token: each signs in with its own key. "no engine key" means the machine has none yet: run `iter_engine key new` (or the installer), then add the public key it prints (`iter_engine key show`) in the web page's 🔑 Engine keys screen with the engine's name. A key that is not accepted yet, or was revoked, shows in `iter_engine key status`. "the engine saw a TLS certificate that is not iter_data's" means the URL answers with another certificate than iter_data's own, and not one a public certificate authority issued for one of iter_data's names: use the URL the engine was set up with. A TLS proxy or load balancer with a public certificate in front of iter_data is fine once iter_data knows the name: make a join code for that URL (Engine keys → Add an engine), which also sets the engine up. A join code that is refused says why: used already, cancelled, expired, or made by another server.
 
 ### An item keeps bouncing at the close gate. Why?
 

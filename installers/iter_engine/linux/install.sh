@@ -5,8 +5,12 @@
 # outbound connections: to iter_data, to Anthropic, to the projects' git remote
 # and, once, to Hugging Face for the embedding model.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Stephen-Hilton/iter/main/installers/iter_engine/linux/install.sh | bash -s -- --join CODE
 #   ./install.sh [verb] [options]
+#
+# The join code (the webui's Engine keys -> Add an engine) is all this machine
+# needs: it names iter_data's URL and certificate, and its one-time secret
+# registers this machine's key, so nothing is pasted back into the webui.
 #
 # Verbs:
 #   install     (default) set up or repair; safe to run again
@@ -18,6 +22,9 @@
 #   uninstall   stop and remove the service and the binary (keeps the key, tokens, model)
 #
 # Options:
+#   --join CODE       a join code from the webui (Engine keys -> Add an engine; also
+#                     $ITER_JOIN): the iter_data URL, the certificate to trust and the
+#                     key's registration in one; the engine name too, when it names one
 #   --iter-dir DIR    the one folder everything goes in, always ending in /iter (/my/dir,
 #                     /my/dir/iter and /my/dir/iter/ all mean /my/dir/iter); also $ITER_DIR;
 #                     later runs find it from the service [/opt/iter]
@@ -25,10 +32,10 @@
 #   --name NAME       this engine's name, unique per machine (default: the hostname)
 #   --version TAG     release to download, e.g. v2026.10.17 (else $ITER_VERSION, else latest)
 #   --binary PATH     install this iter_engine file instead of downloading one
-#   --fingerprint FP  iter_data's certificate fingerprint (sha256:..., from the iter_data
-#                     installer or the webui's Engine keys screen): pinned before sign-in
-#   --trust-ca        iter_data is behind a TLS proxy with a real certificate: check it
-#                     against certificate authorities instead of pinning
+#   --fingerprint FP  without a join code: iter_data's certificate fingerprint (sha256:...,
+#                     from the iter_data installer or the webui's Engine keys screen)
+#   --trust-ca        without a join code: iter_data is behind a TLS proxy with a public
+#                     certificate (also chosen by itself when that is what it meets)
 #   --secrets-command CMD  a shell command printing KEY=value lines (the account tokens,
 #                     from a secret store: aws ssm / secretsmanager, op, security, vault);
 #                     the engine runs it at startup and every --secrets-every minutes and
@@ -80,12 +87,15 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "
 export PATH="$HOME/.local/bin:$PATH"
 
 VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
+JOIN="${ITER_JOIN:-}"
 ITER_DIR_OPT="${ITER_DIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|status|update|accounts|projects|logs|uninstall) VERB="$1" ;;
     --iter-dir|--iter_dir) ITER_DIR_OPT="${2:?--iter-dir needs a folder}"; shift ;;
     --iter-dir=*|--iter_dir=*) ITER_DIR_OPT="${1#*=}" ;;
+    --join) JOIN="${2:?--join needs the code from the webui (Engine keys -> Add an engine)}"; shift ;;
+    --join=*) JOIN="${1#*=}" ;;
     --data-url) OPT_URL="${2:?--data-url needs a URL}"; shift ;;
     --name) OPT_NAME="${2:?--name needs a name}"; shift ;;
     --version) VERSION="${2:?--version needs a tag}"; shift ;;
@@ -135,6 +145,13 @@ confval() {
 envval() { [ -f "$2" ] && grep -E "^[[:space:]]*$1=" "$2" | tail -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//' | tr -d '\r' || true; }
 # shellcheck disable=SC2088  # the topdir arrives as text with a literal ~
 expand() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s/%s' "$HOME" "${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
+# join_field KEY: one field of the join code (u url, n engine name, x expiry)
+join_field() {
+  local b="${JOIN#iterjoin1_}"
+  b="$(printf '%s' "$b" | tr '_-' '/+')"
+  while [ $(( ${#b} % 4 )) != 0 ]; do b="$b="; done
+  printf '%s' "$b" | base64 -d 2>/dev/null | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null || true
+}
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 [ "$(id -u)" != 0 ] || die "run this as your own user, not root (it uses sudo where it must)"
@@ -367,6 +384,11 @@ check_url() {
     *) die "$1: the iter_data URL starts with https:// (plain http:// only to 127.0.0.1 / localhost / ::1)" ;;
   esac
 }
+# how config/server_trust.json trusts this URL: pin, ca, or "" (not yet)
+trust_mode() {
+  [ -f "$TRUSTF" ] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg o "$(trust_origin "$DATA_URL")" '.servers[$o].mode // empty' "$TRUSTF" 2>/dev/null || true
+}
 # does config/server_trust.json have an entry for this URL yet?
 has_trust() { [ -f "$TRUSTF" ] && grep -qF "\"$(trust_origin "$1")\"" "$TRUSTF"; }
 # PINOPT = curl options that check iter_data's certificate as the engine does:
@@ -521,7 +543,18 @@ settings() {
   say "3/9 iter_data and this engine's name"
   load_conf
   local url name host
-  url="${OPT_URL:-$(ask "iter_data URL [${DATA_URL:-https://iter.example.com}]:" "${DATA_URL:-}")}"
+  if [ -n "$JOIN" ]; then
+    case "$JOIN" in iterjoin1_*) ;; *) die "--join: that is not a join code (iterjoin1_...): copy the whole line from the webui (Engine keys -> Add an engine)" ;; esac
+    { command -v jq && command -v base64; } >/dev/null || die "jq and base64 are needed to read the join code"
+    url="$(join_field u)"
+    [ -n "$url" ] || die "--join: the code is cut short or mistyped: copy the whole line again"
+    [ "$(join_field x)" -ge "$(date +%s)" ] 2>/dev/null || die "--join: this join code has expired: make a new one in the webui (Engine keys -> Add an engine)"
+    [ -z "$OPT_URL" ] || [ "${OPT_URL%/}" = "$url" ] || warn "--data-url $OPT_URL ignored: the join code is for $url"
+    [ -z "$(join_field n)" ] || OPT_NAME="$(join_field n)"
+    ok "join code for $url${OPT_NAME:+, engine \"$OPT_NAME\"}"
+  else
+    url="${OPT_URL:-$(ask "iter_data URL [${DATA_URL:-https://iter.example.com}]:" "${DATA_URL:-}")}"
+  fi
   url="${url%/}"
   if [ -z "$url" ]; then
     [ $DRY = 1 ] || die "the iter_data URL is required (--data-url URL)"
@@ -609,6 +642,12 @@ register_local() {
 trust() {
   say "4b/9 iter_data's certificate"
   case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http to this machine: no certificate to trust"; return ;; esac
+  if [ -n "$JOIN" ]; then
+    ok "the join code says which certificate to trust (step 6)"
+    [ $DRY = 1 ] || "$BIN" key join --help >/dev/null 2>&1 \
+      || die "this iter_engine ($BIN) is older than join codes: install a newer release (--version), or run without --join"
+    return
+  fi
   if [ $TRUST_CA = 1 ]; then
     run "$BIN" key trust --data-url "$DATA_URL" --ca || die "could not reach $DATA_URL with a certificate-authority check"
     return
@@ -687,7 +726,7 @@ ca_trust() {
 browsers() {
   say "6b/9 browsers here trust iter_data"
   case "$DATA_URL" in https://*) ;; *) ok "$DATA_URL is plain http: nothing to trust"; return ;; esac
-  [ $TRUST_CA = 0 ] || { ok "iter_data has a certificate from a public authority: browsers trust it already"; return; }
+  if [ $TRUST_CA = 1 ] || [ "$(trust_mode)" = ca ]; then ok "iter_data has a certificate from a public authority: browsers trust it already"; return; fi
   if [ $DRY = 1 ]; then printf '    [dry-run] %s key ca --data-url %s, then add it to the system store and the browsers\n' "$BIN" "$DATA_URL"; return; fi
   if ! "$BIN" key ca --data-url "$DATA_URL" --out "$WORK/iter_data-ca.crt" > "$TMPF" 2>&1; then
     warn "$(tail -1 "$TMPF")"; warn "browsers here warn about iter_data's certificate until its CA is trusted (rerun this installer)"; return
@@ -720,6 +759,10 @@ key() {
   run chmod 700 "$IHOME/secrets"
   [ -f "$ENVF" ] || run touch "$ENVF"
   run chmod 600 "$ENVF"
+  if [ $DRY = 1 ] && [ -n "$JOIN" ]; then
+    printf '    [dry-run] %s key join <code> --name %s --key-file %s (trust iter_data as the code says, make the key, register it, sign in)\n' "$BIN" "$ENGINE" "$KEYF"; return
+  fi
+  if [ -n "$JOIN" ]; then join_code; return; fi
   if [ $DRY = 1 ]; then
     [ -f "$KEYF" ] && ok "$KEYF exists" || printf '    [dry-run] %s key new --key-file %s --name %s\n' "$BIN" "$KEYF" "$ENGINE"
     printf '    [dry-run] iter_data on this machine: register it (iter_data engine-key add); else wait until iter_data accepts it (%s key status)\n' "$BIN"; return
@@ -741,6 +784,23 @@ key() {
   done
 }
 
+# the join code: trust, the key and its registration in one step; the engine
+# name iter_data recorded (another machine may have the name already) goes
+# into engine.conf
+join_code() {
+  local out got
+  if [ -f "$KEYF" ] && "$BIN" key status --key-file "$KEYF" --data-url "$DATA_URL" > "$TMPF" 2>&1; then
+    sed 's/^/    /' "$TMPF"; ok "iter_data accepts this engine's key already: the join code is not needed"; return
+  fi
+  out="$("$BIN" key join "$JOIN" --name "$ENGINE" --key-file "$KEYF" 2>&1)" || { printf '%s\n' "$out" | sed 's/^/    /' >&2; die "the join code did not work (above)"; }
+  printf '%s\n' "$out" | grep -v '^engine=' | sed 's/^/    /'
+  got="$(printf '%s\n' "$out" | sed -n 's/^engine=//p' | tail -1)"
+  if [ -n "$got" ] && [ "$got" != "$ENGINE" ]; then
+    ENGINE="$got"; conf_text | write_file "$CONF"; ok "engine name \"$ENGINE\" (in $CONF)"
+  fi
+  ok "iter_data accepts this engine's key"
+}
+
 # what to paste and where, and why iter_data refused the last check; printed at
 # every try, so the screen always shows the one line to paste and the reason
 key_help() {
@@ -756,7 +816,8 @@ key_help() {
   esac
   printf "\n    Paste this one line, this engine's public key (nothing else on this screen):\n\n      %s\n\n" "$pub"
   printf '    Where: open %s, sign in as an admin, click 🔑 Engine keys in the header, then Add.\n' "$DATA_URL"
-  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n\n' "$ENGINE" "$id"
+  printf '    Paste the line above as the public key and type %s as the engine name. The list then shows key id %s.\n' "$ENGINE" "$id"
+  printf '    (Or: Add an engine there makes a join code; run this script again with --join CODE and nothing is pasted.)\n\n' 
 }
 
 power() {
