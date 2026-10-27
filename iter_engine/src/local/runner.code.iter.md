@@ -32,7 +32,11 @@ A test node (`*.test.iter.md`) is metadata; its `children.tests` entries are glo
   per node (`budget_min`: an explicit `--timeout-min`, else the test node's own `timeout_min:` frontmatter
   key, else `DEFAULT_TIMEOUT_MIN`, 20 minutes; the sweep's fallback is `SWEEP_TIMEOUT_MIN`, 30). Each
   script gets `ITER_TEST_OUT` (an emptied scratch folder outside the checkout, `test_out_dir`), `ITER_TESTS_SHARED` (`{topdir}/.iter/tests`),
-  `ITER_TEST_NODE_ID`, `ITER_TEST_NODE_NAME` and `ITER_TOPDIR`.
+  `ITER_TEST_NODE_ID`, `ITER_TEST_NODE_NAME` and `ITER_TOPDIR`. Inside an engine session with memory
+  limits (`$ITER_MEM_CGROUP`, Linux), each script runs in a cgroup of its own under the session's with the
+  test-script limit (`$ITER_MEM_TEST_MAX`, Memory limits): at the limit the kernel kills the script's
+  largest process only, the script goes on, and `ScriptExit.memory` (the run's detail) says
+  "killed by the memory limit: …" with the `memory.events` counters. Elsewhere scripts run as before.
 - The last stdout line is parsed as the standard result JSON (`{name, id, overall_success, normal,
   longtail, failure, details}`, the `iter_core::testresult` type), or a legacy `ITER_RESULT` line mapped
   to `normal`. The exit code decides the `Outcome`.

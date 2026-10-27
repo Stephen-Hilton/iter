@@ -63,6 +63,10 @@ Only links live outside the folder: `/etc/systemd/system/iter-engine.service` an
 | `--trust-ca` | without a join code: iter_data is behind a TLS proxy with a public certificate: check it against certificate authorities (also chosen by itself when the engine meets such a certificate) |
 | `--secrets-command CMD` | a command printing the account tokens as `KEY=value` lines, from a secret store ([below](#account-tokens-from-a-secret-store)); `none` removes it |
 | `--secrets-every N` | minutes between its runs (default 5) |
+| `--session-memory-max SIZE` | most memory one agent session (claude and all it starts) may use: `6G`, `512M`, `40%` of this machine's memory, or `off` (default 40%); [below](#memory-limits) |
+| `--session-swap-max SIZE` | swap one session may use besides (`0` = none, `max`; default 1G) |
+| `--test-memory-max SIZE` | most memory one test script inside a session may use (default 30%) |
+| `--test-swap-max SIZE` | swap one test script may use besides (default 512M) |
 | `--yes` | answer yes to every question |
 | `--dry-run` | print every action and change nothing |
 
@@ -94,6 +98,10 @@ Recipes (each prints `DEV1_TOKEN=…` lines; use your own names and paths):
   `aws secretsmanager get-secret-value --secret-id iter/engine --query SecretString --output text | jq -r 'to_entries[]|"\(.key)=\(.value)"'`
 - **1Password CLI**: `op inject -i /opt/iter/iter_engine/secrets/tokens.tpl` (a template of `DEV1_TOKEN={{ op://vault/item/field }}` lines), or `printf 'DEV1_TOKEN=%s\n' "$(op read op://vault/item/field)"`
 - **macOS Keychain**: `printf 'DEV1_TOKEN=%s\n' "$(security find-generic-password -s iter-DEV1_TOKEN -w)"` (store it with `security add-generic-password -s iter-DEV1_TOKEN -a "$USER" -w`)
+
+## Memory limits
+
+The engine runs each agent session, and each test script `iter runtests` runs inside one, in a cgroup of its own with a memory limit. A session that reaches its limit is killed alone (its item's last error and the engine log say so: "agent session killed: its processes reached the … memory limit …"); a test script that reaches its limit loses only its largest process. For that the unit has `Delegate=yes` (the engine makes those cgroups under the unit's own), `OOMPolicy=continue` (an out-of-memory kill no longer stops the whole service, which ended every session with it), and `MemoryMax=80%` / `MemorySwapMax=2G` for the engine and all its sessions together. The four `--…-memory-max` / `--…-swap-max` options are kept in `config/engine.conf` and put on the unit's `ExecStart`; `default` removes one. A drop-in in `/etc/systemd/system/iter-engine.service.d/` still overrides any of these settings. `install.sh logs` shows "memory limits on: …" at startup, or "memory limits off: <why>" (no cgroup v2, no delegation), in which case sessions run without limits as before.
 
 ## HTTPS and iter_data's certificate
 

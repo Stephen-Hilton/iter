@@ -48,7 +48,8 @@ for every served project:
    runs the claimed item on its own thread (`work.rs`): load the node's
    context, call `provider::dispatch_agent` (claude CLI or mock), read usage
    with `get_usage`, run the close gate (`gate.rs`), commit the item's lock
-   scope, report and release.
+   scope, report and release. Each agent session and test script runs under
+   a memory limit in a cgroup of its own where Linux allows it (`memlimit.rs`).
 
 Agents inside a run use the `iter` shim (`{topdir}/.iter/bin/iter`) and the
 MCP endpoint the engine configures for the session.

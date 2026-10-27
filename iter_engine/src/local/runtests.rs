@@ -238,8 +238,11 @@ pub fn run_node(topdir: &Path, doc: &NodeDoc, filter: Option<&str>, timeout_min:
                 ("ITER_TOPDIR".to_string(), topdir.to_string_lossy().into_owned()),
                 ("ITER_TESTS_SHARED".to_string(), topdir.join(".iter/tests").to_string_lossy().into_owned()),
             ];
-            let (code, stdout, stderr, timed_out) = run_script(script, &cwd, remaining, out_dir.as_deref(), &env);
-            let detail = if timed_out { format!("timed out (node budget {timeout_min} min); killed") } else { String::new() };
+            let ScriptExit { code, stdout, stderr, timed_out, memory } = run_script(script, &cwd, remaining, out_dir.as_deref(), &env);
+            let mut detail = if timed_out { format!("timed out (node budget {timeout_min} min); killed") } else { String::new() };
+            if !memory.is_empty() {
+                detail = if detail.is_empty() { memory } else { format!("{detail}; {memory}") };
+            }
             let exit = if timed_out { None } else { Some(code) };
             let (result, outcome) = testresult::evaluate(&stdout, exit, &doc.name, &doc.id);
             ScriptRun { log: log_body(&r, code, &stdout, &stderr, &detail), script: r, result, outcome, exit_code: if timed_out { -1 } else { code }, detail }
@@ -256,10 +259,25 @@ fn not_run(script: &str, name: &str, id: &str, detail: String) -> ScriptRun {
     ScriptRun { script: script.to_string(), result, outcome, exit_code: -1, log: log_body(script, -1, "", "", &detail), detail }
 }
 
+/// How one script's run ended.
+#[derive(Debug, Clone)]
+pub struct ScriptExit {
+    /// -1 = killed by a signal / timed out / not spawned
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    /// what the script's memory limit killed, in plain words ("" = nothing)
+    pub memory: String,
+}
+
 /// `bash <script>` in `cwd`, leading its own process group so a timeout kill
-/// takes the whole tree. (exit code, stdout, stderr, timed_out); a spawn
-/// failure is exit -1 with the error on stderr.
-pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<&Path>, env: &[(String, String)]) -> (i32, String, String, bool) {
+/// takes the whole tree; a spawn failure is exit -1 with the error on stderr.
+/// Inside an agent session the engine limits (`$ITER_MEM_CGROUP`, Linux),
+/// the script runs in a cgroup of its own with the test-script memory limit
+/// (crate::memlimit): a runaway test binary in it is killed alone, the
+/// script carries on and `memory` says what happened.
+pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<&Path>, env: &[(String, String)]) -> ScriptExit {
     let mut cmd = iter_core::platform::bash();
     cmd.arg(script).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(out) = out_dir {
@@ -273,9 +291,20 @@ pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    let scope = crate::memlimit::test_scope(&script.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+    if let Some(s) = &scope {
+        s.apply(&mut cmd);
+    }
+    let exit = |code: i32, stdout: String, stderr: String, timed_out: bool| ScriptExit {
+        code,
+        stdout,
+        stderr,
+        timed_out,
+        memory: scope.as_ref().and_then(|s| s.report()).unwrap_or_default(),
+    };
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return (-1, String::new(), format!("cannot spawn bash {}: {e}", script.display()), false),
+        Err(e) => return exit(-1, String::new(), format!("cannot spawn bash {}: {e}", script.display()), false),
     };
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
@@ -283,22 +312,25 @@ pub fn run_script(script: &Path, cwd: &Path, timeout: Duration, out_dir: Option<
         let _ = tx.send(child.wait_with_output());
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(o)) => (
+        Ok(Ok(o)) => exit(
             o.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&o.stdout).into_owned(),
             String::from_utf8_lossy(&o.stderr).into_owned(),
             false,
         ),
-        Ok(Err(e)) => (-1, String::new(), format!("wait failed: {e}"), false),
+        Ok(Err(e)) => exit(-1, String::new(), format!("wait failed: {e}"), false),
         Err(_) => {
             #[cfg(unix)]
             let _ = std::process::Command::new("sh").arg("-c").arg(format!("kill -9 -{pid} 2>/dev/null || kill -9 {pid}")).status();
             #[cfg(not(unix))]
             iter_core::platform::kill_tree(pid);
+            if let Some(s) = &scope {
+                s.kill(); // and whatever left the process group
+            }
             // the reader thread ends once the group is gone
             let out = rx.recv_timeout(Duration::from_secs(5)).ok().and_then(|r| r.ok());
             let (so, se) = out.map(|o| (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())).unwrap_or_default();
-            (-1, so, se, true)
+            exit(-1, so, se, true)
         }
     }
 }
@@ -471,8 +503,8 @@ echo "{\"id\":\"$ITER_TEST_NODE_ID\",\"normal\":{\"total\":2,\"pass\":1,\"err\":
     fn timeout_kills_the_group_and_counts_as_could_not_run() {
         let (top, doc) = setup("timeout", &[("comp01.sh", "sleep 30 & sleep 30\n")]);
         let t = Instant::now();
-        let (code, _, _, timed_out) = run_script(&top.join("comp/tests/comp01.sh"), &top, Duration::from_millis(300), None, &[]);
-        assert!(timed_out && code == -1);
+        let r = run_script(&top.join("comp/tests/comp01.sh"), &top, Duration::from_millis(300), None, &[]);
+        assert!(r.timed_out && r.code == -1);
         assert!(t.elapsed() < Duration::from_secs(10));
         let _ = doc;
     }

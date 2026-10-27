@@ -33,7 +33,12 @@ Takes one job from start to finish: has the agent (or a shell command) do it, sa
    `ITER_WORKID`, `ITER_NODE`, `ITER_NODEFILE`, `ITER_PROVIDER`, `ITER_ENGINE`, `ITER_ENGINE_OS`, …), the `.iter/bin/iter` shim
    (`write_iter_shim`) and a private MCP config (`mcp_config`: the `iter` HTTP MCP server at
    `<data_url>/mcp` with the engine token and `X-Iter-Project` / `X-Iter-Workid`). Timeouts and stop
-   requests kill the whole process group (`wait_with_stop`).
+   requests kill the whole process group (`wait_with_stop`). Every model call and exec shell runs through
+   `wait_in_session`: on Linux with a delegated cgroup v2 the process starts inside a cgroup of its own
+   with the session memory limit (Memory limits, `memlimit.rs`); a stop or timeout also kills whatever
+   left the process group (`cgroup.kill`), and when the limit killed the session the item's last error
+   and the engine log begin "agent session killed: its processes reached the … memory limit …" with the
+   `memory.events` counters.
 3. An agent that moved the item to question / parked mid-run keeps that state (`close_keep_state`).
 4. `close` commits only the lock scope plus the project's `commit_extra_paths` (`commit_scoped`,
    leftover count logged, never listed), gathers evidence (`git_run_evidence`), runs the close gate

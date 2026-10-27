@@ -74,13 +74,25 @@ pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettin
     }
     let cwd = if ctx.cwd.as_os_str().is_empty() { std::env::temp_dir() } else { ctx.cwd.clone() };
     cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let raw = crate::work::wait_with_stop_input(cmd, input, s.timeout.as_secs(), &s.stop)?;
+    // its own cgroup with the session memory limit (crate::memlimit), named
+    // after the item it works on
+    let label = session_label(ctx);
+    let raw = crate::work::wait_in_session(cmd, input, s.timeout.as_secs(), &s.stop, "agent", &label)?;
     let (sid, mut out) = parse_stream(&raw);
     if out.session_id.is_empty() {
         out.session_id = sid;
     }
     out.raw = raw;
     Ok(out)
+}
+
+/// The name a session's cgroup and log lines carry: its item (`ITER_WORKID`,
+/// short), else what the call is for (`verifier`, `summary`, …).
+pub fn session_label(ctx: &AgentContext) -> String {
+    match ctx.env.iter().rev().find(|(k, _)| k == "ITER_WORKID").map(|(_, v)| v.trim()).filter(|v| !v.is_empty()) {
+        Some(w) => { let c: Vec<char> = w.chars().collect(); c[c.len().saturating_sub(12)..].iter().collect() }
+        None => format!("{:?}", ctx.role).to_ascii_lowercase(),
+    }
 }
 
 /// Parse `--output-format stream-json` output: one JSON object per line; the

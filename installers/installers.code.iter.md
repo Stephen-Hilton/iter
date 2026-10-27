@@ -93,3 +93,8 @@ The first-boot admin password must be changed at the first sign-in; once iter_da
 `iter-admin-cleanup.path` unit, plus the SSM copy on an aws stack; docker: the next run or `status`).
 The engine installers take `--secrets-command`/`--secrets-every` (account tokens from a secret store),
 keep them in `engine.conf`, pass them on the service's command line, and then ask for no tokens.
+The systemd ones (linux, linux_wsl) do the same with the memory limits (`--session-memory-max`,
+`--session-swap-max`, `--test-memory-max`, `--test-swap-max`) and write `Delegate=yes`,
+`OOMPolicy=continue`, `MemoryMax=80%` and `MemorySwapMax=2G` into the unit, so the engine can give
+each agent session and test script its own memory-limited cgroup and an out-of-memory kill ends one
+session instead of the service.

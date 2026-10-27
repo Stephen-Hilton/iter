@@ -304,6 +304,13 @@ last line is still accepted (mapped to `normal`). Results: `POST /api/projects/{
 
 ### 4.1 Startup
 `iter_engine --data-url <url> --env-file <path> [--name <engine name>]`. Name defaults to the hostname (short).
+Memory limits (Linux cgroup v2, `iter_engine/src/memlimit.rs`): `--session-memory-max` (default 40% of RAM),
+`--session-swap-max` (1G), `--test-memory-max` (30%), `--test-swap-max` (512M), or `ITER_SESSION_MEMORY_MAX`,
+`ITER_SESSION_SWAP_MAX`, `ITER_TEST_MEMORY_MAX`, `ITER_TEST_SWAP_MAX`; `off` disables one. With its unit's cgroup
+delegated (`Delegate=yes`) the engine moves itself to `<unit>/engine` and runs each agent session in
+`<unit>/agent-<n>-<item>/session` (limit and `memory.oom.group=1` on `agent-…`) and each script `iter runtests` runs
+inside it in `<unit>/agent-<n>-<item>/test-…` (found through `ITER_MEM_CGROUP`). Otherwise one startup line says
+the limits are off and why, and nothing else changes.
 `.env` holds `ITER_ENGINE_TOKEN` (iter_data credential) + LLM tokens (`token_envar`s) + other secrets.
 Nothing else is read from disk. `--config` is removed. The engine registers itself (`PUT /api/engines/{name}`) if missing.
 

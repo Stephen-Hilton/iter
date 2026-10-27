@@ -46,6 +46,13 @@
 #                     on the service's command line; "none" removes it. With it, the
 #                     accounts step asks for no tokens.
 #   --secrets-every N  minutes between secrets-command runs [5]
+#   --session-memory-max SIZE  most memory one agent session (claude and all it
+#                     starts) may use: 6G, 512M, 40% (of this machine's memory) or
+#                     off [40%]; --session-swap-max SIZE its swap besides (0 = none,
+#                     max) [1G]; --test-memory-max SIZE one test script inside a
+#                     session [30%]; --test-swap-max SIZE its swap [512M]. Kept in
+#                     config/engine.conf and put on the service's command line;
+#                     "default" removes one. Linux cgroup v2 (the unit's Delegate=yes)
 #   --yes             answer yes to every question; update while work runs
 #   --dry-run         print every action, change nothing
 #   -h, --help        this text
@@ -95,7 +102,7 @@ HERE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; fi
 export PATH="$HOME/.local/bin:$PATH"
 
-VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" VERSION="${ITER_VERSION:-}"
+VERB=install DRY=0 YES=0 BINARY="" OPT_URL="" OPT_NAME="" OPT_FP="" TRUST_CA=0 OPT_SC="" SC_GIVEN=0 OPT_SE="" OPT_SMM="" OPT_SSM="" OPT_TMM="" OPT_TSM="" VERSION="${ITER_VERSION:-}"
 JOIN="${ITER_JOIN:-}"
 ITER_DIR_OPT="${ITER_DIR:-}"
 while [ $# -gt 0 ]; do
@@ -113,6 +120,10 @@ while [ $# -gt 0 ]; do
     --trust-ca) TRUST_CA=1 ;;
     --secrets-command) OPT_SC="${2?--secrets-command needs a command (or none)}"; SC_GIVEN=1; shift ;;
     --secrets-every) OPT_SE="${2:?--secrets-every needs minutes}"; shift ;;
+    --session-memory-max) OPT_SMM="${2:?--session-memory-max needs a size (6G, 40%, off)}"; shift ;;
+    --session-swap-max) OPT_SSM="${2:?--session-swap-max needs a size (1G, 0, max)}"; shift ;;
+    --test-memory-max) OPT_TMM="${2:?--test-memory-max needs a size (4G, 30%, off)}"; shift ;;
+    --test-swap-max) OPT_TSM="${2:?--test-swap-max needs a size (512M, 0, max)}"; shift ;;
     --yes|-y) YES=1 ;;
     --dry-run) DRY=1 ;;
     -h|--help|help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -232,6 +243,10 @@ load_conf() { # fills what this run has not set yet
   [ -n "$ENGINE" ] || ENGINE="$(confval ENGINE)"
   [ $SC_GIVEN = 1 ] || [ -n "$SECRETS_COMMAND" ] || SECRETS_COMMAND="$(confval SECRETS_COMMAND)"
   [ -n "$SECRETS_EVERY" ] || SECRETS_EVERY="$(confval SECRETS_EVERY)"
+  [ -n "$SESSION_MEMORY_MAX" ] || SESSION_MEMORY_MAX="$(confval SESSION_MEMORY_MAX)"
+  [ -n "$SESSION_SWAP_MAX" ] || SESSION_SWAP_MAX="$(confval SESSION_SWAP_MAX)"
+  [ -n "$TEST_MEMORY_MAX" ] || TEST_MEMORY_MAX="$(confval TEST_MEMORY_MAX)"
+  [ -n "$TEST_SWAP_MAX" ] || TEST_SWAP_MAX="$(confval TEST_SWAP_MAX)"
 }
 
 # ------------------------------------------------------------------ secrets command
@@ -247,10 +262,43 @@ secrets_settings() {
   [ -n "$SECRETS_COMMAND" ] || SECRETS_EVERY=""
   if [ -n "$SECRETS_COMMAND" ]; then ok "account tokens: from the secrets command, every ${SECRETS_EVERY:-5} min (values stay in the engine's memory)"; fi
 }
+
+# ------------------------------------------------------------------ memory limits
+# --session-memory-max / --session-swap-max / --test-memory-max / --test-swap-max:
+# given now, else kept in engine.conf; "default" drops one (the engine's default)
+SESSION_MEMORY_MAX="" SESSION_SWAP_MAX="" TEST_MEMORY_MAX="" TEST_SWAP_MAX=""
+mem_settings() {
+  SESSION_MEMORY_MAX="${OPT_SMM:-$(confval SESSION_MEMORY_MAX)}"
+  SESSION_SWAP_MAX="${OPT_SSM:-$(confval SESSION_SWAP_MAX)}"
+  TEST_MEMORY_MAX="${OPT_TMM:-$(confval TEST_MEMORY_MAX)}"
+  TEST_SWAP_MAX="${OPT_TSM:-$(confval TEST_SWAP_MAX)}"
+  local v
+  for v in "$SESSION_MEMORY_MAX" "$SESSION_SWAP_MAX" "$TEST_MEMORY_MAX" "$TEST_SWAP_MAX"; do
+    case "$v" in *[!0-9A-Za-z.%]*) die "memory limit \"$v\": a size like 6G, 512M, 40%, 0, max or off" ;; esac
+  done
+  [ "$SESSION_MEMORY_MAX" != default ] || SESSION_MEMORY_MAX=""
+  [ "$SESSION_SWAP_MAX" != default ] || SESSION_SWAP_MAX=""
+  [ "$TEST_MEMORY_MAX" != default ] || TEST_MEMORY_MAX=""
+  [ "$TEST_SWAP_MAX" != default ] || TEST_SWAP_MAX=""
+  ok "memory limits: each agent session ${SESSION_MEMORY_MAX:-40%} (swap ${SESSION_SWAP_MAX:-1G}), each test script ${TEST_MEMORY_MAX:-30%} (swap ${TEST_SWAP_MAX:-512M})"
+}
+# the service's memory-limit flags (only those set; the engine has defaults)
+mem_args() {
+  [ -z "$SESSION_MEMORY_MAX" ] || printf ' --session-memory-max %s' "$SESSION_MEMORY_MAX"
+  [ -z "$SESSION_SWAP_MAX" ] || printf ' --session-swap-max %s' "$SESSION_SWAP_MAX"
+  [ -z "$TEST_MEMORY_MAX" ] || printf ' --test-memory-max %s' "$TEST_MEMORY_MAX"
+  [ -z "$TEST_SWAP_MAX" ] || printf ' --test-swap-max %s' "$TEST_SWAP_MAX"
+  return 0
+}
 conf_text() {
   printf 'DATA_URL=%s\nENGINE=%s\n' "$DATA_URL" "$ENGINE"
   [ -z "$SECRETS_COMMAND" ] || printf 'SECRETS_COMMAND=%s\n' "$SECRETS_COMMAND"
   [ -z "$SECRETS_EVERY" ] || printf 'SECRETS_EVERY=%s\n' "$SECRETS_EVERY"
+  [ -z "$SESSION_MEMORY_MAX" ] || printf 'SESSION_MEMORY_MAX=%s\n' "$SESSION_MEMORY_MAX"
+  [ -z "$SESSION_SWAP_MAX" ] || printf 'SESSION_SWAP_MAX=%s\n' "$SESSION_SWAP_MAX"
+  [ -z "$TEST_MEMORY_MAX" ] || printf 'TEST_MEMORY_MAX=%s\n' "$TEST_MEMORY_MAX"
+  [ -z "$TEST_SWAP_MAX" ] || printf 'TEST_SWAP_MAX=%s\n' "$TEST_SWAP_MAX"
+  return 0
 }
 # systemd's quoting for one ExecStart argument
 sd_quote() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//\$/\$\$}"; s="${s//%/%%}"; printf '"%s"' "$s"; }
@@ -597,6 +645,7 @@ settings() {
   run mkdir -p "$IHOME/config"
   DATA_URL="$url" ENGINE="$name"
   secrets_settings
+  mem_settings
   conf_text | write_file "$CONF"
   ok "engine \"$ENGINE\" -> $DATA_URL (in $CONF)"
   if pgrep -x iter_engine >/dev/null 2>&1 && ! systemctl is-active -q iter-engine 2>/dev/null; then
@@ -920,13 +969,24 @@ WorkingDirectory=$IHOME
 Environment=HOME=$HOME
 Environment=ITER_HOME=$IHOME
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=$BIN --data-url $DATA_URL --env-file $ENVF --key-file $KEYF --name $ENGINE$(secrets_args)
+ExecStart=$BIN --data-url $DATA_URL --env-file $ENVF --key-file $KEYF --name $ENGINE$(secrets_args)$(mem_args)
 StandardOutput=append:$LOGS/engine.log
 StandardError=append:$LOGS/engine.err.log
 Restart=on-failure
 RestartSec=10
 # a stop takes the agent sessions and shells it started with it
 KillMode=control-group
+# memory (2026-10-27): the engine runs each agent session and each test script
+# in a cgroup of its own under this unit's, with a memory limit (--session-memory-max,
+# --test-memory-max); Delegate=yes hands it the unit's cgroup to make them in.
+# A session at its limit is killed alone, and OOMPolicy=continue keeps the
+# service and every other session running after any out-of-memory kill (the
+# default, stop, ended them all). MemoryMax/MemorySwapMax cap the engine and
+# all its sessions together; a drop-in in iter-engine.service.d overrides them.
+Delegate=yes
+OOMPolicy=continue
+MemoryMax=80%
+MemorySwapMax=2G
 
 [Install]
 WantedBy=multi-user.target

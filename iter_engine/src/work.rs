@@ -1405,7 +1405,9 @@ fn run_exec(api: &Api, project: &Project, topdir: &str, item: &WorkItem, timeout
             cmd.env("PATH", iter_core::platform::path_with(dir));
         }
     }
-    wait_with_timeout(cmd, timeout_sec)
+    // an exec item may run test nodes (`iter runtests`, `iter sweep`): it gets
+    // a session's memory limit, and each of its scripts a script's
+    wait_in_session(cmd, None, timeout_sec, &crate::provider::StopCheck::current(), "exec", short(&item.id))
 }
 
 fn git_head(topdir: &str) -> String {
@@ -1448,7 +1450,35 @@ pub(crate) fn wait_with_stop(cmd: Command, timeout_sec: u64, stop: &crate::provi
 }
 
 /// `wait_with_stop`, with `input` written to the child's stdin (then closed).
-pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
+pub(crate) fn wait_with_stop_input(cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
+    wait_scoped(cmd, input, timeout_sec, stop, None)
+}
+
+/// `wait_with_stop_input` for an agent session (`kind` "agent") or an exec
+/// item ("exec"): the command and everything it starts run in a cgroup of
+/// their own with the session memory limit (crate::memlimit; nothing changes
+/// where limits are off).  When the limit killed the session, the error
+/// starts with that, in plain words, and the engine log says it too.
+pub(crate) fn wait_in_session(cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck, kind: &str, label: &str) -> Result<String, String> {
+    let label = if label.is_empty() { short(&current_run().0).to_string() } else { label.to_string() };
+    let label = if label.is_empty() { kind.to_string() } else { label };
+    let scope = crate::memlimit::session(kind, &label);
+    let r = wait_scoped(cmd, input, timeout_sec, stop, scope.as_ref());
+    let Some(scope) = scope else { return r };
+    match (scope.report(), r) {
+        (Some(why), Err(e)) => {
+            println!("[engine] {label}: {why}");
+            Err(format!("{why}; {e}"))
+        }
+        (Some(why), Ok(out)) => {
+            println!("[engine] {label}: {why}");
+            Ok(out)
+        }
+        (None, r) => r,
+    }
+}
+
+fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck, scope: Option<&crate::memlimit::Scope>) -> Result<String, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1457,7 +1487,19 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
     if input.is_some() {
         cmd.stdin(Stdio::piped());
     }
+    if let Some(s) = scope {
+        s.apply(&mut cmd);
+    }
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    if let Some(s) = scope.filter(|s| !s.holds(child.id())) {
+        println!("[engine] memory limit not applied: process {} did not enter cgroup {}", child.id(), s.dir().display());
+    }
+    // a stop or timeout also ends what left the process group (setsid, nohup …)
+    let kill_scope = || {
+        if let Some(s) = scope {
+            s.kill();
+        }
+    };
     // on Windows, dropping `tree` (every return below) also kills whatever
     // the run left behind — see ProcessTree
     let tree = iter_core::platform::ProcessTree::adopt(&child);
@@ -1479,6 +1521,7 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
     loop {
         if let Some(why) = stop.check() {
             tree.kill();
+            kill_scope();
             let _ = child.kill();
             let _ = child.wait();
             return Err(why);
@@ -1499,6 +1542,7 @@ pub(crate) fn wait_with_stop_input(mut cmd: Command, input: Option<String>, time
                     // not keep writing to the shared checkout (CR 2026-09-25
                     // 2.3 — before, only the direct child was killed)
                     tree.kill();
+                    kill_scope();
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("timed out after {timeout_sec}s"));

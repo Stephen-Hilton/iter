@@ -102,7 +102,8 @@ fn shell(ctx: &AgentContext, cwd: &Path, script: &str, s: &DispatchSettings, dea
         cmd.env(k, v);
     }
     let left = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
-    crate::work::wait_with_stop(cmd, left, &s.stop)
+    // the same cgroup a claude session gets (held to the real provider)
+    crate::work::wait_in_session(cmd, None, left, &s.stop, "agent", &super::claude::session_label(ctx))
 }
 
 fn session_id(ctx: &AgentContext) -> String {

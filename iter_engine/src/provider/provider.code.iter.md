@@ -33,12 +33,13 @@ every engine call uses: resolve provider and token, dispatch, then record the ac
 
 - `provider/claude.rs`: builds `claude -p … --output-format stream-json --verbose` arguments
   (`claude_args`, `--resume`, `--mcp-config`, `--allowedTools`), runs it with
-  `CLAUDE_CODE_OAUTH_TOKEN`, and parses the result line (`parse_result_json`); usage comes from the
+  `CLAUDE_CODE_OAUTH_TOKEN` through `work::wait_in_session` (its own memory-limited cgroup, named after
+  the item: `session_label`), and parses the result line (`parse_result_json`); usage comes from the
   stream's `rate_limit_event`, else the idle probe in `usage.rs`.
 - `provider/mock.rs`: on a work turn runs directive lines top to bottom — `mock: write`, `append`,
   `run`, `say`, `fail`, `ask` (through the `iter` shim), `sleep`; answers the verifier
   `VERDICT: complete` unless `mock: gate incomplete` is present, the judge `{"candidates":[]}`, the
-  summary agent one summary per passage; cost 0, tokens = length / 4, session id `mock-<uuid>`; usage
+  summary agent one summary per passage; its `run` shells go through the same `wait_in_session`; cost 0, tokens = length / 4, session id `mock-<uuid>`; usage
   from `ITER_MOCK_USAGE_<ACCOUNT>` / `ITER_MOCK_USAGE`.
 
 ## What goes in and out

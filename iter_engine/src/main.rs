@@ -25,6 +25,7 @@ mod sweep;
 mod sync;
 mod key;
 mod mcprelay;
+mod memlimit;
 mod trust;
 mod local;
 mod usage;
@@ -71,6 +72,24 @@ struct Args {
     /// minutes between secrets-command runs
     #[arg(long, default_value_t = 5)]
     secrets_every: u64,
+    /// most memory one agent session (claude and everything it starts, its
+    /// test scripts included) may use: a size (6G, 512M), a share of this
+    /// machine's memory (40%) or off [$ITER_SESSION_MEMORY_MAX, else 40%].
+    /// Linux with a delegated cgroup v2 only (Delegate=yes); see memlimit.rs
+    #[arg(long)]
+    session_memory_max: Option<String>,
+    /// swap one agent session may use besides: a size, 0 (none) or max
+    /// [$ITER_SESSION_SWAP_MAX, else 1G]
+    #[arg(long)]
+    session_swap_max: Option<String>,
+    /// most memory one test script run by `iter runtests` inside a session
+    /// may use; at the limit the kernel kills the script's largest process
+    /// [$ITER_TEST_MEMORY_MAX, else 30%]
+    #[arg(long)]
+    test_memory_max: Option<String>,
+    /// swap one test script may use besides [$ITER_TEST_SWAP_MAX, else 512M]
+    #[arg(long)]
+    test_swap_max: Option<String>,
     /// run N ticks then drain and exit (0 = forever); used by tests
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -162,6 +181,24 @@ fn main() {
         eprintln!("no engine key at {}: run `iter_engine key new`, then add its public key in the webui's Engine keys screen", key_file.display());
         std::process::exit(2);
     }
+    // memory limits per agent session and test script (Linux cgroup v2,
+    // 2026-10-27): one line says whether they are on, and why not
+    let env = |k: &str| std::env::var(k).ok();
+    let (session_mem, session_swap, test_mem, test_swap) =
+        (env("ITER_SESSION_MEMORY_MAX"), env("ITER_SESSION_SWAP_MAX"), env("ITER_TEST_MEMORY_MAX"), env("ITER_TEST_SWAP_MAX"));
+    let (limits, warnings) = memlimit::Limits::resolve(
+        [
+            (args.session_memory_max.as_deref(), session_mem.as_deref()),
+            (args.session_swap_max.as_deref(), session_swap.as_deref()),
+            (args.test_memory_max.as_deref(), test_mem.as_deref()),
+            (args.test_swap_max.as_deref(), test_swap.as_deref()),
+        ],
+        memlimit::ram_bytes(),
+    );
+    for w in warnings {
+        println!("[engine] {w}");
+    }
+    memlimit::init(limits);
     let backend = api.get("/health").ok().and_then(|h| h["backend"].as_str().map(String::from)).unwrap_or_else(|| "unreachable".into());
     let mut rt = engine::EngineRuntime::new(api, name.clone(), env_file.clone());
     if args.ticks > 0 {
