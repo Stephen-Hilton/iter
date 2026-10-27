@@ -551,10 +551,15 @@ settings() {
   local url name host
   if [ -n "$JOIN" ]; then
     case "$JOIN" in iterjoin1_*) ;; *) die "--join: that is not a join code (iterjoin1_...): copy the whole line from the webui (Engine keys -> Add an engine)" ;; esac
-    { command -v jq && command -v base64; } >/dev/null || die "jq and base64 are needed to read the join code"
+    if ! { command -v jq && command -v base64; } >/dev/null; then
+      [ $DRY = 1 ] || die "jq and base64 are needed to read the join code"
+      warn "jq is not installed yet (step 2 installs it): the dry run cannot read the join code"
+      JOIN_DRY=1
+    fi
     url="$(join_field u)"
+    [ -z "${JOIN_DRY:-}" ] || url="https://iter.example.com"
     [ -n "$url" ] || die "--join: the code is cut short or mistyped: copy the whole line again"
-    [ "$(join_field x)" -ge "$(date +%s)" ] 2>/dev/null || die "--join: this join code has expired: make a new one in the webui (Engine keys -> Add an engine)"
+    [ -n "${JOIN_DRY:-}" ] || [ "$(join_field x)" -ge "$(date +%s)" ] 2>/dev/null || die "--join: this join code has expired: make a new one in the webui (Engine keys -> Add an engine)"
     [ -z "$OPT_URL" ] || [ "${OPT_URL%/}" = "$url" ] || warn "--data-url $OPT_URL ignored: the join code is for $url"
     [ -z "$(join_field n)" ] || OPT_NAME="$(join_field n)"
     ok "join code for $url${OPT_NAME:+, engine \"$OPT_NAME\"}"
