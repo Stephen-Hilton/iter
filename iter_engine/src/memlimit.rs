@@ -399,19 +399,25 @@ pub fn session(kind: &str, label: &str) -> Option<Scope> {
     let tree = TREE.get()?;
     #[cfg(target_os = "linux")]
     {
-        linux::sweep_stale(&tree.root, &tree.live.lock().map(|l| l.clone()).unwrap_or_default());
-        let n = tree.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let dir = tree.root.join(format!("{kind}-{n}-{}", safe_label(label)));
+        // sweep and reserve under one lock: a session being made on another
+        // thread is empty until its child starts, and a sweep that did not
+        // see it in `live` removed it mid-make (its limit then not applied)
+        let dir = {
+            let mut live = tree.live.lock().unwrap_or_else(|e| e.into_inner());
+            linux::sweep_stale(&tree.root, &live);
+            let n = tree.seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let dir = tree.root.join(format!("{kind}-{n}-{}", safe_label(label)));
+            live.insert(dir.clone());
+            dir
+        };
         match linux::make_session(&dir, &tree.limits) {
-            Ok(scope) => {
-                if let Ok(mut l) = tree.live.lock() {
-                    l.insert(dir);
-                }
-                Some(scope)
-            }
+            Ok(scope) => Some(scope),
             Err(e) => {
                 println!("[engine] {label}: memory limit not applied to this session: {e}");
                 linux::remove(&dir);
+                if let Ok(mut l) = tree.live.lock() {
+                    l.remove(&dir);
+                }
                 None
             }
         }
@@ -431,9 +437,7 @@ pub fn test_scope(label: &str) -> Option<Scope> {
     let parent = std::env::var_os(ENV_CGROUP).filter(|p| !p.is_empty()).map(PathBuf::from)?;
     let limit = std::env::var(ENV_TEST_MAX).ok().and_then(|v| parse_size(&v, None, true).ok()).unwrap_or(Size::Off);
     let swap = std::env::var(ENV_TEST_SWAP_MAX).ok().and_then(|v| parse_size(&v, None, false).ok()).unwrap_or(Size::Off);
-    if limit.bytes().is_none() {
-        return None;
-    }
+    limit.bytes()?;
     test_scope_in(&parent, limit, swap, label)
 }
 
@@ -508,10 +512,8 @@ impl Drop for Scope {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         linux::remove(&self.dir);
-        if let Some(tree) = TREE.get() {
-            if let Ok(mut l) = tree.live.lock() {
-                l.remove(&self.dir);
-            }
+        if let Some(mut l) = TREE.get().and_then(|tree| tree.live.lock().ok()) {
+            l.remove(&self.dir);
         }
     }
 }
