@@ -26,6 +26,23 @@ use std::time::{Duration, Instant};
 /// Default wall-clock budget (minutes) for one test node's scripts together.
 pub const DEFAULT_TIMEOUT_MIN: u64 = 20;
 
+/// A test node's own budget: its `timeout_min:` frontmatter key (a whole
+/// number of minutes, > 0), else None.
+pub fn node_timeout_min(doc: &NodeDoc) -> Option<u64> {
+    match doc.front.get("timeout_min")? {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|&m| m > 0)
+}
+
+/// The budget a run gets: an explicit `--timeout-min`, else the node's
+/// `timeout_min:`, else the caller's default.
+pub fn budget_min(doc: &NodeDoc, flag: Option<u64>, default: u64) -> u64 {
+    flag.or_else(|| node_timeout_min(doc)).unwrap_or(default)
+}
+
 /// One script's run.
 #[derive(Debug, Clone)]
 pub struct ScriptRun {
@@ -427,6 +444,27 @@ echo "{\"id\":\"$ITER_TEST_NODE_ID\",\"normal\":{\"total\":2,\"pass\":1,\"err\":
         let run = run_node(&top, &doc, None, 1).unwrap();
         assert_eq!(run.outcome, Outcome::Fail);
         assert_eq!(run.scripts[0].result.id, doc.id, "the script saw ITER_TEST_NODE_ID");
+    }
+
+    #[test]
+    fn node_timeout_min_overrides_the_default_and_the_flag_overrides_both() {
+        let (top, doc) = setup("budget", &[]);
+        assert_eq!(node_timeout_min(&doc), None);
+        assert_eq!(budget_min(&doc, None, DEFAULT_TIMEOUT_MIN), 20);
+        let file = top.join("comp/comp.test.iter.md");
+        let text = std::fs::read_to_string(&file).unwrap().replacen("teststate:", "timeout_min: 30\nteststate:", 1);
+        std::fs::write(&file, text).unwrap();
+        let doc = load_test_node(&top, &file).unwrap();
+        assert_eq!(node_timeout_min(&doc), Some(30));
+        assert_eq!(budget_min(&doc, None, DEFAULT_TIMEOUT_MIN), 30);
+        assert_eq!(budget_min(&doc, Some(5), DEFAULT_TIMEOUT_MIN), 5);
+        let mut d = doc.clone();
+        d.front.insert("timeout_min".into(), "45".into());
+        assert_eq!(node_timeout_min(&d), Some(45));
+        for bad in [serde_json::json!(0), serde_json::json!(-3), serde_json::json!("soon"), serde_json::json!(2.5)] {
+            d.front.insert("timeout_min".into(), bad);
+            assert_eq!(budget_min(&d, None, DEFAULT_TIMEOUT_MIN), 20);
+        }
     }
 
     #[test]

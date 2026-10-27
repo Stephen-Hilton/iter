@@ -136,12 +136,17 @@ pub fn lockdirs_of(node: &Value) -> Vec<String> {
     out
 }
 
+/// The sweep's per test node budget (minutes) when neither `--timeout-min`
+/// nor the node's `timeout_min:` says otherwise.
+pub const SWEEP_TIMEOUT_MIN: u64 = 30;
+
 pub struct SweepOpts {
     /// only this test node (id, name or path)
     pub node: Option<String>,
     pub dry_run: bool,
     pub file_items: bool,
-    pub timeout_min: u64,
+    /// per test node budget; None = the node's `timeout_min:`, else [`SWEEP_TIMEOUT_MIN`]
+    pub timeout_min: Option<u64>,
     pub text_max: usize,
     pub tests_max: usize,
     pub coverage_max: usize,
@@ -294,7 +299,7 @@ pub fn sweep_verb(c: &Conn, o: &SweepOpts) -> i32 {
         let doc = rt::load_test_node(&c.topdir, &c.topdir.join(path.trim_start_matches("{topdir}/"))).ok().or_else(|| doc_of(t));
         let Some(doc) = doc else { continue };
         ran += 1;
-        let run = match rt::run_node(&c.topdir, &doc, None, o.timeout_min) {
+        let run = match rt::run_node(&c.topdir, &doc, None, rt::budget_min(&doc, o.timeout_min, SWEEP_TIMEOUT_MIN)) {
             Ok(r) => r,
             Err(e) => {
                 println!("error {path}: {e}");
@@ -811,7 +816,7 @@ mod tests {
             Some((200, json!({})))
         });
         let c = Conn { api: Some(srv.api()), project: "p".into(), topdir: top.clone(), source: "test".into() };
-        let o = SweepOpts { node: None, dry_run: false, file_items: true, timeout_min: 1, text_max: 5, tests_max: 5, coverage_max: 0, all: true, usecase: None, budget_min: 30 };
+        let o = SweepOpts { node: None, dry_run: false, file_items: true, timeout_min: Some(1), text_max: 5, tests_max: 5, coverage_max: 0, all: true, usecase: None, budget_min: 30 };
         assert_eq!(sweep_verb(&c, &o), 1);
         let rec = srv.calls_to("POST", &format!("/graph/nodes/{tid}/testresult"));
         assert_eq!(rec.len(), 1);

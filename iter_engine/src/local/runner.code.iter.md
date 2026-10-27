@@ -29,8 +29,9 @@ A test node (`*.test.iter.md`) is metadata; its `children.tests` entries are glo
   file stem or path; `scripts_of` resolves its scripts on disk.
 - `run_node` runs every script (or one, with a filter) through `run_script`: `bash` in the test node's
   folder, its own process group so a timeout kills everything it started, inside one wall-clock budget
-  per node (`DEFAULT_TIMEOUT_MIN`, 20 minutes). Each script gets `ITER_TEST_OUT` (an emptied scratch
-  folder outside the checkout, `test_out_dir`), `ITER_TESTS_SHARED` (`{topdir}/.iter/tests`),
+  per node (`budget_min`: an explicit `--timeout-min`, else the test node's own `timeout_min:` frontmatter
+  key, else `DEFAULT_TIMEOUT_MIN`, 20 minutes; the sweep's fallback is `SWEEP_TIMEOUT_MIN`, 30). Each
+  script gets `ITER_TEST_OUT` (an emptied scratch folder outside the checkout, `test_out_dir`), `ITER_TESTS_SHARED` (`{topdir}/.iter/tests`),
   `ITER_TEST_NODE_ID`, `ITER_TEST_NODE_NAME` and `ITER_TOPDIR`.
 - The last stdout line is parsed as the standard result JSON (`{name, id, overall_success, normal,
   longtail, failure, details}`, the `iter_core::testresult` type), or a legacy `ITER_RESULT` line mapped

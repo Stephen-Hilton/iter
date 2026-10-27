@@ -177,8 +177,9 @@ enum Verb {
         #[arg(long)]
         fixed: bool,
         /// wall-clock budget (minutes) for the node's scripts together; overrun = killed → error
-        #[arg(long = "timeout-min", default_value_t = crate::local::runtests::DEFAULT_TIMEOUT_MIN)]
-        timeout_min: u64,
+        /// (default: the test node's `timeout_min:`, else 20)
+        #[arg(long = "timeout-min")]
+        timeout_min: Option<u64>,
         /// do not post the result to iter_data
         #[arg(long)]
         no_record: bool,
@@ -227,8 +228,9 @@ enum Verb {
         /// record results but file no work items
         #[arg(long)]
         no_file: bool,
-        #[arg(long, default_value_t = 30)]
-        timeout_min: u64,
+        /// per test node budget (default: the node's `timeout_min:`, else 30)
+        #[arg(long)]
+        timeout_min: Option<u64>,
         #[arg(long)]
         install_schedule: bool,
         /// schedule interval for --install-schedule (30m, 4h, …)
@@ -719,7 +721,7 @@ mod local {
         Ok(out)
     }
 
-    pub fn runtests(topdir: &Path, node: Option<&str>, test: Option<&str>, broken: bool, fixed: bool, timeout_min: u64, record: bool) -> i32 {
+    pub fn runtests(topdir: &Path, node: Option<&str>, test: Option<&str>, broken: bool, fixed: bool, timeout_min: Option<u64>, record: bool) -> i32 {
         if broken && fixed {
             eprintln!("error: --broken and --fixed are mutually exclusive claims");
             return 2;
@@ -759,7 +761,7 @@ mod local {
         }
         let mut worst = 0;
         for (_, doc) in &targets {
-            let run = match rt::run_node(topdir, doc, test, timeout_min) {
+            let run = match rt::run_node(topdir, doc, test, rt::budget_min(doc, timeout_min, rt::DEFAULT_TIMEOUT_MIN)) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("error: {e}");

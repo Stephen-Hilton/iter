@@ -21,6 +21,7 @@ Frontmatter (common keys per `_iter_file_authoring`, plus):
     teststate: inherit          # omit for a set that must only ever run by hand (see `_teststate`)
     input_space: "what the code accepts and roughly how many practical permutations"
     coverage: {normal: 3, longtail: 2, failure: 3}
+    timeout_min: 30             # optional: this node's time budget in minutes (default 20)
     children:
       tests: ["{thisfiledir}/tests/{thisfilestem}*.sh"]
 
@@ -60,7 +61,8 @@ runnable tests (at most a few per sweep).
 - **Output files go only under `$ITER_TEST_OUT`** — a folder per test node outside the
   checkout, emptied at the start of every run. Never write into the tree and never commit
   output.
-- All scripts of one node share one time budget (`iter runtests --timeout-min`, default 20).
+- All scripts of one node share one time budget: the node's `timeout_min:` (default 20;
+  `iter runtests --timeout-min` overrides it for one run).
 
 ## Size the tests by the input space
 

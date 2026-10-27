@@ -12,8 +12,9 @@ the only acceptance criterion for "done" — never your own judgment that the co
 `<test node>` is an id (or a unique tail), a name, a file stem or a path. Left out, it is
 your item's node (`$ITER_NODEFILE`): that test node, or every test node it links.
 `--test` narrows a NEUTRAL run to one script; a narrowed run never records the node's
-result. `--timeout-min` is the node's whole time budget (default 20); a script still
-running at the limit is killed and counts as "could not run".
+result. `--timeout-min` is the node's whole time budget (default: the test node's own
+`timeout_min:` frontmatter key, else 20); a script still running at the limit is killed
+and counts as "could not run".
 
 ## Three modes: one neutral, two claims
 
