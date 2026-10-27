@@ -282,12 +282,13 @@ mem_settings() {
   [ "$TEST_SWAP_MAX" != default ] || TEST_SWAP_MAX=""
   ok "memory limits: each agent session ${SESSION_MEMORY_MAX:-40%} (swap ${SESSION_SWAP_MAX:-1G}), each test script ${TEST_MEMORY_MAX:-30%} (swap ${TEST_SWAP_MAX:-512M})"
 }
-# the service's memory-limit flags (only those set; the engine has defaults)
+# the service's memory-limit flags (only those set; the engine has defaults),
+# quoted for systemd (40% -> "40%%")
 mem_args() {
-  [ -z "$SESSION_MEMORY_MAX" ] || printf ' --session-memory-max %s' "$SESSION_MEMORY_MAX"
-  [ -z "$SESSION_SWAP_MAX" ] || printf ' --session-swap-max %s' "$SESSION_SWAP_MAX"
-  [ -z "$TEST_MEMORY_MAX" ] || printf ' --test-memory-max %s' "$TEST_MEMORY_MAX"
-  [ -z "$TEST_SWAP_MAX" ] || printf ' --test-swap-max %s' "$TEST_SWAP_MAX"
+  [ -z "$SESSION_MEMORY_MAX" ] || printf ' --session-memory-max %s' "$(sd_quote "$SESSION_MEMORY_MAX")"
+  [ -z "$SESSION_SWAP_MAX" ] || printf ' --session-swap-max %s' "$(sd_quote "$SESSION_SWAP_MAX")"
+  [ -z "$TEST_MEMORY_MAX" ] || printf ' --test-memory-max %s' "$(sd_quote "$TEST_MEMORY_MAX")"
+  [ -z "$TEST_SWAP_MAX" ] || printf ' --test-swap-max %s' "$(sd_quote "$TEST_SWAP_MAX")"
   return 0
 }
 conf_text() {
