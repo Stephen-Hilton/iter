@@ -51,7 +51,8 @@ A flaky test that passes on rerun: rerun it twice more and mention it in the rep
    iter_data's tests and the e2e run need ArangoDB at 127.0.0.1:8529 (root password `iterdev`). If
    `curl -sf -u root:iterdev http://127.0.0.1:8529/_api/version` fails (the port may be held by something
    else, e.g. a kubectl port-forward), start a throwaway one and point the tests at it:
-   `docker run -d --name iter-release-arango -p 18529:8529 -e ARANGO_ROOT_PASSWORD=iterdev arangodb:3.12`,
+   `docker run -d --name iter-release-arango -p 18529:8529 -e ARANGO_ROOT_PASSWORD=iterdev arangodb:3.12 arangod --vector-index`
+   (the GraphRAG store tests need vector indexes),
    wait for `/_api/version`, then `export ITER_TEST_ARANGO_URL=http://127.0.0.1:18529`. Stop and remove it
    at the end of the skill.
 4. End to end: `./test/e2e.sh` (iter_data + one engine on the mock provider). Every check must PASS.
