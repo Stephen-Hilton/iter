@@ -1,7 +1,7 @@
 ---
 id: 5f31ed6e-34c6-4a3f-a37e-5e04d0a6b44d
 name: "Agent dispatch (provider CLI)"
-desc: "How the engine runs a model: provider::dispatch_agent(provider, model, context, settings) picks the account's provider (its of edge; default claude). claude starts one headless Claude Code process per call — claude -p <prompt> --output-format stream-json --verbose [--resume] [--model] [--allowedTools] [--max-turns] [--mcp-config] — in the checkout, billed via CLAUDE_CODE_OAUTH_TOKEN, and reads the result and rate_limit_event usage from stdout. mock runs no model: it executes mock: directives in-process for deterministic tests."
+desc: "How the engine runs a model: provider::dispatch_agent(provider, model, context, settings) picks the account's provider (its of edge; default claude). claude starts one headless Claude Code process per call — claude -p --output-format stream-json --verbose [--resume] [--model] [--allowedTools] [--max-turns] [--mcp-config], with the prompt on stdin (never in argv) — in the checkout, billed via CLAUDE_CODE_OAUTH_TOKEN, and reads the result and rate_limit_event usage from stdout. mock runs no model: it executes mock: directives in-process for deterministic tests."
 creator: "stephen"
 teststate: inherit
 connects:
@@ -26,10 +26,15 @@ way can plug in.
 ## Protocol (provider `claude`)
 
 - **Start**: a child process `claude` (`$ITER_CLAUDE_BIN` overrides) with
-  `-p <prompt> --output-format stream-json --verbose`, then optionally
+  `-p --output-format stream-json --verbose`, then optionally
   `--resume <session id>`, `--model <m>`, `--allowedTools <list>`,
   `--max-turns <n>`, `--mcp-config <file>` and the agent's own flags;
-  `cwd` = the project's checkout; stdin closed.
+  `cwd` = the project's checkout.
+- **Prompt**: on stdin, on every operating system: the engine writes the
+  prompt from memory into a pipe on a thread of its own and closes it (end of
+  input); argv never carries it (Linux refuses one argument over 131,071
+  bytes). Each dispatch logs `wrote <n> of <total> bytes`; a short write is
+  added to a failed run's error, and fails a run that exited 0.
 - **Environment**: `CLAUDE_CODE_OAUTH_TOKEN` = the account's token (read from
   the engine's env file under the account's `token_envar`);
   `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` removed; `ITER_*` addressing

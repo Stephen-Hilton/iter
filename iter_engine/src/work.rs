@@ -1451,7 +1451,7 @@ pub(crate) fn wait_with_stop(cmd: Command, timeout_sec: u64, stop: &crate::provi
 
 /// `wait_with_stop`, with `input` written to the child's stdin (then closed).
 pub(crate) fn wait_with_stop_input(cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck) -> Result<String, String> {
-    wait_scoped(cmd, input, timeout_sec, stop, None)
+    wait_scoped(cmd, input, timeout_sec, stop, None, "")
 }
 
 /// `wait_with_stop_input` for an agent session (`kind` "agent") or an exec
@@ -1463,7 +1463,7 @@ pub(crate) fn wait_in_session(cmd: Command, input: Option<String>, timeout_sec: 
     let label = if label.is_empty() { short(&current_run().0).to_string() } else { label.to_string() };
     let label = if label.is_empty() { kind.to_string() } else { label };
     let scope = crate::memlimit::session(kind, &label);
-    let r = wait_scoped(cmd, input, timeout_sec, stop, scope.as_ref());
+    let r = wait_scoped(cmd, input, timeout_sec, stop, scope.as_ref(), &label);
     let Some(scope) = scope else { return r };
     match (scope.report(), r) {
         (Some(why), Err(e)) => {
@@ -1478,7 +1478,142 @@ pub(crate) fn wait_in_session(cmd: Command, input: Option<String>, timeout_sec: 
     }
 }
 
-fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck, scope: Option<&crate::memlimit::Scope>) -> Result<String, String> {
+/// One engine log line (stdout).  Under test it is also kept, per thread, for
+/// `take_test_log` (a dispatch logs on the thread that runs it).
+pub(crate) fn engine_log(line: String) {
+    println!("{line}");
+    #[cfg(test)]
+    TEST_LOG.with(|l| l.borrow_mut().push(line));
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOG: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The engine log lines this thread wrote since the last call (tests only).
+#[cfg(test)]
+pub(crate) fn take_test_log() -> Vec<String> {
+    TEST_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
+/// The engine's own cap on one `NAME=value` it sets for a child.  Linux
+/// refuses any single environment string over 131,071 bytes at exec (E2BIG,
+/// the same limit that once refused long prompts in argv); a variable this
+/// big is a bug to name, not an opaque spawn failure.
+pub(crate) const ENV_VAR_MAX: usize = 64 * 1024;
+
+/// The first variable set on `cmd` whose `NAME=value` is over ENV_VAR_MAX.
+fn oversized_env(cmd: &Command) -> Option<String> {
+    cmd.get_envs().find_map(|(k, v)| {
+        let n = k.len() + 1 + v.map(|v| v.len()).unwrap_or(0);
+        (v.is_some() && n > ENV_VAR_MAX).then(|| {
+            format!("spawn refused: environment variable {} is {n} bytes as NAME=value, over the engine's {ENV_VAR_MAX}-byte limit for one variable (Linux refuses any over 131071)", k.to_string_lossy())
+        })
+    })
+}
+
+/// A launch that fails the same way every time it is tried: the item fails at
+/// once instead of spending its attempts (docs/bugfixes/2026-11-08_agent_prompt_via_stdin.md §4.5).
+pub(crate) fn fails_at_once(err: &str) -> bool {
+    err.starts_with("spawn refused: environment variable")
+        || (err.contains("spawn failed:")
+            && (err.contains("Argument list too long") || err.contains("os error 7)") || err.contains("os error 206)")))
+}
+
+/// How the write of a child's stdin went.
+struct StdinResult {
+    written: usize,
+    total: usize,
+    error: Option<std::io::Error>,
+    /// the writer had not finished when the engine stopped waiting for it
+    blocked: bool,
+}
+
+impl StdinResult {
+    fn short(&self) -> bool {
+        self.written < self.total
+    }
+
+    fn describe(&self) -> String {
+        match &self.error {
+            _ if self.blocked => format!("stdin writer still blocked after {} of {} bytes", self.written, self.total),
+            Some(e) => format!("wrote {} of {} bytes, then {e}", self.written, self.total),
+            None => format!("wrote {} of {} bytes", self.written, self.total),
+        }
+    }
+
+    /// The text appended to a failed run's error.
+    fn suffix(&self) -> String {
+        if self.blocked { format!("; {}", self.describe()) } else { format!("; stdin: {}", self.describe()) }
+    }
+}
+
+/// The prompt (or any input) being written to a child's stdin on a thread of
+/// its own, so a child that stops reading blocks only that thread, never the
+/// wait loop.  The thread counts what the pipe accepted, then drops the write
+/// end, which is the child's end of input.
+struct StdinFeed {
+    total: usize,
+    written: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    done: std::sync::mpsc::Receiver<Option<std::io::Error>>,
+}
+
+impl StdinFeed {
+    fn start(mut pipe: impl std::io::Write + Send + 'static, text: String) -> Self {
+        use std::sync::atomic::Ordering;
+        let total = text.len();
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, done) = std::sync::mpsc::channel();
+        let count = written.clone();
+        std::thread::spawn(move || {
+            // the text moves here: this thread owns the only copy, freed when it ends
+            let bytes = text.into_bytes();
+            let mut at = 0;
+            let mut error = None;
+            while at < bytes.len() {
+                match pipe.write(&bytes[at..]) {
+                    Ok(0) => {
+                        error = Some(std::io::Error::new(std::io::ErrorKind::WriteZero, "the pipe accepted no more bytes"));
+                        break;
+                    }
+                    Ok(n) => {
+                        at += n;
+                        count.store(at, Ordering::SeqCst);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            drop(pipe); // end of input for the child
+            let _ = tx.send(error);
+        });
+        Self { total, written, done }
+    }
+
+    /// Wait at most `limit` for the writer.  A writer still blocked then (a
+    /// process the child started kept the pipe open without reading) is left
+    /// detached; the engine never waits on it indefinitely.
+    fn finish(self, limit: Duration) -> StdinResult {
+        use std::sync::atomic::Ordering;
+        let (error, blocked) = match self.done.recv_timeout(limit) {
+            Ok(e) => (e, false),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, true),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                (Some(std::io::Error::other("the stdin writer thread ended without a result")), false)
+            }
+        };
+        StdinResult { written: self.written.load(Ordering::SeqCst), total: self.total, error, blocked }
+    }
+}
+
+/// How long the engine waits for a stdin writer once the child has ended.
+const STDIN_JOIN_LIMIT: Duration = Duration::from_secs(5);
+
+fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: &crate::provider::StopCheck, scope: Option<&crate::memlimit::Scope>, label: &str) -> Result<String, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1489,6 +1624,10 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
     }
     if let Some(s) = scope {
         s.apply(&mut cmd);
+    }
+    if let Some(e) = oversized_env(&cmd) {
+        engine_log(format!("[engine] {e}"));
+        return Err(e);
     }
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     if let Some(s) = scope.filter(|s| !s.holds(child.id())) {
@@ -1503,13 +1642,19 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
     // on Windows, dropping `tree` (every return below) also kills whatever
     // the run left behind — see ProcessTree
     let tree = iter_core::platform::ProcessTree::adopt(&child);
-    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-        // its own thread: a child that stops reading must not wedge the engine
-        std::thread::spawn(move || {
-            use std::io::Write;
-            let _ = stdin.write_all(text.as_bytes());
-        });
-    }
+    let feed = match (input, child.stdin.take()) {
+        (Some(text), Some(pipe)) => Some(StdinFeed::start(pipe, text)),
+        _ => None,
+    };
+    // once the child has ended: wait (bounded) for the writer and log one line
+    // per dispatch with what reached the child
+    let program = std::path::Path::new(cmd.get_program()).file_stem().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let who = if label.is_empty() { program } else { format!("{program} ({label})") };
+    let stdin_done = |feed: Option<StdinFeed>| -> Option<StdinResult> {
+        let r = feed?.finish(STDIN_JOIN_LIMIT);
+        engine_log(format!("[engine] prompt to {who}: {}", r.describe()));
+        Some(r)
+    };
     // drain both pipes on their own threads: stream-json echoes every message,
     // and a full 64K pipe would block the child forever if read only at exit
     let slurp = |pipe: Option<Box<dyn std::io::Read + Send>>| -> Option<std::thread::JoinHandle<String>> {
@@ -1524,16 +1669,25 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
             kill_scope();
             let _ = child.kill();
             let _ = child.wait();
+            // logged, but the stop's own text is the error (it is matched exactly)
+            stdin_done(feed);
             return Err(why);
         }
         match child.try_wait() {
             Ok(Some(status)) => {
                 let out = out_h.take().and_then(|h| h.join().ok()).unwrap_or_default();
                 let err = err_h.take().and_then(|h| h.join().ok()).unwrap_or_default();
+                let fed = stdin_done(feed);
+                let tail = fed.as_ref().map(StdinResult::suffix).unwrap_or_default();
                 if status.success() {
+                    // `claude -p` reads all of its stdin before it starts: a
+                    // clean exit after a short write worked from a cut prompt
+                    if fed.as_ref().is_some_and(StdinResult::short) {
+                        return Err(format!("exit {:?} without reading its whole input{tail}", status.code()));
+                    }
                     return Ok(out);
                 }
-                return Err(format!("exit {:?}: {}{}", status.code(), failure_reason(&out), err));
+                return Err(format!("exit {:?}: {}{}{tail}", status.code(), failure_reason(&out), err));
             }
             Ok(None) => {
                 if Instant::now() > deadline {
@@ -1545,7 +1699,8 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
                     kill_scope();
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("timed out after {timeout_sec}s"));
+                    let tail = stdin_done(feed).map(|r| r.suffix()).unwrap_or_default();
+                    return Err(format!("timed out after {timeout_sec}s{tail}"));
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -1961,7 +2116,13 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
         } else {
             let maxattempts = project.failure.maxattempts.max(1);
             updated["lasterror"] = json!(text.chars().take(2000).collect::<String>());
-            if item.attempt >= maxattempts {
+            // a launch the OS refuses for its size fails identically every
+            // time: no retries (docs/bugfixes/2026-11-08_agent_prompt_via_stdin.md §4.5)
+            let deterministic = fails_at_once(&text);
+            if item.attempt >= maxattempts || deterministic {
+                if deterministic && item.attempt < maxattempts {
+                    println!("[engine] {} '{}': attempt {} failed at launch the same way any retry would — failed now, not retried", short(&item.id), item.name, item.attempt);
+                }
                 updated["state"] = json!("failed");
                 updated["ts"]["complete"] = json!(now_utc());
             } else {
@@ -2012,6 +2173,61 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
 
 #[cfg(test)]
 mod tests {
+
+    /// §4.5: an environment variable over 64 KiB refuses the dispatch by name
+    /// instead of an opaque E2BIG, and the item is not retried.
+    /// Breaks again if: the check before spawn is removed (on Linux the spawn
+    /// then fails with E2BIG; on macOS the child runs and the test sees `Ok`).
+    #[test]
+    fn an_oversized_environment_variable_is_refused_by_name() {
+        let mut cmd = iter_core::platform::bash();
+        cmd.arg("-c").arg("true").env("ITER_CONTEXT_FILES", "a".repeat(super::ENV_VAR_MAX));
+        let e = super::wait_with_stop_input(cmd, None, 10, &crate::provider::StopCheck::none()).unwrap_err();
+        assert!(e.starts_with("spawn refused: environment variable ITER_CONTEXT_FILES is 65555 bytes"), "{e}");
+        assert!(super::fails_at_once(&e), "{e}");
+        let mut ok = iter_core::platform::bash();
+        ok.arg("-c").arg("true").env("ITER_CONTEXT_FILES", "a".repeat(super::ENV_VAR_MAX - "ITER_CONTEXT_FILES=".len()));
+        assert!(super::wait_with_stop_input(ok, None, 10, &crate::provider::StopCheck::none()).is_ok());
+    }
+
+    #[test]
+    fn only_launch_size_failures_fail_at_once() {
+        assert!(super::fails_at_once("spawn failed: Argument list too long (os error 7)"));
+        assert!(super::fails_at_once("spawn failed: The filename or extension is too long. (os error 206)"));
+        assert!(!super::fails_at_once("spawn failed: No such file or directory (os error 2)"));
+        // an agent's own output mentioning E2BIG is an ordinary failure
+        assert!(!super::fails_at_once("exit Some(1): bash: /usr/bin/ls: Argument list too long"));
+        assert!(!super::fails_at_once("timed out after 20s"));
+    }
+
+    /// §4.3 step 4: a writer still blocked once the child has ended (a
+    /// process it started kept the pipe open without reading) is reported
+    /// and left detached; the engine does not wait on it.
+    /// Breaks again if: `finish` waits without a limit (the test hangs).
+    #[test]
+    fn a_blocked_stdin_writer_is_reported_not_waited_on() {
+        struct Stuck(std::sync::mpsc::Receiver<()>, bool);
+        impl std::io::Write for Stuck {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                if self.1 {
+                    let _ = self.0.recv(); // never answered: blocks for good
+                }
+                self.1 = true;
+                Ok(b.len().min(1000))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_keep, rx) = std::sync::mpsc::channel();
+        let feed = super::StdinFeed::start(Stuck(rx, false), "z".repeat(5000));
+        let t0 = Instant::now();
+        let r = feed.finish(Duration::from_millis(300));
+        assert!(t0.elapsed() < Duration::from_secs(3));
+        assert!(r.blocked && r.short());
+        assert_eq!(r.describe(), "stdin writer still blocked after 1000 of 5000 bytes");
+        assert_eq!(r.suffix(), "; stdin writer still blocked after 1000 of 5000 bytes");
+    }
 
     #[test]
     fn a_failed_run_reports_the_error_result_not_the_init_line() {

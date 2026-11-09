@@ -372,6 +372,18 @@ pub fn get_usage(provider: &str, account: &str, token: Option<&str>, last: Optio
 **Every** model call (work turns, close-gate verifier, explain, dedup judge, RAG summaries/OCR, critic,
 nudge) goes through `dispatch_agent`. Provider comes from the account (`account.provider`, default claude).
 
+**Claude hand-off** (2026-11-08, `docs/bugfixes/2026-11-08_agent_prompt_via_stdin.md`): argv is
+`claude -p --output-format stream-json --verbose [--resume …] [--model …] …` and **never carries the prompt**,
+on every operating system. The prompt, held in memory, is written to the child's stdin through a pipe from a
+thread of its own, which then closes the pipe (`claude -p` reads its prompt until end of input). No file is
+written. (A prompt in argv failed on Linux past 131,071 bytes, the kernel's per-argument limit, with
+`spawn failed: Argument list too long`; Windows caps a whole command line at 32,767 characters.) Each
+dispatch logs `[engine] prompt to claude (<label>): wrote <n> of <total> bytes`; a failed or timed-out run's
+error ends `; stdin: wrote <n> of <total> bytes[, then <io error>]`; an exit status 0 after a short write is a
+failed run; the engine waits at most 5 s for the writer after the child ends. Before any spawn, a `NAME=value`
+the engine sets over 64 KiB refuses the dispatch by name (`spawn refused: environment variable …`); that and
+an OS refusal for size fail the item at once instead of using its attempts.
+
 **Mock provider** (deterministic; drives all e2e tests): the prompt is scanned for directives in the work
 item's description, one per line:
 ```

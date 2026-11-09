@@ -14,9 +14,13 @@ pub fn claude_bin() -> String {
     std::env::var("ITER_CLAUDE_BIN").ok().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "claude".into())
 }
 
-/// The argv after the binary, in a fixed order (tests read it).
+/// The argv after the binary, in a fixed order (tests read it).  It never
+/// carries the prompt: `-p` with no prompt argument reads it from stdin
+/// (`args_and_stdin`).  Linux refuses any single argument over 131,071 bytes
+/// (E2BIG, "Argument list too long") and Windows a command line over 32,767
+/// characters; prompts pass both (docs/bugfixes/2026-11-08_agent_prompt_via_stdin.md).
 pub fn claude_args(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> Vec<String> {
-    let mut a: Vec<String> = vec!["-p".into(), ctx.prompt.clone(), "--output-format".into(), "stream-json".into(), "--verbose".into()];
+    let mut a: Vec<String> = vec!["-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into()];
     if let Some(sid) = ctx.resume.as_ref().filter(|x| !x.trim().is_empty()) {
         a.push("--resume".into());
         a.push(sid.clone());
@@ -41,25 +45,16 @@ pub fn claude_args(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> Vec
     a
 }
 
-/// Windows caps a whole command line at 32,767 UTF-16 units; a prompt longer
-/// than this goes to `claude -p` on stdin instead of argv there.
-const WINDOWS_ARGV_PROMPT_MAX: usize = 16_000;
-
-/// Split the prompt off argv when it would not fit: (args, stdin text).
-pub fn args_and_stdin(model: &str, ctx: &AgentContext, s: &DispatchSettings, argv_prompt_max: Option<usize>) -> (Vec<String>, Option<String>) {
-    let mut args = claude_args(model, ctx, s);
-    match argv_prompt_max {
-        Some(max) if ctx.prompt.len() > max => {
-            args.remove(1); // the prompt, right after "-p"
-            (args, Some(ctx.prompt.clone()))
-        }
-        _ => (args, None),
-    }
+/// (args, stdin text): the prompt always goes to `claude -p` on stdin, on
+/// every operating system, written from memory through a pipe
+/// (crate::work::wait_scoped); argv never carries it.
+pub fn args_and_stdin(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> (Vec<String>, String) {
+    (claude_args(model, ctx, s), ctx.prompt.clone())
 }
 
 pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettings) -> Result<DispatchOut, String> {
     let mut cmd = Command::new(claude_bin());
-    let (args, input) = args_and_stdin(model, ctx, s, cfg!(windows).then_some(WINDOWS_ARGV_PROMPT_MAX));
+    let (args, input) = args_and_stdin(model, ctx, s);
     cmd.args(args);
     // no account token but this session's own: the process may hold others
     crate::envstore::scrub(&mut cmd);
@@ -73,11 +68,12 @@ pub fn dispatch_agent_claude(model: &str, ctx: &AgentContext, s: &DispatchSettin
         cmd.env(k, v);
     }
     let cwd = if ctx.cwd.as_os_str().is_empty() { std::env::temp_dir() } else { ctx.cwd.clone() };
-    cmd.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin is a pipe the prompt is written into (wait_scoped, given `input`)
+    cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // its own cgroup with the session memory limit (crate::memlimit), named
     // after the item it works on
     let label = session_label(ctx);
-    let raw = crate::work::wait_in_session(cmd, input, s.timeout.as_secs(), &s.stop, "agent", &label)?;
+    let raw = crate::work::wait_in_session(cmd, Some(input), s.timeout.as_secs(), &s.stop, "agent", &label)?;
     let (sid, mut out) = parse_stream(&raw);
     if out.session_id.is_empty() {
         out.session_id = sid;
@@ -240,23 +236,198 @@ mod tests {
         let s = DispatchSettings { max_turns: Some(12), ..Default::default() };
         assert_eq!(
             claude_args("sonnet", &ctx, &s),
-            ["-p", "P", "--output-format", "stream-json", "--verbose", "--resume", "sid", "--model", "sonnet",
+            ["-p", "--output-format", "stream-json", "--verbose", "--resume", "sid", "--model", "sonnet",
              "--allowedTools", "Read,Glob", "--max-turns", "12", "--mcp-config", "/tmp/m.json", "--disallowedTools", "Bash"]
                 .map(String::from)
                 .to_vec()
         );
     }
 
+    /// T2 (docs/bugfixes/2026-11-08_agent_prompt_via_stdin.md §5): argv
+    /// carries no prompt on any operating system, whatever its size; the
+    /// prompt is always the stdin text.  No `cfg` gate.
+    /// Breaks again if: a size cap or the `cfg!(windows)` condition is reinstated.
     #[test]
-    fn a_long_prompt_moves_to_stdin_only_past_the_cap() {
+    fn t2_argv_carries_no_prompt_on_any_os() {
         let s = DispatchSettings::default();
-        let short = AgentContext { prompt: "P".into(), ..Default::default() };
-        assert_eq!(args_and_stdin("", &short, &s, Some(10)), (claude_args("", &short, &s), None));
-        let long = AgentContext { prompt: "x".repeat(11), ..Default::default() };
-        let (args, input) = args_and_stdin("haiku", &long, &s, Some(10));
-        assert_eq!(args, ["-p", "--output-format", "stream-json", "--verbose", "--model", "haiku"].map(String::from).to_vec());
-        assert_eq!(input.as_deref(), Some("xxxxxxxxxxx"));
-        assert_eq!(args_and_stdin("", &long, &s, None).1, None);
+        for p in ["P".to_string(), "x".repeat(16_000), "x".repeat(16_001)] {
+            let ctx = AgentContext { prompt: p.clone(), ..Default::default() };
+            let (args, input) = args_and_stdin("haiku", &ctx, &s);
+            assert_eq!(args, ["-p", "--output-format", "stream-json", "--verbose", "--model", "haiku"].map(String::from).to_vec(), "prompt of {} bytes", p.len());
+            assert_eq!(input, p, "prompt of {} bytes", p.len());
+        }
+    }
+
+    /// ITER_CLAUDE_BIN is process-wide: the dispatch tests take turns.
+    static CLAUDE_BIN_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The stand-in `claude` (examples/fake_claude.rs): `cargo test` builds it
+    /// next to the test binary (target/<profile>/examples); else build it.
+    fn fake_claude() -> std::path::PathBuf {
+        static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        BIN.get_or_init(|| {
+            let exe = std::env::current_exe().unwrap();
+            let profile_dir = exe.parent().and_then(|d| d.parent()).unwrap().to_path_buf();
+            let bin = profile_dir.join("examples").join(format!("fake_claude{}", std::env::consts::EXE_SUFFIX));
+            if !bin.is_file() {
+                let mut c = std::process::Command::new(env!("CARGO"));
+                c.args(["build", "--example", "fake_claude", "--manifest-path", concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")]);
+                if !cfg!(debug_assertions) {
+                    c.arg("--release");
+                }
+                let st = c.status().expect("run cargo build --example fake_claude");
+                assert!(st.success() && bin.is_file(), "could not build the stand-in claude at {}", bin.display());
+            }
+            bin
+        })
+        .clone()
+    }
+
+    /// What one stand-in dispatch gave: its result, its working folder
+    /// (stdin.bin, argv.bin), the engine log lines it wrote, how long it took.
+    struct FakeRun {
+        result: Result<DispatchOut, String>,
+        dir: std::path::PathBuf,
+        log: Vec<String>,
+        took: std::time::Duration,
+    }
+
+    /// Dispatch `prompt` through `dispatch_agent_claude` (the engine's own
+    /// in-memory path) to the stand-in in `mode`, under a 30 s watchdog.
+    fn dispatch_fake(tag: &str, prompt: String, mode: &str, timeout_secs: u64) -> FakeRun {
+        let bin = fake_claude();
+        let dir = std::env::temp_dir().join(format!("iter-fake-claude-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = AgentContext {
+            prompt,
+            cwd: dir.clone(),
+            env: vec![("ITER_WORKID".into(), format!("fake-{tag}")), ("FAKE_CLAUDE_MODE".into(), mode.into())],
+            ..Default::default()
+        };
+        let s = DispatchSettings { timeout: std::time::Duration::from_secs(timeout_secs), ..Default::default() };
+        let _env = CLAUDE_BIN_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: only these tests set ITER_CLAUDE_BIN, one at a time (the lock)
+        unsafe { std::env::set_var("ITER_CLAUDE_BIN", &bin) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t0 = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let result = dispatch_agent_claude("haiku", &ctx, &s);
+            let _ = tx.send((result, crate::work::take_test_log()));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
+        let took = t0.elapsed();
+        unsafe { std::env::remove_var("ITER_CLAUDE_BIN") };
+        let (result, log) = got.expect("watchdog: the dispatch did not return within 30 s");
+        FakeRun { result, dir, log, took }
+    }
+
+    /// `n` bytes exactly: a start marker, lines with multi-byte UTF-8 and
+    /// `\r\n` ends, ASCII padding, an end marker.
+    fn big_prompt(n: usize, start: &str, end: &str) -> String {
+        let line = "a requirement line — with café, é and a CRLF end\r\n";
+        let mut p = format!("{start}\r\n");
+        while p.len() + line.len() + end.len() + 2 <= n {
+            p.push_str(line);
+        }
+        while p.len() + end.len() + 2 < n {
+            p.push('x');
+        }
+        p.push_str("\r\n");
+        p.push_str(end);
+        assert_eq!(p.len(), n);
+        p
+    }
+
+    fn contains(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    /// T1: a prompt over 200 KB reaches `claude` byte for byte, through the
+    /// engine's in-memory path (AgentContext.prompt; nothing read from a file).
+    /// Breaks again if: the prompt is put back in argv, stdin is set back to
+    /// `Stdio::null()`, or the pipe is not closed after writing (the stand-in
+    /// never sees end of input and the watchdog fails the test).
+    #[test]
+    fn t1_a_250kb_prompt_reaches_claude_byte_for_byte_on_stdin() {
+        let (start, end) = ("ITER-T1-START-MARK-5b1e", "ITER-T1-END-MARK-9c42");
+        let prompt = big_prompt(250_000, start, end);
+        let run = dispatch_fake("t1", prompt.clone(), "echo", 60);
+        assert!(run.result.is_ok(), "dispatch failed: {:?}", run.result.as_ref().err());
+        let stdin = std::fs::read(run.dir.join("stdin.bin")).unwrap_or_default();
+        assert!(stdin == prompt.as_bytes(), "stdin.bin holds {} bytes, not the prompt's {}", stdin.len(), prompt.len());
+        let argv = std::fs::read(run.dir.join("argv.bin")).unwrap();
+        assert!(!contains(&argv, start) && !contains(&argv, end), "argv carries the prompt");
+        assert!(argv.len() < 4096, "argv is {} bytes", argv.len());
+        assert!(run.log.iter().any(|l| l.contains("wrote 250000 of 250000 bytes")), "log: {:?}", run.log);
+        let _ = std::fs::remove_dir_all(&run.dir);
+    }
+
+    /// T4's extra case: a 20,000-character prompt (just past the old Windows
+    /// cap) arrives byte for byte.  Runs on every operating system.
+    #[test]
+    fn t4_a_20000_character_prompt_arrives_byte_for_byte() {
+        let prompt = big_prompt(20_000, "ITER-T4-START", "ITER-T4-END");
+        let run = dispatch_fake("t4", prompt.clone(), "echo", 60);
+        assert!(run.result.is_ok(), "dispatch failed: {:?}", run.result.as_ref().err());
+        let stdin = std::fs::read(run.dir.join("stdin.bin")).unwrap_or_default();
+        assert!(stdin == prompt.as_bytes(), "stdin.bin holds {} bytes, not the prompt's {}", stdin.len(), prompt.len());
+        let _ = std::fs::remove_dir_all(&run.dir);
+    }
+
+    /// The broken-pipe error the OS gives a writer whose reader is gone.
+    fn is_broken_pipe(text: &str) -> bool {
+        if cfg!(windows) { text.contains("os error 232") || text.contains("os error 109") } else { text.contains("os error 32") }
+    }
+
+    /// `n` in "stdin: wrote <n> of <total> bytes".
+    fn bytes_written(text: &str, total: usize) -> Option<usize> {
+        let tail = format!(" of {total} bytes");
+        let at = text.find(&tail)?;
+        text[..at].rsplit("wrote ").next()?.trim().parse().ok()
+    }
+
+    /// T3: a child that exits (status 3) without reading its stdin gives a
+    /// logged write error, not a hang.
+    /// Breaks again if: `let _ = stdin.write_all(...)` is restored (no stdin
+    /// text in the error).
+    #[test]
+    fn t3_a_child_that_exits_unread_gives_a_logged_write_error() {
+        let run = dispatch_fake("t3a", "y".repeat(1_000_000), "exit:3", 20);
+        assert!(run.took < std::time::Duration::from_secs(10), "took {:?}", run.took);
+        let e = run.result.as_ref().map(|_| ()).unwrap_err();
+        assert!(e.contains("exit Some(3)"), "{e}");
+        assert!(e.contains("stdin: wrote ") && e.contains(" of 1000000 bytes, then"), "{e}");
+        assert!(bytes_written(e, 1_000_000).is_some_and(|n| n < 1_000_000), "{e}");
+        assert!(is_broken_pipe(e), "{e}");
+        assert!(run.log.iter().any(|l| l.contains(" of 1000000 bytes, then") && is_broken_pipe(l)), "log: {:?}", run.log);
+        let _ = std::fs::remove_dir_all(&run.dir);
+    }
+
+    /// T3, second case: exit status 0 without reading is a failed run (the
+    /// agent would have worked from a cut prompt).
+    #[test]
+    fn t3_a_child_that_exits_0_unread_is_a_failed_run() {
+        let run = dispatch_fake("t3b", "y".repeat(1_000_000), "exit:0", 20);
+        let e = match &run.result {
+            Ok(o) => panic!("a short write passed as success: {:?}", o.text),
+            Err(e) => e.clone(),
+        };
+        assert!(e.contains("stdin: wrote ") && bytes_written(&e, 1_000_000).is_some_and(|n| n < 1_000_000), "{e}");
+        let _ = std::fs::remove_dir_all(&run.dir);
+    }
+
+    /// T3, third case: a child that neither reads nor exits is timed out, with
+    /// the stdin result attached, and the dispatch does not hang.
+    /// Breaks again if: the write is moved onto the dispatching thread before
+    /// the wait loop (the watchdog then fails the test).
+    #[test]
+    fn t3_a_child_that_never_reads_times_out_with_the_stdin_result() {
+        let run = dispatch_fake("t3c", "y".repeat(1_000_000), "sleep", 20);
+        let e = run.result.as_ref().map(|_| ()).unwrap_err();
+        assert!(e.starts_with("timed out after 20s"), "{e}");
+        assert!(e.contains("stdin") && e.contains(" of 1000000 bytes"), "{e}");
+        let _ = std::fs::remove_dir_all(&run.dir);
     }
 
     /// A stand-in `claude` binary: the dispatch runs it with the token in
@@ -268,12 +439,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("iter-fake-claude-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\necho \"{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"session_id\\\":\\\"S\\\",\\\"result\\\":\\\"$CLAUDE_CODE_OAUTH_TOKEN $ITER_WORKID $(basename $(pwd))\\\"}\"\n").unwrap();
+        std::fs::write(&bin, "#!/bin/sh\ncat >/dev/null\necho \"{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"session_id\\\":\\\"S\\\",\\\"result\\\":\\\"$CLAUDE_CODE_OAUTH_TOKEN $ITER_WORKID $(basename $(pwd))\\\"}\"\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // ITER_CLAUDE_BIN is read per call; only this test sets it
+        // ITER_CLAUDE_BIN is read per call; the dispatch tests take turns setting it
         let ctx = AgentContext { prompt: "x".into(), cwd: dir.clone(), env: vec![("ITER_WORKID".into(), "W1".into())], ..Default::default() };
         let s = DispatchSettings { token: Some("TK".into()), ..Default::default() };
-        // SAFETY: test-only variable no other test reads
+        let _env = CLAUDE_BIN_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: test-only variable, set by one test at a time (the lock)
         unsafe { std::env::set_var("ITER_CLAUDE_BIN", &bin) };
         let out = dispatch_agent_claude("", &ctx, &s).unwrap();
         unsafe { std::env::remove_var("ITER_CLAUDE_BIN") };

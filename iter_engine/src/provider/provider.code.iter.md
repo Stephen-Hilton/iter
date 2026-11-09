@@ -31,10 +31,12 @@ providers. A registry filled each tick from the assignments maps (project, accou
 `bills`-edge default model (`register_accounts`, `provider_for`, `model_default`, `model_for`: the agent's model when the provider can run it, else the default); `call` is the path
 every engine call uses: resolve provider and token, dispatch, then record the account's usage snapshot.
 
-- `provider/claude.rs`: builds `claude -p … --output-format stream-json --verbose` arguments
-  (`claude_args`, `--resume`, `--mcp-config`, `--allowedTools`), runs it with
-  `CLAUDE_CODE_OAUTH_TOKEN` through `work::wait_in_session` (its own memory-limited cgroup, named after
-  the item: `session_label`), and parses the result line (`parse_result_json`); usage comes from the
+- `provider/claude.rs`: builds `claude -p --output-format stream-json --verbose` arguments
+  (`claude_args`, `--resume`, `--mcp-config`, `--allowedTools`), which never carry the prompt: on every
+  operating system the prompt goes to `claude -p` on stdin, written from memory through a pipe
+  (`args_and_stdin`; `work::wait_scoped` writes it on its own thread, counts and logs the bytes, and adds
+  a short write to the run's error). It runs with `CLAUDE_CODE_OAUTH_TOKEN` through
+  `work::wait_in_session` (its own memory-limited cgroup, named after the item: `session_label`), and parses the result line (`parse_result_json`); usage comes from the
   stream's `rate_limit_event`, else the idle probe in `usage.rs`.
 - `provider/mock.rs`: on a work turn runs directive lines top to bottom — `mock: write`, `append`,
   `run`, `say`, `fail`, `ask` (through the `iter` shim), `sleep`; answers the verifier
