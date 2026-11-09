@@ -36,7 +36,7 @@ Finds the project's description files on disk, quickly and without being fooled 
   an absolute one and refuses anything leaving the topdir.
 
 `iter_engine/src/local/mod.rs` holds the shared pieces: `SKIP_DIRS` / `is_skip_dir`, `GitIgnored` (one
-`git ls-files --others --ignored` listing per walk, `contains`), `drop_git_ignored` (`git check-ignore`)
+`git status --ignored=matching` listing per walk, `contains`), `drop_git_ignored` (`git check-ignore`)
 and `now_iso`. Outside a git repository nothing is dropped.
 
 ## What goes in and out
