@@ -105,6 +105,56 @@ by date or run number, and never commit output. The sweep commits nothing, so a 
 leaves in the tree sits uncommitted or is swept into some other item's commit. Shared
 helpers live in `$ITER_TESTS_SHARED` (`{topdir}/.iter/tests`).
 
+## Memory limits: every test must fit (Stephen, 2026-10-27)
+On a Linux engine your whole session (you and everything you start) has a memory cap, and
+every script `iter runtests` runs gets its own smaller cap inside it. A process that passes
+its cap is killed by the kernel. Write every test to fit, and run every test as if the caps
+are there, even when you cannot see them.
+- **Where to find the numbers** (each in bytes):
+  - `$ITER_MEM_TEST_MAX` is what one test script may use. `off` means a script has no cap of
+    its own.
+  - `cat "$ITER_MEM_CGROUP/memory.max"` is what your whole session may use (`max` = no cap).
+  - When `ITER_MEM_CGROUP` is not set, this engine has no caps (macOS, Windows, an old
+    Linux). The machine's memory is still finite: the defaults are 30% of it per script and
+    40% per session (`MemTotal` in `/proc/meminfo`).
+- **Run tests through `"$ITER_BIN" runtests "<test node>"`, never a heavy `cargo test`,
+  mutation run or build straight from your shell.** Inside the runner, a runaway kills only
+  its own process; the script and your session go on. Run straight from your shell, it
+  counts against your session's cap, and passing that kills you and everything you started
+  (the item's last error then reads "agent session killed: its processes reached the …
+  memory limit for one agent session"). If you see that in your mainwork or your item's last
+  error, the last attempt ran something too large outside the runner: run it through the
+  runner this time, in smaller pieces.
+- **How a memory kill shows up**:
+  - The runner's summary line for the script, and the `# note:` line of its log, say
+    "killed by the memory limit: N of the script's processes reached the … limit for one
+    test script (memory.events …)".
+  - The killed process exits 137 (SIGKILL); the script sees that exit code and goes on.
+  - A note that says "… while its agent session (or the engine's service) was at its limit"
+    means the session as a whole ran short, not this script alone. The cure is the same:
+    use less memory at once.
+- **When a test is killed for memory, rewrite the test so it fits.** Never raise or get
+  around a cap: do not change the `ITER_MEM_*` variables, write to a cgroup file, start
+  processes outside the runner, or ask for a higher limit. Make the test more atomic:
+  - **Split it.** One large script becomes several smaller ones, one concern each. Each
+    script gets its own cap. Name them so the test node's `children.tests` glob still
+    matches (`<stem>_<part>.sh`).
+  - **Shrink the input.** Use a representative sample of the input space, not all of it.
+    Use small fixtures, and generate or stream large data rather than loading it whole.
+  - **Run less at once.** Use `cargo test -- --test-threads=1` or a few named tests per
+    script, `-j 1` for builds, and shard mutation runs by file or by function.
+  - **Bound every check.** Use explicit sizes, iteration counts and timeouts, so a defect
+    in the code under test fails fast with exit 1 instead of growing until it is killed.
+  - **Keep checks for runaway code.** A check that exists to catch the code under test
+    using too much memory is correct; do not shrink it away. Run the suspect call in a
+    child process. Count a 137 exit, or a memory-limit note, as that check failing
+    (`"pass": false`, with a `msg` naming the memory kill), then let the script go on and
+    report its result JSON.
+  - **Prove it fits.** Rerun the node with `iter runtests`: the memory note must be gone,
+    and the bucket totals must not drop (never delete checks to fit).
+  - **Record what will not fit.** A check that still cannot fit once split as far as it
+    goes goes in the test node's `## Gaps`, with the memory it needs and the cap it met.
+
 ## Output
 End with: test nodes touched, scripts added (paths), current counts per bucket, gaps
 recorded in the test node, and `Observations (not queued)` for anything you noticed
