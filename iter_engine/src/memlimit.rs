@@ -780,10 +780,18 @@ mod tests {
         assert!(e.contains("memory controller is not available") && e.contains("Delegate=yes"), "{e}");
         std::fs::write(d.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root (CAP_DAC_OVERRIDE, e.g. the rust:1-bullseye container) writes
+        // into a 0555 folder anyway, so the refusal cannot be staged there
+        let privileged = std::fs::create_dir(d.join("probe")).is_ok();
+        let _ = std::fs::remove_dir(d.join("probe"));
         let e = linux::setup_at(&d);
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let e = e.unwrap_err();
-        assert!(e.contains("cannot create cgroup") && e.contains("needs Delegate=yes"), "{e}");
+        if privileged {
+            println!("note: running with root's file access; the read-only-folder refusal is not checked");
+        } else {
+            let e = e.unwrap_err();
+            assert!(e.contains("cannot create cgroup") && e.contains("needs Delegate=yes"), "{e}");
+        }
         std::fs::write(d.join("cgroup.procs"), format!("{}\n1\n", std::process::id())).unwrap();
         let e = linux::setup_at(&d).unwrap_err();
         assert!(e.contains("also holds 1 other process(es) (pid 1)"), "{e}");
