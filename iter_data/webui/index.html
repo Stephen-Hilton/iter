@@ -884,7 +884,7 @@ async function load(){
     const why=projBlock(p);
     return `<div class="projrow"><button class="proj ${rid(p)===project?"sel":""}" data-p="${esc(rid(p))}">${esc(rname(p))}</button>`
       +projSwHtml(p,isAdmin())+`<button class="gear" data-gear="project" data-name="${esc(rid(p))}" title="project settings">⚙</button></div>`
-      +(why?`<div class="swnote projnote" title="nothing new starts for this project until this is fixed">⚠ ${esc(why)}</div>`:"");}).join("")||"<span class='kv'>none yet</span>";
+      +(why?`<div class="swnote projnote" title="nothing new starts for this project until this is fixed">⚠ ${esc(why)}</div>`:"");}).join("")||`<span class='kv'>none yet${isAdmin()?"":` — an admin must add you to projects in "settings" graph`}</span>`;
   document.querySelectorAll("#projects .proj").forEach(b=>b.onclick=()=>loadItems(b.dataset.p));
   wireSwitches($("#projects"));
   // the server's switch is the master switch: Stopped, no engine starts anything for any project
@@ -1664,7 +1664,8 @@ function fieldRow(f,rec){
   if((v===undefined||v===null)&&f.default!==undefined)v=f.default; // records that predate a field
   const id=`sf-${f.key}`;
   let ctl="";
-  if(f.type==="readonly")ctl=`<div class="ro">${esc(v==null||v===""?"—":(typeof v==="object"?JSON.stringify(v):v))}</div>`;
+  if(f.type==="note")ctl=`<div class="ro">${esc(f.text)}</div>`;
+  else if(f.type==="readonly")ctl=`<div class="ro">${esc(v==null||v===""?"—":(typeof v==="object"?JSON.stringify(v):v))}</div>`;
   else if(f.type==="textarea")ctl=`<textarea id="${id}" rows="${f.rows||4}" style="font-family:inherit">${esc(v??"")}</textarea>`;
   else if(f.type==="json")ctl=`<textarea id="${id}" rows="${f.rows||4}">${esc(v==null?(f.empty??""):JSON.stringify(v,null,2))}</textarea>`;
   else if(f.type==="select")ctl=`<select id="${id}">${f.options.map(o=>`<option ${o===v?"selected":""}>${esc(o)}</option>`).join("")}</select>`;
@@ -1677,7 +1678,7 @@ function fieldRow(f,rec){
 /* read every editable field back into `out`; throws with the field name on bad JSON/number */
 function readFields(fields,out){
   for(const f of fields){
-    if(f.type==="readonly")continue;
+    if(f.type==="readonly"||f.type==="note")continue;
     const el=sdlg.querySelector(`#sf-${f.key}`);if(!el)continue;
     el.classList.remove("fieldbad");
     const raw=el.value;
@@ -1766,7 +1767,7 @@ const userFields=(mode,own)=>{
   ...(own?[]:[{key:"password",type:"password",help:"set a new password for them (12+ characters; blank keeps theirs): they must change it at their next sign-in, and their sessions end"}]),
   {key:"css",label:"custom css url",type:"text"},
   {key:"settings",type:"json",rows:3,emptyValue:{}},
-  self?{key:"authz",type:"readonly",help:"per-project access (admin sets this)"}:{key:"authz",type:"json",rows:3,emptyValue:{},help:'{"pdy-dev":"admin","other":"readonly"}'},
+  {key:"projects",type:"note",text:'an admin must add you to projects in "settings" graph'},
   ...(self?[]:[{key:"must_change_password",label:"must change password",type:"readonly",help:"set when an admin gives them a password; cleared when they choose their own"},{key:"tokenver",label:"token version",type:"number",help:"bump to revoke every outstanding token for this user"},{key:"pubkey",label:"approval pubkey",type:"text"}]),
 ];};
 
