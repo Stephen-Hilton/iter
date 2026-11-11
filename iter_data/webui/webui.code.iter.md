@@ -28,7 +28,7 @@ webui is static HTML, CSS and JavaScript with no server code of its own. At buil
 
 | tab | file(s) | component |
 |---|---|---|
-| Intro | `intro.js`, `intro.css` | Intro story and designer wizard |
+| Intro | `intro.js`, `intro.css` | the "What is ITER?" tab: intro story and designer wizard |
 | Work queue | inside `index.html` | Work queue page |
 | Project graph | `graph.js`, `graph.css`, `vendor/` + `graphedit.js` | Project graph viewer + Project graph editor |
 | GraphRAG | `rag.js`, `rag.css` | GraphRAG tab |

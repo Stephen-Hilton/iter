@@ -15,7 +15,7 @@ iter keeps a team of AI coding agents working on a real software project without
 - **iter_data** — the central server. It holds every work item, lock, agent definition, schedule, user, cost record and the architecture map in ArangoDB, answers one HTTP API, serves the web page, and serves the MCP server for agents.
 - **iter_engine** — the engine. Run it next to a checkout of your project; it claims work, runs agents, commits and pushes. The same binary is also the `iter` command line (`iter_engine cli <verb>`).
 - **iter_core** — the library compiled into both programs (the shared rules, the node-file library and GraphRAG's text and embedding code). The engine's checkout tools live in iter_engine itself.
-- **The web page** — four tabs: Intro, Work queue, Project graph, GraphRAG.
+- **The web page** — four tabs: What is ITER?, Work queue, Project graph, GraphRAG.
 
 ### What database does iter use?
 
@@ -73,7 +73,7 @@ Yes. The iter_data installers run on a small VM or an EC2 instance (`installers/
 
 ### How do I create a new project?
 
-1. **Run the wizard.** In the web page, go to **Intro** and choose **Design a new project**. Give the name, an optional git remote, the file-naming rule and a daily cost cap. It creates a **designed** project (state Stopped) whose project node and default requirements appear in the Project graph.
+1. **Run the wizard.** In the web page, go to **What is ITER?** and choose **Design a new project**. Give the name, an optional git remote, the file-naming rule and a daily cost cap. It creates a **designed** project (state Stopped) whose project node and default requirements appear in the Project graph.
 2. **Design it** in the Project graph: **+ Node** adds contexts, containers, components, connections, tests, requirements, use cases and actors; draw edges between them. Nothing touches a disk yet.
 3. **Have an engine running** on the machine that will hold the code (once per machine; see "How do I install the engine?"). The wizard shows the install command for each platform and watches for the engine to check in.
 4. **Build.** The Project graph's **Build…** button: pick the engine and a folder. The engine creates the folder, runs `git init`, writes every node file and commits; optionally the **plan** agent is queued to build the project from its design. For a repository that already exists on that machine, draw a **serves** edge from the engine to the project in the Settings graph instead and set its `topdir` (the checkout's folder); `iter_engine cli init --name <project>` in the checkout writes the project node and three empty requirements if it has none.

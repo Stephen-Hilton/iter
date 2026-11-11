@@ -689,7 +689,6 @@
         <div class="intro-dots">${STORY.map((s, i) => `<button class="intro-dot ${i === S.i ? "intro-on" : ""}" data-go="${i}" title="${esc((i + 1) + ". " + s.kicker)}" aria-label="slide ${i + 1}: ${esc(s.kicker)}"></button>`).join("")}</div>
         <button class="intro-arrow" data-go="${S.i + 1}" ${S.i === n - 1 ? "disabled" : ""} aria-label="next slide">&rarr;</button>
       </div>
-      <div class="intro-keys">&larr; &rarr; move between slides · &uarr; &darr; change the detail</div>
       <label class="intro-opt"><input type="checkbox" id="intro-resetlv" ${S.resetLv ? "checked" : ""}> Back to Summary on every new slide</label>`;
     }
     const pageBtn = (p, label) => `<button class="intro-btn ${S.page === p ? "" : "intro-ghost"} intro-sm" data-page="${S.page === p ? "story" : p}">${S.page === p ? "&larr; Back to the story" : label}</button>`;
@@ -697,7 +696,10 @@
       <div class="intro-bar">
         ${S.page === "story" ? levelBar() : ""}
         <span class="intro-where">${S.page === "story" ? `${S.i + 1} / ${n}` : ""}</span>
-        <div class="intro-pages">${pageBtn("glossary", "Glossary")}${pageBtn("wizard", "Design a new project")}</div>
+        <div class="intro-right">
+          <div class="intro-pages">${pageBtn("glossary", "Glossary")}${pageBtn("wizard", "Design a new project")}</div>
+          ${S.page === "story" ? `<div class="intro-keys">&larr; &rarr; move between slides · &uarr; &darr; change the detail</div>` : ""}
+        </div>
       </div>
       ${main}
     </div>`;

@@ -367,7 +367,7 @@ body.tab-graph main,body.tab-intro main,body.tab-settings main,body.tab-rag main
     <button class="ghost" id="nav-toggle" title="projects / engines / agents" aria-label="open the left nav">☰</button>
     <h1>ITER</h1>
     <nav id="tabs" aria-label="views">
-      <button data-tab="intro" title="What iter is, how it works, and the new-project designer (1)">Intro</button>
+      <button data-tab="intro" title="What iter is, how it works, and the new-project designer (1)">What is ITER?</button>
       <button data-tab="queue" title="The work items of the selected project (2)"><span class="lg">Work queue</span><span class="sh">Queue</span></button>
       <button data-tab="graph" title="The selected project's graph: every *.iter.md node and its links — view, design and edit (3)"><span class="lg">Project graph</span><span class="sh">Graph</span></button>
       <button data-tab="rag" title="GraphRAG: search over the project's documents and node files (4)"><span class="lg">GraphRAG</span><span class="sh">RAG</span></button>
@@ -2335,7 +2335,7 @@ async function showSettings(){
 }
 async function loadGraph(p,force){
   const el=$("#tab-graph");
-  if(!p){el.innerHTML=`<div id="g-loading"><b>No project yet.</b><br>Design one: Intro → <b>Design a new project</b> creates a designed project you can lay out here before any repository exists.</div>`;return;}
+  if(!p){el.innerHTML=`<div id="g-loading"><b>No project yet.</b><br>Design one: What is ITER? → <b>Design a new project</b> creates a designed project you can lay out here before any repository exists.</div>`;return;}
   if(graphDrawnFor===p&&!force){const c=IterGraph.current;if(c&&c.cy){c.cy.resize();}return;}
   el.innerHTML=`<div id="g-loading">loading the project graph for ${esc(p)}…</div>`;
   let G=force?null:graphCache[p];
@@ -2345,7 +2345,7 @@ async function loadGraph(p,force){
   const norm=IterGraph.normalize(G);
   if(!norm.nodes.length){el.innerHTML=`<div id="g-loading"><b>${esc(p)}</b> has no nodes yet.<br><br>
     A project's graph is its <code>*.iter.md</code> files: an engine serving the project syncs them here within seconds of a change.
-    A new project made with Intro → <b>Design a new project</b> starts with its project node and default requirements.
+    A new project made with What is ITER? → <b>Design a new project</b> starts with its project node and default requirements.
     ${isAdmin()?`<br><br>Connect an engine to this project in the <a href="#" data-sgraph="project:${esc(p)}">settings graph</a>.`:""}</div>`;
     el.querySelectorAll("[data-sgraph]").forEach(a=>a.onclick=ev=>{ev.preventDefault();openSettingsGraph(a.dataset.sgraph);});
     graphDrawnFor=null;return;}

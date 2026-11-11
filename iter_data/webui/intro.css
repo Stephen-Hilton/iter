@@ -59,7 +59,7 @@
 .intro-root button.intro-dot{width:10px;height:10px;border-radius:50%;padding:0;border:0;background:var(--line);cursor:pointer}
 .intro-root button.intro-dot.intro-on{background:var(--accent);transform:scale(1.25)}
 .intro-root button.intro-dot:hover{background:var(--dim)}
-.intro-keys{color:var(--dim);font-size:11px;text-align:center;margin-top:6px}
+.intro-keys{color:var(--dim);font-size:11px;text-align:right}
 .intro-opt{display:flex;align-items:center;justify-content:center;gap:6px;color:var(--dim);font-size:12px;margin-top:6px;cursor:pointer;user-select:none}
 .intro-opt input{margin:0;accent-color:var(--accent);cursor:pointer}
 
@@ -207,7 +207,8 @@
    Intro v2 (2026-09-30): one story, three levels of detail
    ================================================================ */
 .intro-bar{gap:14px}
-.intro-pages{display:flex;gap:8px;margin-left:8px}
+.intro-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;margin-left:8px}
+.intro-pages{display:flex;gap:8px}
 .intro-bar .intro-where{margin-left:auto}
 
 /* the 3-stop detail slider */
@@ -418,7 +419,8 @@
 @media (max-width:620px){
   .intro-detail{width:100%;justify-content:space-between;padding:6px 10px}
   .intro-stops{min-width:0;flex:1}
-  .intro-pages{margin-left:0;width:100%}
+  .intro-right{margin-left:0;width:100%}
+  .intro-pages{width:100%}
   .intro-pages .intro-btn{flex:1}
   .intro-bar .intro-where{display:none}
 }
