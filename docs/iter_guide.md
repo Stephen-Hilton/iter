@@ -15,7 +15,7 @@ iter keeps a team of AI coding agents working on a real software project without
 - **iter_data** — the central server. It holds every work item, lock, agent definition, schedule, user, cost record and the architecture map in ArangoDB, answers one HTTP API, serves the web page, and serves the MCP server for agents.
 - **iter_engine** — the engine. Run it next to a checkout of your project; it claims work, runs agents, commits and pushes. The same binary is also the `iter` command line (`iter_engine cli <verb>`).
 - **iter_core** — the library compiled into both programs (the shared rules, the node-file library and GraphRAG's text and embedding code). The engine's checkout tools live in iter_engine itself.
-- **The web page** — four tabs: What is ITER?, Work queue, Project graph, GraphRAG.
+- **The web page** — tabs: What is ITER?, Work queue, Project graph, Settings. (The GraphRAG tab is hidden for now while it is reworked; GraphRAG search still works through the MCP tools and the API.)
 
 ### What database does iter use?
 
@@ -389,7 +389,7 @@ Hybrid by default: a keyword ranking (ArangoSearch BM25 over the text, summary, 
 
 ### How do I upload a document?
 
-In the GraphRAG tab, drop files on **Upload documents** (right side, above Settings) or choose them. With "store the original in the repo" ticked, an engine writes the original into the project's docs directory (default `{topdir}/docs/`) and commits it; the document then shows **in repo**. It shows **written** instead when the engine wrote the file but could not commit it — because the docs directory is git-ignored, or because the project's checkout is not the root of its own git repository. You can link a document to a map node from its detail pane.
+In the GraphRAG tab (hidden for now; see above), drop files on **Upload documents** (right side, above Settings) or choose them. With "store the original in the repo" ticked, an engine writes the original into the project's docs directory (default `{topdir}/docs/`) and commits it; the document then shows **in repo**. It shows **written** instead when the engine wrote the file but could not commit it — because the docs directory is git-ignored, or because the project's checkout is not the root of its own git repository. You can link a document to a map node from its detail pane.
 
 ### Does GraphRAG need an engine?
 

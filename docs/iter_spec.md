@@ -558,7 +558,7 @@ For a work item with `node: <id>` (new optional work item field; else the neares
 ---
 
 ## 9. Web UI
-Tabs: What is ITER? (intro) | Work queue | Project graph | GraphRAG | **Settings** (the settings graph, same Cytoscape engine;
+Tabs: What is ITER? (intro) | Work queue | Project graph | GraphRAG (hidden since 2026-11-11, `RAG_TAB_HIDDEN`) | **Settings** (the settings graph, same Cytoscape engine;
 also reachable from the graph view's picker as "Settings graph").
 - **Node-type filter**: chips for every nodetype/level (project, context, container, component, connection, test,
   bizreq, techreq, philosophy, usecase, actor) to hide/show; state in the URL hash. Connection view preset ("Network map":

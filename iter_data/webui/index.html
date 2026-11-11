@@ -370,8 +370,8 @@ body.tab-graph main,body.tab-intro main,body.tab-settings main,body.tab-rag main
       <button data-tab="intro" title="What iter is, how it works, and the new-project designer (1)">What is ITER?</button>
       <button data-tab="queue" title="The work items of the selected project (2)"><span class="lg">Work queue</span><span class="sh">Queue</span></button>
       <button data-tab="graph" title="The selected project's graph: every *.iter.md node and its links — view, design and edit (3)"><span class="lg">Project graph</span><span class="sh">Graph</span></button>
-      <button data-tab="rag" title="GraphRAG: search over the project's documents and node files (4)"><span class="lg">GraphRAG</span><span class="sh">RAG</span></button>
-      <button data-tab="settings" title="The settings graph: engines, projects, accounts, agents, users and the edges between them (5)">Settings</button>
+      <button data-tab="rag" hidden title="GraphRAG: search over the project's documents and node files"><span class="lg">GraphRAG</span><span class="sh">RAG</span></button>
+      <button data-tab="settings" title="The settings graph: engines, projects, accounts, agents, users and the edges between them (4)">Settings</button>
     </nav>
     <select id="projpick" title="the project shown in the work queue and the project graph"></select>
     <span class="kv" id="backend"></span>
@@ -944,7 +944,7 @@ async function load(){
   {const hp=hashParams().get("p");if(hp&&projects.some(p=>rid(p)===hp))project=hp;}
   // the tab the URL (or the last visit) asked for, read before loadItems rewrites the hash
   let t=hashParams().get("tab");if(!t){try{t=localStorage.getItem("iter.tab");}catch(e){}}
-  if(["intro","queue","graph","rag","settings"].includes(t))tab=t;
+  if(tabShown(t))tab=t;
   if(projects.length&&!project)project=rid(projects[0]);
   fillProjPick();
   renderAccounts(engines);
@@ -960,7 +960,7 @@ async function loadItems(p){
   if($("#projpick").value!==p)$("#projpick").value=p;
   if(changed||true)writeTabHash();
   if(tab==="graph"&&graphDrawnFor!==p)loadGraph(p);
-  if(tab==="rag")showRag();
+  if(tab==="rag"&&!RAG_TAB_HIDDEN)showRag();
   try{localStorage.setItem("iter.project",p);}catch(e){}
   document.querySelectorAll("#projects .proj").forEach(b=>b.classList.toggle("sel",b.dataset.p===p));
   const [items,dl]=await Promise.all([api(P()),api("/api/projects/"+encodeURIComponent(p)+"/deadlocks").catch(()=>null),renderProjectCtl().catch(()=>{})]);
@@ -2241,13 +2241,19 @@ function widgetForm(item,d,expanded){
    One header for all; the project picker drives the queue and the graph.
    URL hash: tab=<intro|queue|graph|rag|settings>&p=<project> (the graph adds its own keys). */
 const TABS=["intro","queue","graph","rag","settings"];
+// GraphRAG tab hidden (2026-11-11): it shows errors and needs broader work; until a
+// replacement lands, no button, shortcut, saved tab or #tab=rag link opens it.
+// The GraphRAG API, MCP tools and rag.js stay; set this to false to bring it back.
+const RAG_TAB_HIDDEN=true;
+const tabShown=t=>TABS.includes(t)&&!(RAG_TAB_HIDDEN&&t==="rag");
+const KEY_TABS=TABS.filter(tabShown); // the number keys 1.. in order
 let tab="queue", graphDrawnFor=null, graphCache={};
 function hashParams(){return new URLSearchParams(location.hash.slice(1));}
 window.addEventListener("hashchange",async()=>{
   if(!token)return;
   const h=hashParams(),hp=h.get("p"),ht=h.get("tab");
   if(hp&&hp!==project&&(projectsCache||[]).some(x=>rid(x)===hp)){
-    if(ht)tab=ht;
+    if(tabShown(ht))tab=ht;
     await loadItems(hp);
     graphDrawnFor=null;
     await setTab(tab);
@@ -2314,7 +2320,7 @@ function sizeGraph(){  sizeTop();const h=Math.max(300,window.innerHeight-$("#top
 window.addEventListener("resize",()=>{if(tab==="graph"||tab==="settings"){sizeGraph();const c=window.IterGraph&&IterGraph.current;if(c&&c.cy)c.cy.resize();if(window.IterSettings)IterSettings.resize();}});
 let settingsMounted=false;
 async function setTab(t){
-  if(!TABS.includes(t))t="queue";
+  if(!tabShown(t))t="queue";
   tab=t;try{localStorage.setItem("iter.tab",t);}catch(e){}
   TABS.forEach(x=>document.body.classList.toggle("tab-"+x,x===t&&x!=="queue"));
   applyAside();sizeTop();
@@ -2363,7 +2369,7 @@ function graphCtx(){return {api,project,isAdmin:isAdmin(),myRole,
 function openPageHelp(){
   if(tab==="graph"&&window.IterGraph&&IterGraph.api){IterGraph.api.openHelp();return;}
   if(!window.IterKit)return;
-  IterKit.help("Shortcuts",[["Everywhere",[["1","Intro"],["2","Work queue"],["3","Project graph"],["4","GraphRAG"],["5","Settings graph"],["?","Shortcuts for the tab you are on"],["Esc","Close a dialog or menu"]]],
+  IterKit.help("Shortcuts",[["Everywhere",[...KEY_TABS.map((t,i)=>[String(i+1),{intro:"What is ITER?",queue:"Work queue",graph:"Project graph",rag:"GraphRAG",settings:"Settings graph"}[t]]),["?","Shortcuts for the tab you are on"],["Esc","Close a dialog or menu"]]],
     ["Intro",[["← →","Previous / next slide"],["↑ ↓","More / less detail"]]],
     ["Project graph",[["/","Search"],["F / R","Fit / re-layout"],["N / C / E","New node / connect / configure"],["Mod+C / Mod+V","Copy / paste an edge"]]],
     ["Settings graph",[["/","Find"],["N / C / E","New node / connect / configure (admin)"],["Mod+C / Mod+V","Copy / paste an edge with its settings"]]]]);
@@ -2371,7 +2377,7 @@ function openPageHelp(){
 document.addEventListener("keydown",e=>{
   if(!token||e.metaKey||e.ctrlKey||e.altKey||e.defaultPrevented)return;
   if(document.querySelector("dialog[open]")||(window.IterKit&&IterKit.typing()))return;
-  if(/^[1-5]$/.test(e.key)&&$("#top").style.display!=="none"){e.preventDefault();setTab(TABS[+e.key-1]);return;}
+  if(/^[1-9]$/.test(e.key)&&+e.key<=KEY_TABS.length&&$("#top").style.display!=="none"){e.preventDefault();setTab(KEY_TABS[+e.key-1]);return;}
   if(e.key==="?"&&tab!=="graph"&&tab!=="settings"){e.preventDefault();openPageHelp();}
 });
 let introMounted=false;

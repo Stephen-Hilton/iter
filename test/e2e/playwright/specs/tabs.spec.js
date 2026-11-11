@@ -3,15 +3,34 @@
 const { test, expect, openTab, shot } = require('../lib/fixtures');
 
 test.describe('tabs', () => {
-  for (const tab of ['queue', 'graph', 'settings', 'intro', 'rag']) {
+  for (const tab of ['queue', 'graph', 'settings', 'intro']) {
     test(`${tab} tab loads cleanly`, async ({ page }) => {
       await openTab(page, tab, 'shop');
       await expect(page.locator(`#tabs button[data-tab=${tab}]`)).toHaveClass(/on/);
       if (tab === 'intro') await expect(page.locator('#tab-intro')).not.toBeEmpty();
-      if (tab === 'rag') await expect(page.locator('#tab-rag')).not.toBeEmpty();
       await shot(page, `tab-${tab}`);
     });
   }
+
+  // GraphRAG is hidden until its replacement (2026-11-11, RAG_TAB_HIDDEN in index.html):
+  // no button, and a #tab=rag link, a saved tab or a number key never open it
+  test('the GraphRAG tab is hidden and cannot be reached', async ({ page }) => {
+    await openTab(page, 'queue', 'shop');
+    await expect(page.locator('#tabs button[data-tab=rag]')).toBeHidden();
+    await page.evaluate(() => { location.hash = '#tab=rag'; });
+    await page.waitForTimeout(300);
+    await expect(page.locator('#tabs button[data-tab=queue]')).toHaveClass(/on/);
+    await expect(page.locator('#tab-rag')).toBeEmpty();
+    // a saved tab is read only when the link names none
+    await page.evaluate(() => localStorage.setItem('iter.tab', 'rag'));
+    await page.goto('/');
+    await page.waitForSelector('#top', { state: 'visible' });
+    await expect(page.locator('#tabs button[data-tab=queue]')).toHaveClass(/on/);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.keyboard.press('4');
+    await expect(page.locator('#tabs button[data-tab=settings]')).toHaveClass(/on/);
+    await expect(page.locator('#tab-rag')).toBeEmpty();
+  });
 
   test('phone width: queue has no horizontal scroll', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 800 });

@@ -31,7 +31,7 @@ webui is static HTML, CSS and JavaScript with no server code of its own. At buil
 | Intro | `intro.js`, `intro.css` | the "What is ITER?" tab: intro story and designer wizard |
 | Work queue | inside `index.html` | Work queue page |
 | Project graph | `graph.js`, `graph.css`, `vendor/` + `graphedit.js` | Project graph viewer + Project graph editor |
-| GraphRAG | `rag.js`, `rag.css` | GraphRAG tab |
+| GraphRAG | `rag.js`, `rag.css` | GraphRAG tab (hidden: `RAG_TAB_HIDDEN` in index.html) |
 | Settings | `settings.js` | Settings graph |
 
 `kit.js` / `kit.css` (component *webui kit*) supply the dialogs, menus, Configure… lightbox, edge-end drag handles and edge clipboard both graph views share. Each tab script mounts itself (`IterIntro`, `IterGraph` / `IterGraphEdit`, `IterRag`, `IterSettings`) with a small `ctx` (the `api` helper, project, role, navigation callbacks). Colours are `:root` tokens in `index.html`; the page is dark and phone-width tolerant.

@@ -462,8 +462,7 @@
       return rows.length ? `<section class="intro-gsec"><h3>${esc(g)}</h3><dl class="intro-dl">${rows.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join("")}</dl></section>` : "";
     }).join("");
     return `<div class="intro-gfilter"><input id="intro-gq" type="search" placeholder="filter the glossary" value="${esc(S.gq || "")}" autocomplete="off"></div>
-      <div class="intro-gloss-grid">${groups || `<p class="intro-dim">No term matches "${esc(f)}".</p>`}</div>
-      <p class="intro-dim intro-small">Looking for how to do something? The GraphRAG tab searches iter's user guide from any project.</p>`;
+      <div class="intro-gloss-grid">${groups || `<p class="intro-dim">No term matches "${esc(f)}".</p>`}</div>`;
   }
 
   /* ------------------------------------------------------------ the new-project wizard */
