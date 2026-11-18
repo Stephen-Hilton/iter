@@ -26,7 +26,7 @@ was read from `git diff stash@{1}^1 stash@{1}`.
 - `iter_data/src/mcp.code.iter.md`: resolved. Upstream rewrote the paragraphs after "How it works", and
   the stash added one paragraph before it (the `instructions` at `initialize`, `isError` results,
   `mcp_tests.rs`). The result is the stash's paragraph followed by upstream's paragraphs.
-- `iter_engine/src/sweep.rs`, lines 438–465: NOT resolved; the markers are still there. Upstream
+- `iter_engine/src/sweep.rs`: resolved 2026-11-18 by Stephen's ruling. Upstream's `sweep_tags` is kept and the stash's `container_name`, `key_tags` and their test are dropped, so the file is now identical to upstream `fe6bf9e`. Background: upstream
   replaced `key_tags` with `sweep_tags` and moved the repeat key into `repeat_check` /
   `repeat_container`, so no `container:` tag is on the queue line any more. The stash shortened that
   `container:` tag with `container_name`, and its test (around line 728,
@@ -87,7 +87,5 @@ was read from `git diff stash@{1}^1 stash@{1}`.
 
 ## Still unresolved, and not built
 
-- `iter_engine/src/sweep.rs` still has conflict markers at lines 438–465, so the crate cannot compile
-  until that block is decided.
-- No `cargo check` or build was run on this branch: the markers alone fail it, and on this disk a
-  check-mode build of all dependencies is not quick.
+- No conflict markers remain on this branch (`sweep.rs` was resolved by taking upstream).
+- Compile status: see the commit that resolved `sweep.rs` and the `cargo check` result reported with it.
