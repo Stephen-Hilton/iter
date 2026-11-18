@@ -18,6 +18,7 @@ mod filesync;
 mod gate;
 mod gitrepair;
 mod gitsafe;
+mod gitwrap;
 mod init;
 mod merge;
 mod prompt;

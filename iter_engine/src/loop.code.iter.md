@@ -60,8 +60,11 @@ until stopped (`--ticks N` for tests, then `drain`). Each `tick`:
 
 Every engine git command (`work.rs`, `merge.rs`, `filesync.rs`) runs through `gitsafe`: one at a time per
 repository (in-process mutex plus `flock` on `.git/iter-engine-git.mutex`, which `iter` verbs run by agents
-also take), after a sweep of stale `*.lock` files, retried on lock errors. Agents' own `git` commands in
-their Bash tool do not go through it.
+also take), after a sweep of stale `*.lock` files, retried on lock errors, with `-c rerere.enabled=false
+-c rerere.autoupdate=false` on every call. Agents' own `git` commands go through `gitwrap`: a POSIX sh
+`git` the engine writes beside the `iter` shim in `{topdir}/.iter/bin` for every session, which runs the
+real git under the same `flock` for commands that write, straight through for reads, inside a locked git
+(`ITER_GIT_LOCKED=1`) and outside a repository, with a bounded wait (`ITER_GIT_LOCK_WAIT`, 600 s).
 
 ## What goes in and out
 

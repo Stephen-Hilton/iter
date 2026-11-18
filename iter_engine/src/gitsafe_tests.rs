@@ -274,3 +274,16 @@ fn git_errors_are_classified_from_their_output() {
         assert_eq!(classify(text), want, "{text}");
     }
 }
+
+/// Every engine git command runs with rerere off (a user's global
+/// `rerere.autoupdate` would replay an old resolution into a conflicting
+/// pull) and with the lock marker set; the filesync path too.
+#[test]
+fn engine_git_runs_with_rerere_off_and_the_lock_marker() {
+    let (_remote, clone) = repo_with_remote("rerere");
+    sh(&clone, "git config rerere.enabled true && git config rerere.autoupdate true");
+    let top = clone.to_string_lossy().into_owned();
+    assert_eq!(run(&top, "git config --get rerere.enabled", 15).unwrap().trim(), "false");
+    assert_eq!(run(&top, "git config --get rerere.autoupdate && echo $ITER_GIT_LOCKED", 15).unwrap().trim(), "false\n1");
+    assert_eq!(crate::filesync::git(&clone, &["config", "--get", "rerere.autoupdate"]).unwrap(), "false");
+}

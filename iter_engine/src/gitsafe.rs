@@ -13,8 +13,9 @@
 //!    own `iter` verbs (run by agents: `iter sync`, …) take too.  The guard is
 //!    re-entrant on one thread, so a step that already holds it (a pull
 //!    running its merge commit) never waits on itself.  Agents' own `git`
-//!    commands in their Bash tool do not come through here (see the module
-//!    doc of `loop.code.iter.md`, "git serialization").
+//!    commands take the same file lock through the wrapper crate::gitwrap
+//!    writes into their PATH.  Every engine git call runs with rerere off
+//!    ([`GIT_CONFIG_ARGS`]) and [`LOCKED_ENV`] set.
 //! 2. **Stale lock files are cleared.**  [`clear_stale_locks`] finds every
 //!    `*.lock` under the common git dir (worktrees' own dirs under
 //!    `worktrees/*/` included; the object store is skipped) and deletes one
@@ -50,6 +51,16 @@ const SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// The engine's cross-process lock file in the common git dir.  It does not
 /// end in `.lock`, so neither git nor the sweep ever treats it as git's.
 pub const MUTEX_FILE: &str = "iter-engine-git.mutex";
+/// The configuration every engine git command runs with (2026-11-18): no
+/// rerere.  With `rerere.autoupdate` on in a user's global config, git
+/// replays a recorded resolution into a conflicting pull, so the engine's
+/// resolver never sees the conflict and the merge is left half done.
+pub const GIT_CONFIG_ARGS: [&str; 4] = ["-c", "rerere.enabled=false", "-c", "rerere.autoupdate=false"];
+/// Set on every git command run under the engine's lock, and by the agents'
+/// git wrapper (crate::gitwrap) on the git it runs under the lock: a git
+/// started with it set (a hook, git's own child git, an `iter` verb from a
+/// hook) is already inside the lock and never takes it again.
+pub const LOCKED_ENV: &str = "ITER_GIT_LOCKED";
 /// Longest wait for another process's hold on [`MUTEX_FILE`]; after that the
 /// command runs anyway (logged), so a hung holder can never stop the engine.
 const FILE_LOCK_WAIT: Duration = Duration::from_secs(600);
@@ -175,7 +186,11 @@ pub fn guard(top: &str) -> GitGuard {
         return GitGuard { key, _file: None, _mutex: None };
     }
     let mutex = mutex_for(&key).lock().unwrap_or_else(|p| p.into_inner());
-    let file = dirs(top).and_then(|d| file_lock(&d.common.join(MUTEX_FILE)));
+    // inside a git that already holds the file lock (an `iter` verb run from
+    // a hook of a git the agents' wrapper locked): taking it again would wait
+    // on our own parent
+    let inside = std::env::var(LOCKED_ENV).is_ok_and(|v| v == "1");
+    let file = if inside { None } else { dirs(top).and_then(|d| file_lock(&d.common.join(MUTEX_FILE))) };
     GitGuard { key, _file: file, _mutex: Some(mutex) }
 }
 
@@ -512,8 +527,19 @@ pub fn retrying<T>(top: &str, what: &str, mut step: impl FnMut() -> Result<T, St
 }
 
 /// A git shell script (`git …`, run by bash in `top`) through [`retrying`].
+/// Every `git` in it runs with [`GIT_CONFIG_ARGS`] and [`LOCKED_ENV`] set
+/// (`script_prefix`); the error text names only the caller's script.
 pub fn run(top: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
-    retrying(top, script, || crate::work::run_shell(top, script, timeout_sec))
+    let full = format!("{}{script}", script_prefix());
+    retrying(top, script, || crate::work::run_shell(top, &full, timeout_sec))
+}
+
+/// The bash lines put before every engine git script: `git` becomes a
+/// function adding [`GIT_CONFIG_ARGS`] to each call, and [`LOCKED_ENV`] is
+/// exported so the agents' wrapper, if it is first on PATH, runs straight
+/// through (the engine holds the lock already).
+pub fn script_prefix() -> String {
+    format!("export {LOCKED_ENV}=1; git() {{ command git {} \"$@\"; }}; ", GIT_CONFIG_ARGS.join(" "))
 }
 
 fn first_line(s: &str) -> String {

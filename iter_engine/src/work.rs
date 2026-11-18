@@ -1203,6 +1203,11 @@ fn write_iter_shim(topdir: &str) -> Result<String, String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755));
     }
+    // the agents' git wrapper beside it (crate::gitwrap): their writing git
+    // commands take the engine's git lock; a failure leaves plain git
+    if let Err(e) = crate::gitwrap::write(&dir) {
+        engine_log(format!("[engine] git wrapper not written in {}: {e}", dir.display()));
+    }
     Ok(shim.to_string_lossy().into_owned())
 }
 

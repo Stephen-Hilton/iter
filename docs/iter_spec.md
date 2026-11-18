@@ -316,7 +316,11 @@ Off, the engine runs no node-file scans, sends, sync checks, graph-edit write-ba
 does nothing; one startup line says which way it is set. The designer build and GraphRAG document rows are not part of it.
 Git (`iter_engine/src/gitsafe.rs`, `gitrepair.rs`): every engine git command for a repository runs one at a time
 (in-process mutex + `flock` on `.git/iter-engine-git.mutex`), after a sweep that deletes `*.lock` files under the git
-dir older than 2 minutes when no live git process uses the repository, and is retried with backoff on a lock error.
+dir older than 2 minutes when no live git process uses the repository, and is retried with backoff on a lock error;
+every call runs with `-c rerere.enabled=false -c rerere.autoupdate=false`. Agents' `git` is a wrapper the engine writes
+to `{topdir}/.iter/bin/git` (`gitwrap.rs`): writing commands run under the same `flock` (bounded by
+`ITER_GIT_LOCK_WAIT`, default 600 s, then run with a warning); reads, nested gits (`ITER_GIT_LOCKED=1`) and commands
+outside a repository run straight through; without `flock(1)` everything does.
 Three items in a row failing with one git error class pause the checkout, start one repair session, and release work
 (requeueing the failed items) only when the engine's own check passes; otherwise it stays paused and files one P0.
 A stopped or timed-out session gets SIGTERM, 12 s, then SIGKILL.

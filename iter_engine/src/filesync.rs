@@ -213,7 +213,9 @@ pub fn git(top: &Path, args: &[&str]) -> Result<String, String> {
     let what = format!("git {}", args.join(" "));
     crate::gitsafe::retrying(&top.to_string_lossy(), &what, || {
         let out = Command::new("git")
+            .args(crate::gitsafe::GIT_CONFIG_ARGS)
             .args(args)
+            .env(crate::gitsafe::LOCKED_ENV, "1")
             .current_dir(top)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
