@@ -7,7 +7,7 @@ teststate: inherit
 level: component
 owner: bespoke
 children:
-  codedirs:  ["{topdir}/iter_engine/src/engine.rs", "{topdir}/iter_engine/src/main.rs"]
+  codedirs:  ["{topdir}/iter_engine/src/engine.rs", "{topdir}/iter_engine/src/main.rs", "{topdir}/iter_engine/src/githeal.rs"]
   codenodes: []
   tests:     []
   reqs:      []
@@ -37,7 +37,8 @@ until stopped (`--ticks N` for tests, then `drain`). Each `tick`:
 3. The heartbeat posts state, account, usage (null while holding: "all accounts at stop%" or "no account
    token"), running counts and every account's windows; its reply drives `run_filesync` per served
    project (`build_waiting` → `filesync::build`, `datasync_waiting` → `datasync::apply_waiting`,
-   `files_waiting` → `filesync::tick`) and `start_summaries` for GraphRAG.
+   `files_waiting` → `filesync::tick`) and `start_summaries` for GraphRAG. A checkout is synced, and
+   step 4 runs for it, only once its git self-heal has passed (below).
 4. Per served project: caches reload only when `/versions` counters moved (or the periodic full
    refresh); the assignment's accounts and run state overlay the project record; `ensure_test_sweep`
    creates the paused Test sweep schedule; `replay_pending_closes`, `repair_ghosts`, `start_explains`;
@@ -49,6 +50,29 @@ until stopped (`--ticks N` for tests, then `drain`). Each `tick`:
    (`reconcile_waits`, "blocked by: …") and breaks or reports deadlocks (`detect_deadlocks`); then calls
    `get_next` (`POST /api/projects/{p}/next`, with the `run_now` hint when the cap is full) and hands each
    claimed item to `start_claimed`, which spawns the Work runner.
+
+### Git self-heal after a crash (2026-10-29)
+
+A power failure can leave a checkout's git broken: a 0-byte commit object, a stale `index.lock`, an
+empty ref or a corrupt index. Every item then fails in seconds and uses up its retries.
+`iter_engine/src/githeal.rs: heal` runs once per checkout per engine process, on its own thread, the
+first time a tick reaches that checkout. Until it finishes, `Healer::ready` keeps file sync, replayed
+closes, ghost repair and dispatch away from the checkout. It changes only files under `.git`, never the
+work tree. In order:
+
+1. Removes lock files written before this boot, or older than 2 minutes.
+2. Removes empty loose objects and empty pack files.
+3. Repairs an empty or garbled HEAD or loose ref, using its reflog.
+4. Fetches the remote, which brings back commits that were already pushed.
+5. If HEAD's branch still points at a commit it cannot read, moves the branch to the newest readable
+   commit in its reflog, else to its remote-tracking branch. The lost commit's changes stay in the work
+   tree as uncommitted changes.
+6. If the index is corrupt, sets it aside and rebuilds it from HEAD.
+7. Checks the result with `git fsck --connectivity-only`.
+
+When the checkout is still broken after that, the engine writes `.git/iter-git-broken`, starts no work
+there, and runs the check again every 5 minutes. A checkout with no fsync setting also gets
+`core.fsync=committed`, because git's default does not sync loose objects to disk.
 
 ## What goes in and out
 

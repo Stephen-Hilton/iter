@@ -177,6 +177,8 @@ The project map (nodes = the *.iter.md node files): graph_* tools look a node up
 and edit the map — graph_node_create / graph_node_update / graph_edge_add / graph_edge_remove change the nodes at once and an engine writes the files. \
 Requirements are the `## ` sections of bizreq/techreq files: req_create / req_update / req_move / req_delete edit one section. \
 testlogs: the test results of test nodes. settings_graph: engines, projects, accounts, agents and their edges. \
+capability lists or reads the capability documents (how to file work, ask, reject…); locks_list shows who holds which code paths. \
+A failed call returns isError with the API's status and reason; read it, it says what to change. \
 GraphRAG: rag_search finds the chunks of the project's documents and node files closest in meaning to a question and returns the FULL chunk text with its summaries and map neighbours — search before reading files blind. \
 Do not upload *.iter.md node files: the iter engine indexes them from the checkout after each map sync. A node edited with graph_node_update reaches search after the engine writes the file and its next sync (about a minute). \
 An uploaded document (rag_add_document) is not searchable at once: an engine must ingest it first (about 5–30 s with a live engine; it stays queued while none is live). Pass wait_sec, or poll rag_doc until searchable is true; summaries follow minutes later. \

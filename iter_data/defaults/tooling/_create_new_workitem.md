@@ -227,7 +227,10 @@ tags:
       tags: ["check:<the rule or check that fired>", "container:<the component or container it fired on>"]
 
 - **`container:<name>`** — the component, service, container or module the item is
-  about. SHOULD be set whenever the item is about one identifiable thing.
+  about. SHOULD be set whenever the item is about one identifiable thing. Give its
+  short name (`pdy-crate-event-envelope`, `replay-router`), never a file path or a
+  node-file path: every tag shows on the work queue's line, and a path overruns it.
+  Keep every tag you write under about 30 characters.
 - **`check:<label>`** — the short fixed label of the rule, test or check that
   raised it (`check:frontmatter-not-yaml`, `check:tests-non-green`). MAY be
   set when a named rule fired; leave it off for a defect you found by reading.

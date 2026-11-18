@@ -80,6 +80,9 @@ pub struct EngineRuntime {
     next_said: HashMap<String, String>,
     /// the account token variables last reported missing (logged on change)
     missing_said: std::sync::Mutex<Vec<String>>,
+    /// each checkout's git self-heal (githeal.rs): nothing touches a checkout
+    /// until its first check passes
+    githeal: crate::githeal::Healer,
     /// accounts are configured but none is under its stop% (set each tick):
     /// heartbeats then carry no usage snapshot — the ambient login's numbers
     /// would describe an account this engine is not running on
@@ -171,6 +174,17 @@ fn detected_os() -> String {
         "macos" => "macOS".into(),
         other => other.to_string(),
     }
+}
+
+/// A path cut to its last folders for a tag ("{topdir}/core/repos/pdy_core_intake/src"
+/// -> "…/pdy_core_intake/src"): the full lock path ran to 100 characters and
+/// overran the work queue's line.  The holder's id is shown beside it anyway.
+fn tail_path(path: &str) -> String {
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    format!("…/{}", parts[parts.len() - 2..].join("/"))
 }
 
 /// "2026-09-07T14:05:31Z" -> "14:05Z" for the retry-after tag
@@ -334,6 +348,7 @@ impl EngineRuntime {
             cluster_healthy_since: HashMap::new(),
             next_said: HashMap::new(),
             missing_said: std::sync::Mutex::new(Vec::new()),
+            githeal: crate::githeal::Healer::default(),
         }
     }
 
@@ -917,9 +932,12 @@ impl EngineRuntime {
         let reply = heartbeat.as_ref().ok().cloned().unwrap_or(Value::Null);
 
         // node-file sync and the designer build (crate::filesync, ENG-FILES):
-        // every served project, every tick, before any agent work
+        // every served project, every tick, before any agent work — once its
+        // checkout's git check after startup has passed (githeal.rs)
         for a in &served {
-            self.run_filesync(a, &reply);
+            if a.read_only || self.githeal.ready(&expand_topdir(&a.topdir), &a.project) {
+                self.run_filesync(a, &reply);
+            }
         }
 
         // GraphRAG (2026-09-29): chunk / document summaries waiting — Summary
@@ -1026,6 +1044,12 @@ impl EngineRuntime {
             };
             let topdir = expand_topdir(&a.topdir);
             let has_checkout = !topdir.is_empty() && std::path::Path::new(&topdir).is_dir();
+            // git left broken by a crash, or still being checked: nothing runs
+            // in the checkout (a broken one would fail every item in seconds);
+            // the healer logs what it repaired or why it holds
+            if has_checkout && !a.read_only && !self.githeal.ready(&topdir, project_name) {
+                continue;
+            }
             if !a.read_only {
                 self.ensure_test_sweep(project_name);
             }
@@ -1375,7 +1399,7 @@ impl EngineRuntime {
                             w.reason = Some(if i.run_now {
                                 run_now_wait_reason(project, by_id.get(holder).copied(), holder, &self.agents)
                             } else {
-                                format!("lock {path}")
+                                format!("lock {}", tail_path(path))
                             });
                         } else if let Some(h) = &hold {
                             w.reason = Some(h.clone());
@@ -1944,6 +1968,13 @@ impl EngineRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_path_in_a_tag_keeps_its_last_two_folders() {
+        assert_eq!(tail_path("{topdir}/core/repos/pdy_core_intake/src"), "…/pdy_core_intake/src");
+        assert_eq!(tail_path("{topdir}/src/"), "{topdir}/src/");
+        assert_eq!(tail_path("{topdir}/src"), "{topdir}/src");
+    }
 
     #[test]
     fn hold_reason_names_the_missing_token() {

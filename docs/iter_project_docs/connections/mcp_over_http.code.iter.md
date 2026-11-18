@@ -1,7 +1,7 @@
 ---
 id: ef4d98e0-e24d-4524-a1ac-14bc99635a4e
 name: "MCP over HTTP"
-desc: "iter_data's stateless MCP server at POST /mcp (Streamable HTTP, JSON-RPC 2.0, JSON responses, no sessions): 30 tools over the work queue, the project graph (read and edit), test logs, the settings graph and GraphRAG. The engine writes an MCP config into every agent session it starts, so Claude Code sessions call the tools with the engine's bearer token, X-Iter-Project and X-Iter-Workid; each call is replayed through the HTTP API router with the same authz."
+desc: "iter_data's stateless MCP server at POST /mcp (Streamable HTTP, JSON-RPC 2.0, JSON responses, no sessions): 34 tools over the work queue, the project graph (read and edit), requirement sections, test logs, the settings graph and GraphRAG. The engine writes an MCP config into every agent session it starts, so Claude Code sessions call the tools with the engine's bearer token, X-Iter-Project and X-Iter-Workid; each call is replayed through the HTTP API router with the same authz."
 creator: "stephen"
 teststate: inherit
 connects:
@@ -28,7 +28,8 @@ Tools: work queue (`status`, `workitem_*`, `capability`, `locks_list`),
 project graph (`graph_stats`, `graph_lookup`, `graph_node`,
 `graph_neighbors`, `graph_owner`, `graph_usecase`, `graph_node_create`,
 `graph_node_update`, `graph_edge_add`, `graph_edge_remove`, `testlogs`),
-settings (`settings_graph`, admin), GraphRAG (`rag_*`).
+requirements (`req_create`, `req_update`, `req_move`, `req_delete`: one `## ` section of a bizreq/techreq file),
+settings (`settings_graph`; admins see all, others the parts touching their projects), GraphRAG (`rag_*`).
 
 ## Auth and addressing
 

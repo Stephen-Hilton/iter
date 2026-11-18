@@ -435,11 +435,34 @@ fn item(name: String, agent: &str, lockdirs: Vec<String>, tags: Vec<Value>, requ
         "prework": [], "postwork": [], "request": request, "node": node})
 }
 
+<<<<<<< Updated upstream
 /// A sweep item's visible tags: `sweep` and the use cases it serves.  Its
 /// repeat key goes in `repeat_check` / `repeat_container` (`keyed`), never
 /// on the queue line.
 fn sweep_tags(ucs: &[String]) -> Vec<Value> {
     let mut t = vec![json!({"text": "sweep", "color": ""})];
+=======
+/// The `container:` tag value for a node: its file name without the
+/// `.<type>.iter.md` suffix ("{topdir}/infra/x/x-crate.code.iter.md" ->
+/// "x-crate"), because the full path ran to 135 characters and overran the
+/// work queue's line.  Anything that is not a node path is kept as is.
+fn container_name(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.strip_suffix(".iter.md").unwrap_or(file);
+    match stem.rsplit_once('.') {
+        Some((name, _type)) if !name.is_empty() => name,
+        _ => stem,
+    }
+}
+
+fn key_tags(check: &str, container: &str, ucs: &[String]) -> Vec<Value> {
+    let container = container_name(container);
+    let mut t = vec![
+        json!({"text": format!("{}{check}", iter_core::dedup::CHECK_TAG_PREFIX), "color": ""}),
+        json!({"text": format!("{}{container}", iter_core::dedup::CONTAINER_TAG_PREFIX), "color": ""}),
+        json!({"text": "sweep", "color": ""}),
+    ];
+>>>>>>> Stashed changes
     for u in ucs {
         t.push(json!({"text": format!("usecase:{u}"), "color": ""}));
     }
@@ -703,6 +726,16 @@ mod tests {
     /// One use case per sweep: its own tests and its parts' tests, the use
     /// case whose oldest runnable test ran longest ago (never run = oldest),
     /// that use case's tests oldest first; `wanted` picks one by name or slug.
+    #[test]
+    fn the_container_tag_is_the_node_name_not_its_path() {
+        assert_eq!(container_name("{topdir}/infra/repos/b/crates/pdy-crate-event-envelope/pdy-crate-event-envelope.code.iter.md"), "pdy-crate-event-envelope");
+        assert_eq!(container_name("{topdir}/a/b.test.iter.md"), "b");
+        assert_eq!(container_name("m43.loss.code.iter.md"), "m43.loss");
+        assert_eq!(container_name("clearing"), "clearing");
+        let tags = key_tags("no-tests", "{topdir}/core/x/x.code.iter.md", &[]);
+        assert_eq!(tags[1]["text"], "container:x");
+    }
+
     #[test]
     fn the_sweep_picks_the_use_case_tested_longest_ago() {
         let mut ua = v("UA", "usecase", ""); ua["name"] = json!("Pay a bill");

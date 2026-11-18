@@ -247,10 +247,11 @@ Checkout verbs work from a shell in the checkout:
 
 ## MCP
 
-iter_data serves a stateless MCP server at `POST /mcp` (Streamable HTTP, JSON). Send `Authorization: Bearer <token>`. `X-Iter-Project` / `X-Iter-Workid` set the default project and calling item. Every agent session the engine starts gets it, and every call goes through the same rules as HTTP. There are 30 tools:
+iter_data serves a stateless MCP server at `POST /mcp` (Streamable HTTP, JSON). Send `Authorization: Bearer <token>`. `X-Iter-Project` / `X-Iter-Workid` set the default project and calling item. Every agent session the engine starts gets it, and every call goes through the same rules as HTTP. There are 34 tools:
 
 - **Work queue:** `status`, `workitem_list`, `workitem_get`, `workitem_details`, `workitem_create`, `workitem_ask`, `workitem_reject`, `workitem_wait`, `workitem_doc`, `workitem_block`, `capability`, `locks_list`
 - **Project graph:** `graph_stats`, `graph_lookup`, `graph_node`, `graph_neighbors`, `graph_owner`, `graph_usecase`, `graph_node_create`, `graph_node_update`, `graph_edge_add`, `graph_edge_remove`, `testlogs`
+- **Requirements** (one `## ` section of a bizreq/techreq file): `req_create`, `req_update`, `req_move`, `req_delete`
 - **Settings:** `settings_graph`
 - **GraphRAG:** `rag_search`, `rag_status`, `rag_docs`, `rag_doc`, `rag_link_document`, `rag_add_document`
 

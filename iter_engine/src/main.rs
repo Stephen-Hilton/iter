@@ -16,6 +16,7 @@ mod engine;
 mod envstore;
 mod filesync;
 mod gate;
+mod githeal;
 mod init;
 mod merge;
 mod prompt;

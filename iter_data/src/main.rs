@@ -19,6 +19,8 @@ mod graph_view;
 mod graph_tests;
 mod mcp;
 mod mcp_docs;
+#[cfg(test)]
+mod mcp_tests;
 mod names;
 mod next;
 mod nodes;
