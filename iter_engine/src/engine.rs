@@ -824,6 +824,11 @@ impl EngineRuntime {
                 println!("[engine] {}: {n} document edit(s) applied", a.project);
             }
         }
+        // graph sync off (the default, crate::filesync::graph_sync_on): no
+        // scans, sends, sync checks, write-backs or sync commits
+        if !crate::filesync::graph_sync_on() {
+            return;
+        }
         let waiting = crate::assign::reply_names(reply, "files_waiting", &a.project);
         let st = self.filesync.entry(a.project.clone()).or_default();
         if let Err(e) = crate::filesync::tick(&self.api, &self.name, &a.project, &topdir, a.read_only, waiting, st) {
@@ -1273,6 +1278,35 @@ impl EngineRuntime {
         }
         let cap = max_agents(&project.maxagents, usage_pct) as usize;
         let account_name = account.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+
+        // git pause and repair (crate::gitrepair): three items in a row that
+        // failed on the same kind of git trouble pause this checkout; the
+        // incident is driven every tick, and while it lasts nothing starts
+        if crate::gitrepair::paused(topdir) {
+            let template = self
+                .api
+                .get("/api/tooling/_git_repair")
+                .ok()
+                .and_then(|r| r.get("body").and_then(|b| b.as_str()).map(String::from))
+                .filter(|b| !b.trim().is_empty())
+                .unwrap_or_else(|| crate::gitrepair::DEFAULT_PROMPT.to_string());
+            let hooks = RepairHooks {
+                api: self.api.clone(),
+                engine: self.name.clone(),
+                project: project.clone(),
+                topdir: topdir.to_string(),
+                account: account_name.clone(),
+                usable: account.is_some() || project.accounts.is_empty(),
+            };
+            crate::gitrepair::drive_with(topdir, &hooks, &crate::gitrepair::verify, &template);
+        }
+        if let Some(reason) = crate::gitrepair::hold_reason(topdir) {
+            if self.next_said.get(&project_name) != Some(&reason) {
+                println!("[engine] {project_name}: {reason} — holding");
+                self.next_said.insert(project_name.clone(), reason.clone());
+            }
+            hold = Some(reason);
+        }
 
         // maxdailycost (spec): null = unlimited, 0 = spend nothing, >0 = $/day cap
         if let Some(capusd) = project.maxdailycost {
@@ -1941,6 +1975,94 @@ impl EngineRuntime {
 }
 
 
+/// The engine's side of a git incident (crate::gitrepair::Hooks): the repair
+/// session on the project's account, requeues and the P0 through iter_data.
+struct RepairHooks {
+    api: Api,
+    engine: String,
+    project: Project,
+    topdir: String,
+    account: String,
+    /// an account is usable now (or the project bills none: the ambient login)
+    usable: bool,
+}
+
+impl crate::gitrepair::Hooks for RepairHooks {
+    fn ready(&self) -> bool {
+        self.usable
+    }
+
+    fn repair(&self, prompt: String) -> std::thread::JoinHandle<Result<String, String>> {
+        let row = self.api.get("/api/tooling/_git_repair").unwrap_or(Value::Null);
+        let model = row.get("model").and_then(|m| m.as_str()).filter(|m| !m.trim().is_empty()).unwrap_or("opus").to_string();
+        let flags: Vec<String> = row
+            .get("flags")
+            .and_then(|f| f.as_str())
+            .unwrap_or("--dangerously-skip-permissions")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let timeout = row.get("timeoutsec").and_then(|t| t.as_u64()).unwrap_or(1800);
+        let (project, account, topdir) = (self.project.clone(), self.account.clone(), self.topdir.clone());
+        std::thread::spawn(move || {
+            let ctx = crate::provider::AgentContext {
+                prompt,
+                cwd: std::path::PathBuf::from(&topdir),
+                extra_args: flags,
+                role: crate::provider::Role::Work,
+                ..Default::default()
+            };
+            let model = crate::provider::model_for(project.key(), &account, &model);
+            crate::provider::call(&project, &account, &model, &ctx, timeout, Some(80)).map(|o| o.text)
+        })
+    }
+
+    fn requeue(&self, ids: &[String], note: &str) -> usize {
+        let mut n = 0;
+        for id in ids {
+            let path = format!("/api/projects/{}/workitems/{id}", self.project.key());
+            for _ in 0..2 {
+                let Ok(mut fresh) = self.api.get(&path) else { break };
+                let state = fresh.get("state").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                if state != "failed" && state != "queued" {
+                    break; // running, done or moved by a person: not ours to requeue
+                }
+                let version = fresh.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+                fresh["state"] = json!("queued");
+                fresh["attempt"] = json!(0);
+                fresh["retry_after"] = json!("");
+                fresh["lasterror"] = json!(note);
+                match self.api.put(&format!("{path}?expect_version={version}"), &fresh) {
+                    Ok(_) => {
+                        let _ = self.api.post(&format!("{path}/details"), &json!({"key": "doc", "valuetype": "text", "value": note}));
+                        n += 1;
+                        break;
+                    }
+                    Err(e) if e.status == 409 => continue,
+                    Err(e) => {
+                        eprintln!("[engine] could not re-queue {id} after the git repair: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    fn file_p0(&self, name: &str, request: &str) -> Result<String, String> {
+        let body = json!({
+            "name": name, "agent": "code", "state": "queued", "priority": 0,
+            "lockdirs": [], "blockedby": [], "context": [], "model": "", "tags": [],
+            "repeat_check": "git-repair-failed", "repeat_container": crate::gitsafe::key(std::path::Path::new(&self.topdir)),
+            "createdby": format!("engine:{}", self.engine), "requestedby": format!("engine:{}", self.engine),
+            "prework": [], "postwork": [], "request": request,
+        });
+        let created = self.api.post(&format!("/api/projects/{}/workitems", self.project.key()), &body).map_err(|e| e.to_string())?;
+        Ok(created.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string())
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2402,6 +2524,117 @@ mod iter_tests {
         assert!(srv.calls_to("POST", "/locks/acquire").is_empty(), "next already took the locks");
         // the heartbeat names the served projects
         assert_eq!(srv.calls_to("POST", "/heartbeat")[0]["projects"], json!(["mp1", "mp2"]));
+    }
+
+    /// Graph sync off (the default): a tick over a served git checkout that
+    /// holds a node file, with the heartbeat saying graph edits wait, makes
+    /// no file-sync request at all (no scan is sent, no sync check, no
+    /// pending edits fetched), writes no sync state and commits nothing.
+    /// Switched on, the same tick talks to files/sync (the control).
+    #[test]
+    fn graph_sync_off_means_no_sync_requests_scans_or_commits() {
+        crate::envstore::set_for_test("ENGT_GS_TOKEN", "tok");
+        let t = topdir("gs");
+        crate::work::run_shell(&t, "git init -q && printf '# n\n' > src/n.code.iter.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm seed", 30).unwrap();
+        let asg = json!({"engine": "E1", "projects": [{"project": "gs", "topdir": t, "read_only": false, "state": "Running", "accounts": [mock_account("engt-gs", "ENGT_GS_TOKEN", 1)]}],
+            "accounts": [{"name": "engt-gs", "provider": "mock", "token_envar": "ENGT_GS_TOKEN"}]});
+        let st = Arc::new(Mutex::new(state(asg)));
+        st.lock().unwrap().heartbeat_reply = json!({"files_waiting": ["gs"], "build_waiting": []});
+        let srv = serve(st.clone());
+        let mut rt = rt_for(&srv);
+        let file_calls = |srv: &crate::client::fake::FakeServer| srv.calls.lock().unwrap().iter().filter(|(_, p, _)| p.contains("/files/")).count();
+        let commits = || crate::work::run_shell(&t, "git rev-list --count HEAD", 15).unwrap().trim().to_string();
+
+        crate::filesync::set_graph_sync(false);
+        rt.tick(&engine_of(&st));
+        rt.drain();
+        assert_eq!(file_calls(&srv), 0, "graph sync off: no file-sync request");
+        assert_eq!(commits(), "1", "graph sync off: no sync commit");
+        assert!(!std::path::Path::new(&t).join(".iter/filesync.json").exists(), "graph sync off: no scan state written");
+
+        crate::filesync::set_graph_sync(true);
+        rt.tick(&engine_of(&st));
+        rt.drain();
+        crate::filesync::set_graph_sync(false);
+        assert!(file_calls(&srv) > 0, "graph sync on: the same tick syncs");
+    }
+
+    /// The git pause and repair, through the real engine: three items that
+    /// failed on one git error class pause the checkout (no `next` is asked
+    /// while it is paused); the repair session runs on the project's account
+    /// with the `_git_repair` tooling row's prompt (mock directives here:
+    /// it removes the leftover MERGE_HEAD the engine's own check refuses);
+    /// the engine's check then passes, work is released and the three failed
+    /// items are queued again with their attempts reset.  `fixes` false: the
+    /// session fixes nothing, the checkout stays paused, one P0 is filed and
+    /// no second session starts however many ticks follow.
+    fn git_incident(tag: &str, fixes: bool) {
+        crate::envstore::set_for_test("ENGT_GR_TOKEN", "tok");
+        let t = topdir(tag);
+        crate::work::run_shell(&t, "git init -q && echo a > a.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm seed && git rev-parse HEAD > .git/MERGE_HEAD", 30).unwrap();
+        let asg = json!({"engine": "E1", "projects": [{"project": tag, "topdir": t, "read_only": false, "state": "Running", "accounts": [mock_account("engt-gr", "ENGT_GR_TOKEN", 1)]}],
+            "accounts": [{"name": "engt-gr", "provider": "mock", "token_envar": "ENGT_GR_TOKEN"}]});
+        let st = Arc::new(Mutex::new(state(asg)));
+        let body = if fixes { "repair\nmock: run rm -f .git/MERGE_HEAD\nmock: say REPAIRED: removed a leftover MERGE_HEAD" } else { "repair\nmock: say NOT REPAIRED: no idea" };
+        st.lock().unwrap().routes.insert("/api/tooling/_git_repair".into(), json!({"name": "_git_repair", "body": body}));
+        let failure = crate::gitsafe::Failure { class: crate::gitsafe::Class::Lock, command: "git add -A".into(), output: "fatal: Unable to create '/x/.git/index.lock': File exists.".into() };
+        let ids: Vec<String> = (1..=3).map(|i| format!("{tag}-failed-000{i}")).collect();
+        for id in &ids {
+            let mut w = item(id, tag, "failed on git", 5, &[]);
+            w.state = "failed".into();
+            w.attempt = 3;
+            st.lock().unwrap().items.insert(id.clone(), serde_json::to_value(&w).unwrap());
+            crate::gitrepair::record(&t, id, crate::gitrepair::Outcome::Git(failure.clone()));
+        }
+        assert!(crate::gitrepair::paused(&t));
+        let srv = serve(st.clone());
+        let mut rt = rt_for(&srv);
+        let nexts = |srv: &crate::client::fake::FakeServer| srv.calls_to("POST", "/next").len();
+        rt.tick(&engine_of(&st));
+        assert_eq!(nexts(&srv), 0, "paused: no next asked");
+        for _ in 0..100 {
+            if !crate::gitrepair::paused(&t) || crate::gitrepair::hold_reason(&t).is_some_and(|r| r.contains("P0")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            rt.tick(&engine_of(&st));
+        }
+        if fixes {
+            assert!(!crate::gitrepair::paused(&t), "released: {:?}", crate::gitrepair::hold_reason(&t));
+            assert!(!std::path::Path::new(&t).join(".git/MERGE_HEAD").exists(), "the session's repair ran in the checkout");
+            for id in &ids {
+                let puts = srv.calls_to("PUT", &format!("/workitems/{id}"));
+                assert!(puts.iter().any(|b| b["state"] == "queued" && b["attempt"] == 0), "{id} requeued with attempts reset: {puts:?}");
+                let rows = st.lock().unwrap().details.get(id).cloned().unwrap_or_default();
+                assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.contains("re-queued after the git repair"))), "{rows:?}");
+            }
+            rt.tick(&engine_of(&st));
+            assert!(nexts(&srv) > 0, "released: next is asked again");
+            assert!(srv.calls_to("POST", &format!("/projects/{tag}/workitems")).iter().all(|b| b["priority"] != 0), "no P0");
+        } else {
+            for _ in 0..10 {
+                rt.tick(&engine_of(&st));
+            }
+            assert!(crate::gitrepair::paused(&t), "still paused");
+            assert_eq!(nexts(&srv), 0, "never asked next while paused");
+            assert_eq!(crate::gitrepair::repairs_started(&t), 1, "one repair session only");
+            let p0 = srv.calls.lock().unwrap().iter().filter(|(m, p, b)| m == "POST" && p == &format!("/api/projects/{tag}/workitems") && b["priority"] == 0).map(|(_, _, b)| b.clone()).collect::<Vec<_>>();
+            assert_eq!(p0.len(), 1, "exactly one P0: {p0:?}");
+            assert_eq!(p0[0]["priority"], 0);
+            let req = p0[0]["request"].as_str().unwrap();
+            assert!(req.contains("MERGE_HEAD") && req.contains("NOT REPAIRED"), "{req}");
+        }
+        rt.drain();
+    }
+
+    #[test]
+    fn git_incident_repaired_releases_and_requeues() {
+        git_incident("gr-ok", true);
+    }
+
+    #[test]
+    fn git_incident_not_repaired_stays_paused_with_one_p0() {
+        git_incident("gr-bad", false);
     }
 
     /// The bills edge's switch/stop: the first account over its switch% hands

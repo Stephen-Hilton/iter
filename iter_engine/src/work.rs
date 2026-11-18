@@ -19,23 +19,11 @@ pub type RunOut = crate::provider::DispatchOut;
 /// briefing there helps nobody.
 pub const AGENTMEMORY_AGENTS: &[&str] = &["code", "refactor", "test", "testwriter", "deploy"];
 
-/// Legacy process-wide git lock.  Engine code uses [`git_lock`] —
-/// one mutex per checkout, so two projects never serialize each other; this
+/// Legacy process-wide git lock.  Engine code uses [`crate::gitsafe::guard`] —
+/// one lock per repository, so two projects never serialize each other; this
 /// static is kept only so older modules that still name it compile.
 #[allow(dead_code)]
 pub static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// The mutex every engine step that writes `topdir`'s git index holds
-/// (end-of-run commits, file-sync writes, builds), so two of them never race
-/// for that checkout's `.git/index.lock`.  One per checkout (iter: one
-/// engine serves many projects; their commits run in parallel).
-pub fn git_lock(topdir: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
-    let key = iter_core::platform::canonicalize(std::path::Path::new(topdir)).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| topdir.trim_end_matches('/').to_string());
-    let map = LOCKS.get_or_init(Default::default);
-    let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
-    m.entry(key).or_default().clone()
-}
 
 /// Stop requests the engine tick has seen for items this engine is running;
 /// the wait loop kills the session the moment its workid appears.
@@ -166,6 +154,8 @@ fn execute_one(
     let item = item.clone();
     CURRENT_WORKID.with(|w| *w.borrow_mut() = item.id.clone());
     CURRENT_LEASE.with(|l| *l.borrow_mut() = item.lease.clone());
+    // the git repair loop counts only this run's own git failures
+    crate::gitsafe::reset_failure();
     let details = fetch_details(api, project, &item);
 
     // a human answered the close-gate widget "accept": close without running
@@ -499,7 +489,7 @@ fn run_all(
 ) -> Result<RunOut, String> {
     let is_repo = std::path::Path::new(topdir).join(".git").exists();
     let has_remote = is_repo
-        && run_shell(topdir, "git remote", 15).map(|o| !o.trim().is_empty()).unwrap_or(false);
+        && crate::gitsafe::run(topdir, "git remote", 15).map(|o| !o.trim().is_empty()).unwrap_or(false);
 
     // the merge conflict resolver (merge.rs): one agent session in this
     // checkout, on this item's account, editing the conflicted files only
@@ -681,8 +671,7 @@ fn leftover_line(id8: &str, n: usize) -> String {
 pub(crate) fn commit_scoped(topdir: &str, item: &WorkItem, extra_paths: &[String]) -> Result<CommitOutcome, String> {
     // one index writer at a time in this engine: run threads and graph edits
     // share the checkout's .git/index (a second `git add` fails on index.lock)
-    let lock = git_lock(topdir);
-    let _git = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let _git = crate::gitsafe::guard(topdir);
     let scope = commit_scope(topdir, item, extra_paths);
     let msg = format!("iter: {} ({})", sanitize(&item.name), short(&item.id));
     let (scope_label, committed) = if scope.is_empty() && !item.lockdirs.is_empty() {
@@ -697,7 +686,7 @@ pub(crate) fn commit_scoped(topdir: &str, item: &WorkItem, extra_paths: &[String
         let spec = scope.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
         let _ = git_shell(topdir, &format!("git add -A -- {spec}"), 60);
         // renames off: the commit's pathspec must name both the old and the new path
-        let staged = run_shell(topdir, &format!("git diff --cached --name-only --no-renames -z -- {spec}"), 30).unwrap_or_default();
+        let staged = crate::gitsafe::run(topdir, &format!("git diff --cached --name-only --no-renames -z -- {spec}"), 30).unwrap_or_default();
         let ok = if staged.trim_matches('\0').trim().is_empty() {
             false
         } else {
@@ -716,7 +705,7 @@ pub(crate) fn commit_scoped(topdir: &str, item: &WorkItem, extra_paths: &[String
         };
         (format!("lock scope ({} paths)", scope.len()), ok)
     };
-    let outside_scope_dirty = run_shell(topdir, "git status --porcelain", 30)
+    let outside_scope_dirty = crate::gitsafe::run(topdir, "git status --porcelain", 30)
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0);
     println!("{}", leftover_line(short(&item.id), outside_scope_dirty));
@@ -767,20 +756,20 @@ pub(crate) fn git_run_evidence(topdir: &str, head_before: &str, head_after: &str
     } else {
         format!("--since={} {head_after}", shell_quote(&item.ts.receive))
     };
-    let log = run_shell(topdir, &format!("git log -n 2000 --format='{}' {range}", gate::COMMIT_LOG_FORMAT), 30).unwrap_or_default();
+    let log = crate::gitsafe::run(topdir, &format!("git log -n 2000 --format='{}' {range}", gate::COMMIT_LOG_FORMAT), 30).unwrap_or_default();
     let commits = gate::commits_with_id(&log, &item.id);
     let hashes: Vec<String> = commits.iter().map(|(h, _)| h.clone()).collect();
     let diffstat = if hashes.is_empty() {
         String::new()
     } else {
-        run_shell(topdir, &format!("git show --stat=120 --format='%h %s' {}{spec}", hashes.join(" ")), 30)
+        crate::gitsafe::run(topdir, &format!("git show --stat=120 --format='%h %s' {}{spec}", hashes.join(" ")), 30)
             .map(|s| gate::clip(s.trim(), 4_000))
             .unwrap_or_default()
     };
     let mut outside: Vec<(String, String)> = Vec::new();
     if !scope.is_empty() {
         for h in &hashes {
-            let files = run_shell(topdir, &format!("git show --name-only --no-renames --format= {h}"), 30).unwrap_or_default();
+            let files = crate::gitsafe::run(topdir, &format!("git show --name-only --no-renames --format= {h}"), 30).unwrap_or_default();
             for f in files.lines().map(str::trim).filter(|f| !f.is_empty()) {
                 if !in_scope(f, scope) && !outside.iter().any(|(p, _)| p == f) {
                     outside.push((f.to_string(), h.clone()));
@@ -791,7 +780,7 @@ pub(crate) fn git_run_evidence(topdir: &str, head_before: &str, head_after: &str
     let others = if head_before.is_empty() || head_before == head_after {
         Vec::new()
     } else {
-        run_shell(topdir, &format!("git log --format=%h%x09%s {head_before}..{head_after}{spec}"), 30)
+        crate::gitsafe::run(topdir, &format!("git log --format=%h%x09%s {head_before}..{head_after}{spec}"), 30)
             .unwrap_or_default()
             .lines()
             .filter_map(|l| l.split_once('\t'))
@@ -805,7 +794,7 @@ pub(crate) fn git_run_evidence(topdir: &str, head_before: &str, head_after: &str
     let untagged: Vec<(String, String)> = if scope.is_empty() {
         Vec::new()
     } else {
-        let scoped = run_shell(topdir, &format!("git log -n 200 --format='{}' {range}{spec}", gate::COMMIT_LOG_FORMAT), 30).unwrap_or_default();
+        let scoped = crate::gitsafe::run(topdir, &format!("git log -n 200 --format='{}' {range}{spec}", gate::COMMIT_LOG_FORMAT), 30).unwrap_or_default();
         gate::commits_without_any_id(&scoped).into_iter().filter(|(h, _)| !hashes.contains(h)).take(20).collect()
     };
     let others = others.into_iter().filter(|(h, _)| !untagged.iter().any(|(u, _)| u == h)).collect();
@@ -1349,20 +1338,11 @@ pub fn nudge(token: Option<String>, account: &str, cwd: &str) -> Result<(RunOut,
     Ok((out, started.elapsed().as_millis()))
 }
 
-/// A git step that writes the index: a lock held by a git process outside
-/// this engine (an agent's own `git` in its session) is waited out for up to
-/// ~10 s instead of failing the commit.
+/// A git step that writes the index, through crate::gitsafe: under the
+/// repository's git lock, after a stale-lock sweep, and retried with backoff
+/// when a lock (an agent's own `git` in its session) is in the way.
 pub(crate) fn git_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
-    let mut attempt = 0;
-    loop {
-        match run_shell(cwd, script, timeout_sec) {
-            Err(e) if e.contains("index.lock") && attempt < 20 => {
-                attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            r => return r,
-        }
-    }
+    crate::gitsafe::run(cwd, script, timeout_sec)
 }
 
 pub(crate) fn run_shell(cwd: &str, script: &str, timeout_sec: u64) -> Result<String, String> {
@@ -1414,7 +1394,7 @@ fn git_head(topdir: &str) -> String {
     if !std::path::Path::new(topdir).join(".git").exists() {
         return String::new();
     }
-    run_shell(topdir, "git rev-parse HEAD", 15).map(|s| s.trim().to_string()).unwrap_or_default()
+    crate::gitsafe::run(topdir, "git rev-parse HEAD", 15).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
 /// The (workid, lease) this worker thread is running ("" outside a run).
@@ -1633,12 +1613,6 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
     if let Some(s) = scope.filter(|s| !s.holds(child.id())) {
         println!("[engine] memory limit not applied: process {} did not enter cgroup {}", child.id(), s.dir().display());
     }
-    // a stop or timeout also ends what left the process group (setsid, nohup …)
-    let kill_scope = || {
-        if let Some(s) = scope {
-            s.kill();
-        }
-    };
     // on Windows, dropping `tree` (every return below) also kills whatever
     // the run left behind — see ProcessTree
     let tree = iter_core::platform::ProcessTree::adopt(&child);
@@ -1665,10 +1639,7 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
     let deadline = Instant::now() + Duration::from_secs(timeout_sec.max(1));
     loop {
         if let Some(why) = stop.check() {
-            tree.kill();
-            kill_scope();
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_gently(&mut child, &tree, scope, label);
             // logged, but the stop's own text is the error (it is matched exactly)
             stdin_done(feed);
             return Err(why);
@@ -1695,10 +1666,7 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
                     // timed-out session's background builders and loops must
                     // not keep writing to the shared checkout (CR 2026-09-25
                     // 2.3 — before, only the direct child was killed)
-                    tree.kill();
-                    kill_scope();
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop_gently(&mut child, &tree, scope, label);
                     let tail = stdin_done(feed).map(|r| r.suffix()).unwrap_or_default();
                     return Err(format!("timed out after {timeout_sec}s{tail}"));
                 }
@@ -1707,6 +1675,57 @@ fn wait_scoped(mut cmd: Command, input: Option<String>, timeout_sec: u64, stop: 
             Err(e) => return Err(format!("wait failed: {e}")),
         }
     }
+}
+
+/// How long a session asked to stop (SIGTERM) gets to end on its own before
+/// it is killed (SIGKILL): long enough for a `git` it is running to finish
+/// and remove its own lock file (bakugo, 2026-11-18: a fetch killed outright
+/// left `refs/remotes/origin/main.lock` behind and every later pull failed).
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(12);
+
+/// End a session and everything it started: SIGTERM to its process group
+/// (and to every process in its memory cgroup, which catches what left the
+/// group: setsid, nohup …), up to [`STOP_GRACE`] for them to exit, then
+/// SIGKILL to the group, `cgroup.kill` on the cgroup and the child reaped.
+/// Windows has no SIGTERM: the job object and `taskkill /T /F` end it at once.
+fn stop_gently(child: &mut std::process::Child, tree: &iter_core::platform::ProcessTree, scope: Option<&crate::memlimit::Scope>, label: &str) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id();
+        let signal = |sig: &str, target: &str| {
+            let _ = Command::new("kill").args([sig, "--", target]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        };
+        signal("-TERM", &format!("-{pgid}"));
+        let in_scope = || scope.map(|s| s.pids()).unwrap_or_default();
+        for pid in in_scope() {
+            signal("-TERM", &pid.to_string());
+        }
+        let group_alive = || Command::new("kill").args(["-0", "--", &format!("-{pgid}")]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        let started = Instant::now();
+        let mut leader_done = false;
+        loop {
+            if !leader_done {
+                leader_done = matches!(child.try_wait(), Ok(Some(_)));
+            }
+            if leader_done && !group_alive() && in_scope().is_empty() {
+                break;
+            }
+            if started.elapsed() >= STOP_GRACE {
+                engine_log(format!("[engine] {}: still running {}s after SIGTERM — sending SIGKILL", if label.is_empty() { "session" } else { label }, STOP_GRACE.as_secs()));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        signal("-KILL", &format!("-{pgid}"));
+    }
+    #[cfg(not(unix))]
+    let _ = label;
+    tree.kill();
+    if let Some(s) = scope {
+        s.kill();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The gate's decision for a successful agent run.
@@ -2026,6 +2045,17 @@ fn close(api: &Api, _engine_name: &str, project: &Project, topdir: &str, item: W
             return false;
         }
         None => {}
+    }
+
+    // the git repair loop (crate::gitrepair) hears every closed run: a failure
+    // whose error carries one of the engine's own failed git commands counts
+    // toward pausing the checkout; anything else ends a streak
+    if !stopped {
+        let outcome = match (&result, crate::gitsafe::last_failure()) {
+            (Err(e), Some(f)) if f.output.lines().find(|l| !l.trim().is_empty()).is_some_and(|l| e.contains(l.trim())) => crate::gitrepair::Outcome::Git(f),
+            _ => crate::gitrepair::Outcome::Other,
+        };
+        crate::gitrepair::record(topdir, &item.id, outcome);
     }
 
     // the close gate decides what "ok" closes to
@@ -2495,6 +2525,51 @@ mod tests {
             let _ = Command::new("pkill").args(["-f", &marker]).status();
         }
         assert!(!alive, "the background `{marker}` outlived the timeout");
+    }
+
+    /// A stopped or timed-out session gets SIGTERM first and time to end on
+    /// its own (2026-11-18: a git it runs must be able to remove its lock):
+    /// this session's TERM handler needs a full second before it writes its
+    /// marker and exits, which an immediate SIGKILL would never allow.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_session_gets_sigterm_and_time_to_finish_before_sigkill() {
+        let dir = std::env::temp_dir().join(format!("iter-term-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let marker = dir.join("got-term");
+        let _ = std::fs::remove_file(&marker);
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(format!("trap 'sleep 1; echo term > {}; exit 0' TERM; while true; do sleep 0.1; done", marker.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+        let r = wait_with_timeout(cmd, 1);
+        assert!(r.unwrap_err().contains("timed out after 1s"));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default().trim(), "term", "the session got SIGTERM and could finish its handler");
+        assert!(started.elapsed() < STOP_GRACE + Duration::from_secs(1), "it ended on its own, before the grace ran out");
+    }
+
+    /// A session that ignores SIGTERM is killed (SIGKILL) once the grace
+    /// period is over, its whole process group with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_that_ignores_sigterm_is_killed_after_the_grace_period() {
+        let marker = format!("sleep {}", 4000 + std::process::id() % 997);
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(format!("trap '' TERM; {marker} & sleep 60")).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let started = Instant::now();
+        let r = wait_with_timeout(cmd, 1);
+        let took = started.elapsed();
+        assert!(r.unwrap_err().contains("timed out after 1s"));
+        assert!(took >= STOP_GRACE, "SIGKILL only after the grace period ({took:?})");
+        assert!(took < STOP_GRACE + Duration::from_secs(5), "but not much later ({took:?})");
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = Command::new("pgrep").args(["-f", &marker]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
+        if alive {
+            let _ = Command::new("pkill").args(["-KILL", "-f", &marker]).status();
+        }
+        assert!(!alive, "the TERM-ignoring background `{marker}` was killed too");
     }
 
     /// F1 (CR 5.3 fact 2, 8.2): every exit from a run clears the lease in

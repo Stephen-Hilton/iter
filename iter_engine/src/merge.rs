@@ -22,7 +22,7 @@
 //! succeeds.
 
 use crate::client::Api;
-use crate::work::{git_lock, git_shell, run_shell};
+use crate::work::git_shell;
 use iter_core::{Project, WorkItem};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -73,11 +73,11 @@ fn q(s: &str) -> String {
 
 /// (remote, branch) to pull from and push to; None without a remote.
 fn upstream(topdir: &str) -> Result<Option<(String, String)>, String> {
-    let remotes = run_shell(topdir, "git remote", 15)?;
+    let remotes = crate::gitsafe::run(topdir, "git remote", 15)?;
     let Some(remote) = remotes.lines().map(str::trim).find(|r| *r == "origin").or_else(|| remotes.lines().map(str::trim).find(|r| !r.is_empty())) else {
         return Ok(None);
     };
-    let branch = run_shell(topdir, "git rev-parse --abbrev-ref HEAD", 15)?.trim().to_string();
+    let branch = crate::gitsafe::run(topdir, "git rev-parse --abbrev-ref HEAD", 15)?.trim().to_string();
     Ok(Some((remote.to_string(), branch)))
 }
 
@@ -90,7 +90,7 @@ fn merging(topdir: &str) -> bool {
 }
 
 fn unmerged(topdir: &str) -> Vec<String> {
-    run_shell(topdir, "git diff --name-only --diff-filter=U", 15)
+    crate::gitsafe::run(topdir, "git diff --name-only --diff-filter=U", 15)
         .map(|o| o.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
         .unwrap_or_default()
 }
@@ -116,11 +116,13 @@ pub fn pull(topdir: &str, resolver: Option<&Resolver>) -> Result<(), MergeError>
     if branch == "HEAD" {
         return Err(MergeError::Other("the checkout is on a detached HEAD: nothing to pull into".into()));
     }
-    let lock = git_lock(topdir);
-    let _g = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let _g = crate::gitsafe::guard(topdir);
+    // a lock file a killed git left behind would refuse this pull and every
+    // later one (bakugo, 2026-11-18): cleared first when no live git uses it
+    crate::gitsafe::sweep(Path::new(topdir), true);
     if merging(topdir) {
         // a merge some earlier run left behind: start from a clean tree
-        let _ = run_shell(topdir, "git merge --abort", 30);
+        let _ = crate::gitsafe::run(topdir, "git merge --abort", 30);
     }
     let err = match git_shell(topdir, &format!("git pull -q --no-rebase --no-edit {} {}", q(&remote), q(&branch)), 180) {
         Ok(_) => {
@@ -134,8 +136,8 @@ pub fn pull(topdir: &str, resolver: Option<&Resolver>) -> Result<(), MergeError>
         // not a content conflict (offline, local edits in the way, …): nothing was merged
         return Err(MergeError::Other(format!("git pull failed: {}", err.trim())));
     }
-    let ours = run_shell(topdir, "git log --oneline --no-decorate MERGE_HEAD..HEAD", 15).unwrap_or_default();
-    let theirs = run_shell(topdir, "git log --oneline --no-decorate HEAD..MERGE_HEAD", 15).unwrap_or_default();
+    let ours = crate::gitsafe::run(topdir, "git log --oneline --no-decorate MERGE_HEAD..HEAD", 15).unwrap_or_default();
+    let theirs = crate::gitsafe::run(topdir, "git log --oneline --no-decorate HEAD..MERGE_HEAD", 15).unwrap_or_default();
     let why = match resolver {
         None => "no resolver here (a background push): the next work item's merge resolves it".to_string(),
         Some(r) => match resolve(topdir, r, &files, &ours, &theirs) {
@@ -147,7 +149,7 @@ pub fn pull(topdir: &str, resolver: Option<&Resolver>) -> Result<(), MergeError>
             Err(why) => why,
         },
     };
-    let _ = run_shell(topdir, "git merge --abort", 30);
+    let _ = crate::gitsafe::run(topdir, "git merge --abort", 30);
     Err(MergeError::Conflict(Conflict { files, ours: ours.trim().into(), theirs: theirs.trim().into(), why }))
 }
 
@@ -246,7 +248,7 @@ pub fn push(topdir: &str, resolver: Option<&Resolver>) -> Result<(), MergeError>
     let cmd = format!("git push -q {} HEAD", q(&remote));
     let mut attempt = 1;
     loop {
-        let err = match run_shell(topdir, &cmd, 180) {
+        let err = match crate::gitsafe::run(topdir, &cmd, 180) {
             Ok(_) => return Ok(()),
             Err(e) => e,
         };
@@ -318,6 +320,7 @@ pub fn hold_reason(topdir: &str, items: &[WorkItem]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work::run_shell;
 
     fn sh(cwd: &Path, script: &str) {
         run_shell(&cwd.to_string_lossy(), script, 60).unwrap_or_else(|e| panic!("{script}: {e}"));

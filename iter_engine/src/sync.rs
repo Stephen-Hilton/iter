@@ -122,6 +122,15 @@ pub fn sync_verb(c: &Conn, read_only: bool) -> i32 {
         eprintln!("iter sync: no project (set --project / ITER_PROJECT, or run inside a checkout with a global/*.project.iter.md)");
         return 2;
     }
+    // the engine's graph sync switch reaches its children as $ITER_GRAPH_SYNC
+    let (on, warning) = crate::filesync::resolve_graph_sync(None, std::env::var(crate::filesync::GRAPH_SYNC_ENV).ok().as_deref());
+    if let Some(w) = warning {
+        eprintln!("iter sync: {w}");
+    }
+    if !on {
+        println!("iter sync: graph sync is off ({}=on turns it on) — nothing was scanned, sent or written", crate::filesync::GRAPH_SYNC_ENV);
+        return 0;
+    }
     let mut st = crate::filesync::FileSyncState::default();
     match crate::filesync::tick(api, &engine_name(), &c.project, &c.topdir, read_only, true, &mut st) {
         Ok(()) => {

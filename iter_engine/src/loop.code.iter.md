@@ -49,6 +49,19 @@ until stopped (`--ticks N` for tests, then `drain`). Each `tick`:
    (`reconcile_waits`, "blocked by: …") and breaks or reports deadlocks (`detect_deadlocks`); then calls
    `get_next` (`POST /api/projects/{p}/next`, with the `run_now` hint when the cap is full) and hands each
    claimed item to `start_claimed`, which spawns the Work runner.
+6. Graph sync is off unless `--graph-sync on` / `ITER_GRAPH_SYNC=on` (`main` logs which, once):
+   `run_filesync` then returns before `filesync::tick`, so no scans, sends, sync checks, write-backs or
+   sync commits happen. `dispatch` also drives a git incident (`gitrepair::drive_with`) and holds the
+   checkout while `gitrepair::hold_reason` names one: three items in a row failing with one git error
+   class (`gitsafe::classify`) start one repair session, then the engine's own check releases work and
+   requeues those items, or keeps the checkout paused and files one P0.
+
+## Git serialization
+
+Every engine git command (`work.rs`, `merge.rs`, `filesync.rs`) runs through `gitsafe`: one at a time per
+repository (in-process mutex plus `flock` on `.git/iter-engine-git.mutex`, which `iter` verbs run by agents
+also take), after a sweep of stale `*.lock` files, retried on lock errors. Agents' own `git` commands in
+their Bash tool do not go through it.
 
 ## What goes in and out
 

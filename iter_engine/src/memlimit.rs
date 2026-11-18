@@ -483,6 +483,21 @@ impl Scope {
         self.leaf.ends_with(rel.trim_start_matches('/'))
     }
 
+    /// Every process in the scope and its child cgroups now (best effort).
+    pub fn pids(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut stack = vec![self.dir.clone()];
+        while let Some(d) = stack.pop() {
+            if let Ok(t) = std::fs::read_to_string(d.join("cgroup.procs")) {
+                out.extend(t.lines().filter_map(|l| l.trim().parse::<u32>().ok()));
+            }
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                stack.extend(rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()));
+            }
+        }
+        out
+    }
+
     /// Kill every process in the scope now, however it was started
     /// (`cgroup.kill`, Linux 5.14+); best effort.
     pub fn kill(&self) {

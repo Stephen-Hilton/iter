@@ -56,6 +56,41 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// The graph sync switch (2026-11-18): node-file sync in both directions —
+/// the scans, sends and sync checks of [`tick`] (file → graph) and the
+/// graph-edit write-backs and their commits (graph → file) — runs only when
+/// on.  Default off: on bakugo the sync check rewrote one 777-line node file
+/// back and forth every ~2 minutes (480 commits in 24 h) on a slow disk.
+/// `--graph-sync on|off`, else `$ITER_GRAPH_SYNC`, else off.  The designer
+/// build ([`build`], one human-started commit) and GraphRAG document rows
+/// (crate::datasync) are not part of it.
+pub const GRAPH_SYNC_ENV: &str = "ITER_GRAPH_SYNC";
+static GRAPH_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Is graph sync on in this process?
+pub fn graph_sync_on() -> bool {
+    GRAPH_SYNC.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn set_graph_sync(on: bool) {
+    GRAPH_SYNC.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The switch from the flag, else the environment value, else off; a value
+/// that is neither on nor off is a warning and counts as off.
+pub fn resolve_graph_sync(flag: Option<&str>, env: Option<&str>) -> (bool, Option<String>) {
+    let (v, from) = match (flag.map(str::trim).filter(|v| !v.is_empty()), env.map(str::trim).filter(|v| !v.is_empty())) {
+        (Some(f), _) => (f, "--graph-sync"),
+        (None, Some(e)) => (e, GRAPH_SYNC_ENV),
+        (None, None) => return (false, None),
+    };
+    match v.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => (true, None),
+        "off" | "false" | "0" | "no" => (false, None),
+        _ => (false, Some(format!("{from}={v} is neither on nor off: graph sync stays off"))),
+    }
+}
+
 /// A full walk of the scan roots at least this often.
 pub const FULL_EVERY: Duration = Duration::from_secs(300);
 /// The sync check against the graph (files/reconcile) at most this often.
@@ -172,27 +207,22 @@ fn canon(topdir: &Path) -> PathBuf {
 
 // ---------------------------------------------------------------- git
 
-/// One git command in `top`; a locked index (an agent's own git) is waited
-/// out for up to ~10 s.
+/// One git command in `top`, through crate::gitsafe: under the repository's
+/// git lock, retried with backoff when a lock is in the way.
 pub fn git(top: &Path, args: &[&str]) -> Result<String, String> {
-    for attempt in 0.. {
+    let what = format!("git {}", args.join(" "));
+    crate::gitsafe::retrying(&top.to_string_lossy(), &what, || {
         let out = Command::new("git")
             .args(args)
             .current_dir(top)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
-            .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+            .map_err(|e| format!("{what}: {e}"))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
         }
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if err.contains("index.lock") && attempt < 20 {
-            std::thread::sleep(Duration::from_millis(500));
-            continue;
-        }
-        return Err(format!("git {} failed: {err}", args.join(" ")));
-    }
-    unreachable!()
+        Err(format!("{what} failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    })
 }
 
 fn is_repo(top: &Path) -> bool {
@@ -216,8 +246,7 @@ pub fn commit_paths(top: &Path, rels: &[String], msg: &str) -> Result<Option<Str
     if rels.is_empty() || !is_repo(top) {
         return Ok(None);
     }
-    let lock = crate::work::git_lock(&top.to_string_lossy());
-    let _g = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let _g = crate::gitsafe::guard(&top.to_string_lossy());
     // a path git ignores can never be committed; a deleted path git never
     // tracked has nothing to commit
     let present: Vec<PathBuf> = rels.iter().map(|r| top.join(r)).filter(|p| p.exists()).collect();

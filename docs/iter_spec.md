@@ -311,6 +311,15 @@ delegated (`Delegate=yes`) the engine moves itself to `<unit>/engine` and runs e
 `<unit>/agent-<n>-<item>/session` (limit and `memory.oom.group=1` on `agent-…`) and each script `iter runtests` runs
 inside it in `<unit>/agent-<n>-<item>/test-…` (found through `ITER_MEM_CGROUP`). Otherwise one startup line says
 the limits are off and why, and nothing else changes.
+Graph sync (`iter_engine/src/filesync.rs`): `--graph-sync on|off` or `ITER_GRAPH_SYNC`, default **off** (2026-11-18).
+Off, the engine runs no node-file scans, sends, sync checks, graph-edit write-backs or sync commits, and `iter sync`
+does nothing; one startup line says which way it is set. The designer build and GraphRAG document rows are not part of it.
+Git (`iter_engine/src/gitsafe.rs`, `gitrepair.rs`): every engine git command for a repository runs one at a time
+(in-process mutex + `flock` on `.git/iter-engine-git.mutex`), after a sweep that deletes `*.lock` files under the git
+dir older than 2 minutes when no live git process uses the repository, and is retried with backoff on a lock error.
+Three items in a row failing with one git error class pause the checkout, start one repair session, and release work
+(requeueing the failed items) only when the engine's own check passes; otherwise it stays paused and files one P0.
+A stopped or timed-out session gets SIGTERM, 12 s, then SIGKILL.
 `.env` holds `ITER_ENGINE_TOKEN` (iter_data credential) + LLM tokens (`token_envar`s) + other secrets.
 Nothing else is read from disk. `--config` is removed. The engine registers itself (`PUT /api/engines/{name}`) if missing.
 

@@ -18,6 +18,8 @@ ENV_FILE="${ITER_ENV_FILE:-$REPO/.env}"
 envval() { [ -f "$ENV_FILE" ] && grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//' || true; }
 PASS_ADMIN="${ITER_ADMIN_PASSWORD:-$(envval ITER_ADMIN_PASSWORD)}"
 ENGINE_BIN="${ITER_ENGINE_BIN:-$REPO/target/debug/iter_engine}"
+# node-file sync with the graph is off by default (2026-11-18); this smoke test exercises it
+export ITER_GRAPH_SYNC=on
 TS=$(date +%s); P="smoke5_$TS"; ENG="smoke5_eng_$TS"; AG="smoke5_agent_$TS"; ACCT="smoke5_acct_$TS"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/iter-smoke.XXXXXX")"; TOP="$SCRATCH/repo"; ENVF="$SCRATCH/engine.env"; KEYF="$SCRATCH/engine.key"
 # the engine's trusted-certificate file stays in the scratch dir; curl skips

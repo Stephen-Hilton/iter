@@ -498,3 +498,16 @@ fn the_sync_check_resends_queues_and_removes_only_what_is_really_gone() {
     assert_eq!(syncs(&srv).len(), before, "no delete (the file asked for goes out next tick)");
     assert_eq!(st.last.reconciled, Some((1, 1, 0)));
 }
+
+/// The graph sync switch: the flag beats the environment, anything but
+/// on/off is a warning and off, and nothing set means off.
+#[test]
+fn graph_sync_is_off_unless_switched_on() {
+    assert_eq!(resolve_graph_sync(None, None), (false, None));
+    assert_eq!(resolve_graph_sync(None, Some("on")), (true, None));
+    assert_eq!(resolve_graph_sync(Some("off"), Some("on")), (false, None));
+    assert_eq!(resolve_graph_sync(Some("ON"), None), (true, None));
+    assert_eq!(resolve_graph_sync(Some(" "), Some("off")), (false, None));
+    let (on, w) = resolve_graph_sync(None, Some("maybe"));
+    assert!(!on && w.unwrap().contains("ITER_GRAPH_SYNC=maybe"));
+}

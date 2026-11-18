@@ -144,6 +144,8 @@ log_since() { tail -n +"$(( $1 + 1 ))" "$ENGINE_LOG"; }
 # usage snapshots live under $HOME/.claude by default: isolate them so the
 # developer's real snapshots never gate this engine
 export ITER_USAGE_DIR="$SCRATCH/usage"; mkdir -p "$ITER_USAGE_DIR"
+# node-file sync with the graph is off by default (2026-11-18); these tests exercise it
+export ITER_GRAPH_SYNC=on
 FUT=$(( $(date +%s) + 86400 ))
 snap() { printf '{"ts":"%s","rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$FUT" "$3" "$FUT" > "$ITER_USAGE_DIR/iter-usage-$1.json"; }

@@ -16,6 +16,8 @@ mod engine;
 mod envstore;
 mod filesync;
 mod gate;
+mod gitrepair;
+mod gitsafe;
 mod init;
 mod merge;
 mod prompt;
@@ -90,6 +92,11 @@ struct Args {
     /// swap one test script may use besides [$ITER_TEST_SWAP_MAX, else 512M]
     #[arg(long)]
     test_swap_max: Option<String>,
+    /// node-file sync with the graph, both directions (scans, sends, sync
+    /// checks, graph-edit write-backs and their commits): on or off
+    /// [$ITER_GRAPH_SYNC, else off]
+    #[arg(long)]
+    graph_sync: Option<String>,
     /// run N ticks then drain and exit (0 = forever); used by tests
     #[arg(long, default_value_t = 0)]
     ticks: u64,
@@ -150,6 +157,13 @@ fn main() {
     // SAFETY: still single-threaded (see envstore::init); Git Bash in every
     // child makes real symlinks instead of copying (iter_core::platform)
     unsafe { iter_core::platform::init_child_env() };
+    // graph sync (crate::filesync, 2026-11-18): off unless switched on (the
+    // env file may set it: envstore::init put its values in the environment).
+    // Children (`iter sync` in an agent's session) inherit the outcome.
+    let (graph_sync, graph_sync_warning) =
+        filesync::resolve_graph_sync(args.graph_sync.as_deref(), std::env::var(filesync::GRAPH_SYNC_ENV).ok().as_deref());
+    // SAFETY: still single-threaded, as above
+    unsafe { std::env::set_var(filesync::GRAPH_SYNC_ENV, if graph_sync { "on" } else { "off" }) };
     let Some(data_url) = resolve_data_url(args.data_url.as_deref(), std::env::var("ITER_DATA_URL").ok().as_deref()) else {
         eprintln!("usage: iter_engine --data-url <iter_data url> [--env-file <path>] [--key-file <path>] [--name <engine name>]");
         eprintln!("(no --data-url given and $ITER_DATA_URL is not set)");
@@ -199,6 +213,15 @@ fn main() {
         println!("[engine] {w}");
     }
     memlimit::init(limits);
+    if let Some(w) = graph_sync_warning {
+        println!("[engine] {w}");
+    }
+    filesync::set_graph_sync(graph_sync);
+    println!(
+        "[engine] graph sync is {} (--graph-sync / ${})",
+        if graph_sync { "ON: node files and the graph are kept in step both ways" } else { "OFF: no node-file scans, sends, sync checks, write-backs or sync commits" },
+        filesync::GRAPH_SYNC_ENV
+    );
     let backend = api.get("/health").ok().and_then(|h| h["backend"].as_str().map(String::from)).unwrap_or_else(|| "unreachable".into());
     let mut rt = engine::EngineRuntime::new(api, name.clone(), env_file.clone());
     if args.ticks > 0 {
