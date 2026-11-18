@@ -88,4 +88,4 @@ was read from `git diff stash@{1}^1 stash@{1}`.
 ## Still unresolved, and not built
 
 - No conflict markers remain on this branch (`sweep.rs` was resolved by taking upstream).
-- Compile status: see the commit that resolved `sweep.rs` and the `cargo check` result reported with it.
+- `cargo check --all-targets -p iter_engine -p iter_data` passes on this branch (2026-11-18, exit 0), so code and tests compile. No tests have been run: `mcp_tests.rs` was written against the older MCP wording and may fail.
